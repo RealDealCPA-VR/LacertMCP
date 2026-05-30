@@ -1,0 +1,70 @@
+using System;
+using System.CommandLine;
+using LacertMCP.Cli.Storage;
+
+namespace LacertMCP.Cli.Commands
+{
+    /// <summary>
+    /// <c>lacerte-mcp login [--app-name X] [--tax-year Y]</c>
+    ///
+    /// <para>
+    /// Re-runs the SDK <c>Register()</c> against the existing GUID to refresh the 24-hour
+    /// Intuit session. Silent if the ticket cache is warm; surfaces the Intuit sign-in window
+    /// if expired. Per agent 02 §3, this is the only path that legitimately re-opens the
+    /// sign-in dialog — the MCP server itself never does.
+    /// </para>
+    /// </summary>
+    public static class LoginCommand
+    {
+        public static Command Build()
+        {
+            var cmd = new Command("login",
+                "Refresh the 24-hour Intuit sign-in for the existing AppID.");
+
+            var appNameOpt = new Option<string>("--app-name", () => "Operator Lacerte MCP",
+                "Friendly name to pass to Register (must match the one used at first register).");
+            var taxYearOpt = new Option<int>("--tax-year", () => DateTime.UtcNow.Year - 1,
+                "Tax year scope for the login.");
+
+            cmd.AddOption(appNameOpt);
+            cmd.AddOption(taxYearOpt);
+
+            cmd.SetHandler((context) =>
+            {
+                var appName = context.ParseResult.GetValueForOption(appNameOpt)!;
+                var taxYear = context.ParseResult.GetValueForOption(taxYearOpt);
+                context.ExitCode = Run(appName, taxYear);
+            });
+
+            return cmd;
+        }
+
+        public static int Run(string appName, int taxYear)
+        {
+            var existing = AppIdStore.Get();
+            if (!existing.HasValue)
+            {
+                Console.Error.WriteLine("No AppID found. Run `lacerte-mcp register` first.");
+                return 1;
+            }
+
+            Console.WriteLine("Refreshing Lacerte SDK session:");
+            Console.WriteLine($"  AppID  : {existing.Value:D}");
+            Console.WriteLine($"  AppName: {appName}");
+            Console.WriteLine($"  TaxYear: {taxYear}");
+            Console.WriteLine();
+
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+            {
+                Console.WriteLine("[stub] Live login requires Windows + Lacerte SDK.");
+                return 0;
+            }
+
+            // Live wiring lands in Phase 9 (Bridge/Registration.cs).
+            Console.WriteLine("[stub] Lacerte SDK bridge not yet wired into the CLI (Phase 9 task #63).");
+            Console.WriteLine("       Once Phase 9 lands this will silently refresh if the 24h cache");
+            Console.WriteLine("       is warm, or surface the Intuit sign-in window if expired.");
+            return 0;
+        }
+    }
+}

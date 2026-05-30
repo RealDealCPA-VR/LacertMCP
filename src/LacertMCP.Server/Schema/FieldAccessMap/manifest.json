@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "modules": [
+    "individual",
+    "corporate",
+    "partnership",
+    "scorp",
+    "fiduciary",
+    "exempt",
+    "estate",
+    "gift",
+    "benefit"
+  ],
+  "overlays": [
+    "ty21-not-supported"
+  ],
+  "lastUpdated": "2026-05-30",
+  "sources": [
+    "Lacerte_MCP_Structure_Spec.md",
+    "docs/research/agents/04-field-access-map.md"
+  ]
+}

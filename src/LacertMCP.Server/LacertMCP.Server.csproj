@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>LacertMCP.Server</RootNamespace>
+    <AssemblyName>LacertMCP.Server</AssemblyName>
+    <!-- Required for COM/.NET mixed-mode load of LacerteSDK_Access -->
+    <UseAppConfig>true</UseAppConfig>
+    <AppConfig>App.config</AppConfig>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MCP server SDK (Microsoft + Anthropic official). Use the latest stable 1.x. -->
+    <PackageReference Include="ModelContextProtocol" Version="0.3.0-preview.4" />
+    <!-- Hosting + DI + logging. 8.0.x is the last line that supports net48 cleanly. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <!-- System.Text.Json is in BCL on net48 starting with 8.0.5 via NuGet; pull explicitly. -->
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Data.Odbc ships in the net48 BCL — no PackageReference needed. -->
+    <Reference Include="System.Data" />
+    <Reference Include="System.Configuration" />
+    <!-- Microsoft.CSharp is required for `dynamic` keyword usage in Bridge/* (late-bound COM calls). -->
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Sharded JSON field-access map — loaded at runtime by FieldAccessMapLoader.
+         Copy the entire tree (base/*.json + overlays/*.json + manifest.json) to
+         the build output so the loader can read them next to the assembly. -->
+    <Content Include="Schema\FieldAccessMap\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Expose internal members (e.g. FieldAccessMapLoader.ResetCacheForTests)
+         to the test assembly. Required by FieldAccessMapCoverageTests and the
+         AccessMapTestFixture used by Tools tests. -->
+    <InternalsVisibleTo Include="LacertMCP.Tests" />
+  </ItemGroup>
+
+</Project>

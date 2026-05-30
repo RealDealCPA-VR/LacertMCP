@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>LacertMCP.FieldAccessDumper</RootNamespace>
+    <AssemblyName>LacertMCP.FieldAccessDumper</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pull in the Server assembly so we can call FieldAccessMapLoader,
+         SimulationStore.SimulateFieldWrite, and the Bridge interfaces
+         directly. Live IDBFReader / Writer probing happens via the same
+         Bridge wiring the runtime uses. -->
+    <ProjectReference Include="..\LacertMCP.Server\LacertMCP.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Text.Json on net48 ships via this PackageReference. -->
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+
+</Project>

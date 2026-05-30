@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>LacertMCP.Cli</RootNamespace>
+    <AssemblyName>lacerte-mcp</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- System.CommandLine is still officially preview at the time of writing
+         (the team has signaled GA but it's not stamped stable yet). Preview is
+         fine for an operator CLI; pin to a known-good build. -->
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reuse Credential Manager / registration helpers from the server assembly. -->
+    <ProjectReference Include="..\LacertMCP.Server\LacertMCP.Server.csproj" />
+  </ItemGroup>
+
+</Project>

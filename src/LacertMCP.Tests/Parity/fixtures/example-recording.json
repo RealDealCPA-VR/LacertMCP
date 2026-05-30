@@ -1,0 +1,32 @@
+{
+  "_comment": "Hand-authored stub recording for the F10 RecordingBridge harness. Demonstrates the recording-file format so the parity tests can prove the playback adapter wires through ILacerteBridge end-to-end. One entry per (op, argsFingerprint) — the bridge replays the matching result when the session manager calls into it. NOTE: the session manager passes appId=string.Empty when no AppID is stored in Credential Manager (off-Windows / dev / CI), so the fixture pins appId to '' to match the actual chokepoint args.",
+  "calls": [
+    {
+      "op": "CanUseNewApis",
+      "args": {
+        "appId": "",
+        "year": 2024,
+        "module": "I"
+      },
+      "result": true
+    },
+    {
+      "op": "CanUseNewApis",
+      "args": {
+        "appId": "",
+        "year": 2019,
+        "module": "I"
+      },
+      "result": false
+    },
+    {
+      "op": "Register",
+      "args": {
+        "appName": "Lacerte MCP",
+        "appId": "",
+        "taxYear": 2024
+      },
+      "result": 201
+    }
+  ]
+}

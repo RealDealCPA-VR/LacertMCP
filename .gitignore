@@ -1,0 +1,37 @@
+node_modules/
+dist/
+*.log
+logs/
+.env
+.env.local
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+coverage/
+.vitest-cache/
+
+# .NET build output
+bin/
+obj/
+TestResults/
+
+# Visual Studio / MSBuild user-local files
+*.user
+*.suo
+.vs/
+
+# Lacerte runtime byproducts
+*.config.bak
+LacertMCP.Server.exe.config.bak
+sdk-trace/
+*.dbf.bak
+
+# Editor backups
+*.swp
+*.swo
+*~
+*.bak
+
+# IDE
+.vscode/
+.idea/
