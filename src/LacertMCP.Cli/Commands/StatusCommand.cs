@@ -2,6 +2,7 @@ using System;
 using System.CommandLine;
 using System.Text.Json;
 using LacertMCP.Cli.Storage;
+using LacertMCP.Server.Diagnostics;
 
 namespace LacertMCP.Cli.Commands
 {
@@ -45,7 +46,7 @@ namespace LacertMCP.Cli.Commands
             {
                 registered = appId.HasValue,
                 appId = appId.HasValue
-                    ? (showFull ? appId.Value.ToString("D") : Mask(appId.Value))
+                    ? (showFull ? appId.Value.ToString("D") : AppIdStore.Mask(appId.Value))
                     : null,
                 appName = Environment.GetEnvironmentVariable("LACERTE_APP_NAME"),
                 mode,
@@ -56,6 +57,10 @@ namespace LacertMCP.Cli.Commands
                     ? $"target={AppIdStore.CredentialTarget} account={AppIdStore.CredentialAccount}"
                     : AppIdStore.FallbackConfigPath,
                 platform = Environment.OSVersion.Platform.ToString(),
+                // P14-040: build stamp lets the operator disambiguate dev (sim) and
+                // operator (live) binaries when filing bug reports. Sourced from
+                // Directory.Build.props -> AssemblyInformationalVersion.
+                buildVersion = BuildInfo.Version,
                 lastRegisterAttempt = (string?)null, // wire-tracked in Phase 9; not surfaced here
             };
 
@@ -69,13 +74,6 @@ namespace LacertMCP.Cli.Commands
             if (Environment.OSVersion.Platform != PlatformID.Win32NT) return false;
             if (Environment.GetEnvironmentVariable("LACERTE_SIMULATION") == "1") return false;
             return Environment.GetEnvironmentVariable("LACERTE_LIVE") == "1";
-        }
-
-        private static string Mask(Guid g)
-        {
-            // Show the first 8 chars only — enough to disambiguate two installs without leaking the full GUID.
-            var s = g.ToString("D");
-            return s.Substring(0, 8) + "-****-****-****-************";
         }
     }
 }

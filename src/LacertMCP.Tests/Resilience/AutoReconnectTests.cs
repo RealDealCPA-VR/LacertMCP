@@ -98,18 +98,70 @@ namespace LacertMCP.Tests.Resilience
             Assert.False(AutoReconnect.IsTransient(new LacerteSDKError(StatusCodes.ConsentDenied)));
         }
 
-        [Fact]
-        public void IsTransient_RpcUnavailable_True()
+        /// <summary>
+        /// P14-023: pin all 4 whitelisted HRESULTs for COMException — the
+        /// AutoReconnect.cs:43-46 contract. Previously only the first two
+        /// (RpcUnavailable + RpcDisconnected) were tested; RPC_E_SERVERCALL_RETRYLATER
+        /// (0x8001010A) and RPC_E_CALL_CANCELED (0x80010001) had zero coverage.
+        /// </summary>
+        [Theory]
+        [InlineData(unchecked((int)0x800706BA))] // RPC_S_SERVER_UNAVAILABLE
+        [InlineData(unchecked((int)0x80010108))] // RPC_E_DISCONNECTED
+        [InlineData(unchecked((int)0x8001010A))] // RPC_E_SERVERCALL_RETRYLATER
+        [InlineData(unchecked((int)0x80010001))] // RPC_E_CALL_CANCELED
+        public void IsTransient_COMException_TrueForAllWhitelisted(int hresult)
         {
-            var ex = new COMException("x", unchecked((int)0x800706BA));
+            var ex = new COMException("x", hresult);
             Assert.True(AutoReconnect.IsTransient(ex));
         }
 
-        [Fact]
-        public void IsTransient_RpcDisconnected_True()
+        /// <summary>
+        /// P14-023: pins the AutoReconnect.cs:148-151 ExternalException branch — some
+        /// marshaled COM errors arrive as a base ExternalException (e.g. SEH-converted
+        /// on x64) rather than a typed COMException.
+        /// </summary>
+        [Theory]
+        [InlineData(unchecked((int)0x800706BA))]
+        [InlineData(unchecked((int)0x80010108))]
+        [InlineData(unchecked((int)0x8001010A))]
+        [InlineData(unchecked((int)0x80010001))]
+        public void IsTransient_ExternalException_TrueForAllWhitelisted(int hresult)
         {
-            var ex = new COMException("x", unchecked((int)0x80010108));
+            var ex = new ExternalException("x", hresult);
             Assert.True(AutoReconnect.IsTransient(ex));
+        }
+
+        /// <summary>
+        /// Helper: net48's <c>Exception.HResult</c> setter is protected, so use a
+        /// minimal subclass to populate it for the base-Exception fallback test.
+        /// This pins the path where some COM interop populates HResult without
+        /// re-typing the exception as COMException/ExternalException.
+        /// </summary>
+        private sealed class HResultException : Exception
+        {
+            public HResultException(string msg, int hr) : base(msg) { HResult = hr; }
+        }
+
+        /// <summary>
+        /// P14-023: pins the AutoReconnect.cs:155-158 base-Exception HResult fallback.
+        /// Some COM interop paths populate ex.HResult without re-typing the exception.
+        /// </summary>
+        [Fact]
+        public void IsTransient_BaseException_HResultFallback_True()
+        {
+            var ex = new HResultException("rpc busy", unchecked((int)0x8001010A));
+            Assert.True(AutoReconnect.IsTransient(ex));
+        }
+
+        /// <summary>
+        /// P14-023 negative control: a base Exception with a non-whitelisted HResult
+        /// must NOT be classified as transient.
+        /// </summary>
+        [Fact]
+        public void IsTransient_BaseException_NonWhitelistedHResult_False()
+        {
+            var ex = new HResultException("nope", unchecked((int)0x80004005)); // E_FAIL
+            Assert.False(AutoReconnect.IsTransient(ex));
         }
 
         [Fact]

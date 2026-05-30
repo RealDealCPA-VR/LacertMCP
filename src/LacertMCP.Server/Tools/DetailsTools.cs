@@ -20,8 +20,8 @@ namespace LacertMCP.Server.Tools
     /// return. We enforce here:
     /// </para>
     /// <list type="bullet">
-    ///   <item><description><c>Series</c> non-empty (v1 accepts any string — TODO: real per-module Series enum).</description></item>
-    ///   <item><description><c>Code</c> numeric.</description></item>
+    ///   <item><description><c>Series</c> numeric (matches <c>^\d+$</c>) — Lacerte screen identifier per spec §2 (11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners). Kept typed as <c>string</c> on the wire to preserve <see cref="DetailRow"/> shape, but the numeric-string invariant guarantees a parseable int so <see cref="LacertMCP.Server.Odbc.SqlTemplates.DetailBySeries"/> agrees with sim predicates (audit task P14-055).</description></item>
+    ///   <item><description><c>Code</c> numeric (matches <c>^-?\d+$</c>) — leading minus allowed for negative codes. Same string-on-the-wire / numeric-string-invariant contract as Series.</description></item>
     ///   <item><description><c>StateAbbr</c> matches <c>^[A-Z]{2}$</c> when non-empty.</description></item>
     ///   <item><description><c>Amount</c> numeric (already typed as <c>double?</c> — the JSON-binding stage will throw before reaching us if a non-number lands).</description></item>
     /// </list>
@@ -40,6 +40,17 @@ namespace LacertMCP.Server.Tools
         // do NOT allow decimals (use Amount for those).
         private static readonly Regex _rxNumeric = new Regex(
             @"^-?\d+$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        // Numeric Series shape — Lacerte Series IDs are non-negative screen
+        // identifiers per spec §2 (no negative Series exists). Kept narrower
+        // than _rxNumeric so a `-5` value is rejected with a Series-specific
+        // error rather than slipping through. Audit task P14-055 (lighter-fix
+        // path): DetailRow.Series stays `string` on the wire — the regex is
+        // the invariant that makes the string safe to interpolate into the
+        // unquoted-integer SQL emitted by SqlTemplates.DetailBySeries.
+        private static readonly Regex _rxNumericSeries = new Regex(
+            @"^\d+$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
@@ -70,7 +81,7 @@ namespace LacertMCP.Server.Tools
         [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success).")]
         public Task<string> LacerteDetailWrite(
             [Description("Lacerte ClientNumber.")] string clientNumber,
-            [Description("Series identifier (e.g. 'Wages', 'Int', 'Div', 'Dep'). Required.")] string series,
+            [Description("Numeric Series identifier per Lacerte spec §2 — must match ^\\d+$ (e.g. '11'=W-2, '12'=Interest, '13'=Dividends, '14'=Dependents, '20'=Income, '30'=State, '40'=Partners). Required.")] string series,
             [Description("Prefix string (often empty).")] string prefix,
             [Description("Numeric Code (must parse as integer).")] string code,
             [Description("Suffix string (often empty).")] string suffix,
@@ -132,7 +143,26 @@ namespace LacertMCP.Server.Tools
                     new Dictionary<string, object?>
                     {
                         ["field"] = "series",
-                        ["reason"] = "Series is required (v1 accepts any non-empty string; real per-module Series enum is a follow-up).",
+                        ["reason"] = "Series is required.",
+                    });
+            }
+
+            // P14-055 lighter-fix: enforce numeric-string invariant so the
+            // string is guaranteed to be a parseable non-negative integer.
+            // Together with the seed fixture using numeric Series strings,
+            // this keeps DetailRow.Series typed `string` on the wire while
+            // making SqlTemplates.DetailBySeries (which emits an unquoted
+            // integer literal) observationally consistent between sim and
+            // live.
+            if (!_rxNumericSeries.IsMatch(series))
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["field"] = "series",
+                        ["value"] = series,
+                        ["reason"] = "Series must be a numeric Lacerte screen identifier (^\\d+$) per spec §2 — e.g. '11'=W-2, '12'=Interest, '13'=Dividends, '14'=Dependents, '20'=Income, '30'=State, '40'=Partners.",
                     });
             }
 

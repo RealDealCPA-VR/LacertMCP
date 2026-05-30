@@ -15,7 +15,7 @@ The goal is not raw speed. The goal is code that stays coherent, verifiable, mai
 * **What it is** — MCP server that exposes Intuit Lacerte tax software (TY18+) as tools an LLM can call.
 * **Wire path** — JSON-RPC/stdio for the MCP, COM/.NET (`LacerteSDK_Access`) for registration / create-client / TY21+ writes, ODBC (`LacerteDSII` DSN) for SQL reads + detail files.
 * **Two modes** — `live` (Windows-only, real SDK) and `simulation` (in-memory DBF fixtures, default off-Windows).
-* **Transport** — stdio MCP server bound in `src/index.ts`.
+* **Transport** — stdio MCP server bound in `src/LacertMCP.Server/Program.cs` via `McpServer` + `WithStdioServerTransport()` + `WithToolsFromAssembly()`.
 * **Single operator** — Personal tool. Bar is "works flawlessly," not "ships to customers."
 
 ---
@@ -52,8 +52,8 @@ If `HANDOFF.md` has a **Verify Before Continuing** section, those checks are top
 
 * Work sequentially within the current phase of `Todo.md`.
 * Reuse existing patterns; look at neighboring tool files first.
-* Adding a tool means: register in `src/index.ts`, handle the request in the simulation store, update the `instructions` blurb, and add it to the README tool table.
-* Test continuously — `npm run build` after each meaningful change.
+* Adding a tool means: add an `[McpServerTool]`-decorated method on the appropriate `*Tools` class under `src/LacertMCP.Server/Tools/`, wrap the body in `WrapToolHandler.Run(...)`, route through `LacerteSessionManager` (which dispatches to `SimulationStore` or the live `Bridge`), and add a row to the README tool table.
+* Test continuously — `dotnet build src/LacertMCP.sln` and `dotnet test src/LacertMCP.Tests` after each meaningful change.
 
 ### 3. VERIFY — Confirm the work functions
 
@@ -71,16 +71,17 @@ Run the items in `REGRESSION_CHECKLIST.md` relevant to your changes. Live-mode w
 
 These will firm up as the architecture lands. Default assumptions:
 
-* TypeScript strict mode, ES2022, ESM modules (`"type": "module"`), `Node16` module resolution.
-* Always use `.js` extensions on relative imports.
-* MCP tools registered via `server.tool(name, description, zodSchema, handler)`.
-* Zod schemas for every tool input — `.describe()` every field.
-* Tool handlers return `{ content: [{ type: "text" as const, text: JSON.stringify(...) }] }`; `isError: true` on failure.
-* One file per tool domain in `src/tools/` (e.g. `clients.ts`, `tables.ts`, `details.ts`, `efile.ts`).
-* Session lifecycle through `LacerteSessionManager` only; tools never construct COM calls or ODBC queries directly.
-* COM interop in `src/bridge/`; ODBC in `src/odbc/`; simulation in `src/session/simulation-store.ts`.
-* Schema metadata (modules, tables, fields, access map, status enum) in `src/schema/` and treated as read-only.
-* TAPIStatus mapping in `src/errors/status-codes.ts`; tools never expose raw integers.
+* C# 10 (`LangVersion=10`), `net48` TFM, `x64` platform, nullable reference types enabled.
+* Tools live in `src/LacertMCP.Server/Tools/*.cs` — one class per domain (e.g. `ClientsTools`, `TablesTools`, `DetailsTools`, `EFileTools`).
+* Tools registered via `[McpServerToolType]` on the class plus `[McpServerTool, Description("...")]` on each method; auto-scanned by `WithToolsFromAssembly()` in `Program.cs`.
+* Every tool parameter carries a `[Description("...")]` attribute.
+* Tool handlers wrap their body in `WrapToolHandler.Run(...)`, which formats success/error envelopes as JSON and maps `LacerteSDKError` to consistent error shapes.
+* Session lifecycle through `LacerteSessionManager` only; tools never construct COM calls or ODBC SQL directly.
+* COM interop in `src/LacertMCP.Server/Bridge/` (`LacerteAccessClient`, `Reader`, `Writer`, `Registration`).
+* ODBC in `src/LacertMCP.Server/Odbc/` (`ConnectionPool`, `SqlTemplates`).
+* Simulation in `src/LacertMCP.Server/Session/SimulationStore.cs` plus partial classes.
+* Schema metadata in `src/LacertMCP.Server/Schema/` (`Modules`, `Tables`, `FieldAccess`) — treated as read-only.
+* TAPIStatus mapping in `src/LacertMCP.Server/Errors/StatusCodes.cs`; tools never expose raw integers.
 
 ---
 

@@ -257,24 +257,11 @@ namespace LacertMCP.Server.Session
             StatusCodes.DB7Error,     // 7
         };
 
-        // Per-module accepted TaxType strings for SimulateCreateClient. The
-        // bridge passes these to IClient(TaxType, ...); the simulator only
-        // needs to know the canonical name(s) for each module. Aliases are
-        // accepted case-insensitively — e.g. "1040" and "Individual" both
-        // map to module 'I'. Conservative starter set; expand as tools land.
-        private static readonly IReadOnlyDictionary<char, string[]> _moduleTaxTypes =
-            new Dictionary<char, string[]>
-            {
-                { 'I', new[] { "Individual", "1040" } },
-                { 'C', new[] { "Corporate", "1120" } },
-                { 'P', new[] { "Partnership", "1065" } },
-                { 'S', new[] { "SCorporate", "1120S", "S-Corporation", "SCorp" } },
-                { 'F', new[] { "Fiduciary", "1041" } },
-                { 'R', new[] { "Exempt", "990" } },
-                { 'T', new[] { "Estate", "706" } },
-                { 'N', new[] { "Gift", "709" } },
-                { 'B', new[] { "Benefit", "5500" } },
-            };
+        // Per-module accepted TaxType strings for SimulateCreateClient now
+        // live on Schema.Modules.TaxTypeAliases (single source of truth —
+        // formerly duplicated between this file and CreateClientTools).
+        // Callers below go through Modules.AcceptsTaxType which preserves
+        // the case-insensitive accept semantics.
 
         // ClientID validation per spec: <=8 alphanumeric, no special chars.
         private static readonly Regex _rxClientId = new Regex(
@@ -303,6 +290,13 @@ namespace LacertMCP.Server.Session
             // 1. sessionExpired latch
             if (System.Threading.Interlocked.CompareExchange(ref _sessionExpired, 0, 0) == 1)
                 return StatusCodes.NotSignedIn;
+
+            // 1b. spec §2: DATA6 (Display) / DATA7 (Forms) are read-only at
+            // the table level — return ExposedForRead directly so the wire
+            // path stays observationally identical with the session-manager
+            // chokepoint gate (P14-054). Throw-via-LacerteSDKError lives at
+            // the session manager so this stays a pure status return here.
+            if (table == 6 || table == 7) return StatusCodes.ExposedForRead;
 
             // 2. year guard (spec floor is TY18)
             if (year < 2018) return StatusCodes.InValidTaxYear;
@@ -418,11 +412,20 @@ namespace LacertMCP.Server.Session
             var store = TryGetModule(dataPath, year, module);
             if (store == null) return Array.Empty<DetailRow>();
             if (!store.Details.TryGetValue(clientNumber, out var list)) return Array.Empty<DetailRow>();
-            if (filter == null) return list.ToList();
 
-            var matched = new List<DetailRow>();
-            foreach (var r in list) if (filter(r)) matched.Add(r);
-            return matched;
+            // Per-list lock for read/write parity with WriteDetail and
+            // LacerteSessionManager.ApplySimDetailWrite — the inner List<T> is
+            // not thread-safe even though the outer Details map is. Without
+            // this, a concurrent writer can mutate the backing array mid-
+            // enumeration and throw InvalidOperationException.
+            lock (list)
+            {
+                if (filter == null) return list.ToList();
+
+                var matched = new List<DetailRow>();
+                foreach (var r in list) if (filter(r)) matched.Add(r);
+                return matched;
+            }
         }
 
         /// <summary>
@@ -451,15 +454,24 @@ namespace LacertMCP.Server.Session
             if (!store.Details.TryGetValue(clientNumber, out var list))
                 return StatusCodes.DetailCreationError;
 
-            if (replaceIndex.HasValue)
+            // Per-list lock: the Details map is concurrent but the inner
+            // List<DetailRow> is not. Mirror LacerteSessionManager.ApplySimDetailWrite,
+            // which already takes lock(list) before mutating. Both paths must
+            // hold the lock independently (they are parallel, not nested —
+            // ApplySimDetailWrite goes straight to module.Details with its own
+            // logic rather than calling WriteDetail).
+            lock (list)
             {
-                if (replaceIndex.Value < 0 || replaceIndex.Value >= list.Count)
-                    return StatusCodes.OutOfIndex;
-                list[replaceIndex.Value] = row;
-            }
-            else
-            {
-                list.Add(row);
+                if (replaceIndex.HasValue)
+                {
+                    if (replaceIndex.Value < 0 || replaceIndex.Value >= list.Count)
+                        return StatusCodes.OutOfIndex;
+                    list[replaceIndex.Value] = row;
+                }
+                else
+                {
+                    list.Add(row);
+                }
             }
             return StatusCodes.Success;
         }
@@ -537,13 +549,7 @@ namespace LacertMCP.Server.Session
 
         private static bool ModuleAcceptsTaxType(char module, string? taxType)
         {
-            if (string.IsNullOrEmpty(taxType)) return false;
-            if (!_moduleTaxTypes.TryGetValue(module, out var accepted)) return false;
-            foreach (var a in accepted)
-            {
-                if (string.Equals(a, taxType, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            return false;
+            return Modules.AcceptsTaxType(module, taxType);
         }
 
         // -------------------------------------------------------------------

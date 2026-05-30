@@ -4,15 +4,29 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 ## Build / Compile
 
-- [ ] `npm run build` (tsc) passes with no errors.
-- [ ] No new TypeScript errors in unrelated files.
-- [ ] All relative imports keep their `.js` extension (Node16 ESM).
+- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" build C:/Users/VR/Projects/LacertMCP/LacertMCP.sln -c Debug -p:Platform=x64` reports **0 warnings, 0 errors**.
+- [ ] System-wide `dotnet` is runtime-only on this box — the user-local SDK at `$env:USERPROFILE\.dotnet` is the only one that can build the solution.
+- [ ] No new C# warnings/errors in unrelated projects (`LacertMCP.Server`, `LacertMCP.Cli`, `LacertMCP.FieldAccessDumper`, `LacertMCP.Tests`).
+
+## Tests
+
+- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports **481 passed, 11 skipped, 0 failed**.
+- [ ] The 11 skips are the expected `[Fact(Skip = "Requires real Lacerte SDK")]` cases under `Tests/Bridge/` plus the one Windows-only Credential Manager round-trip under `Tests/Cli/`.
 
 ## Server startup
 
-- [ ] `npm run dev` boots without throwing.
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` starts the stdio MCP server without throwing (kill after confirming startup).
 - [ ] Simulation banner prints when expected (off-Windows or `LACERTE_SIMULATION=1`).
-- [ ] All expected tools appear in the tool list (count matches `src/index.ts` registrations).
+- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` (16 tools per HANDOFF.md).
+
+## CLI smoke
+
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` exits **0** with a JSON payload.
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor` is expected to exit **1** off-Windows (no Lacerte install) — that's the documented behavior.
+
+## Dumper smoke
+
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.FieldAccessDumper/bin/x64/Debug/LacertMCP.FieldAccessDumper.exe` prints `no fields to probe in sim; run on Windows for live introspection.` in the dev env.
 
 ## Session / context
 
@@ -40,7 +54,7 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 ## Error mapping
 
-- [ ] Every TAPIStatus value referenced by a code path has an entry in `src/errors/status-codes.ts`.
+- [ ] Every TAPIStatus value referenced by a code path has an entry in `src/LacertMCP.Server/Errors/StatusCodes.cs`.
 - [ ] No tool returns a raw integer status; all wrapped in `{ success: false, error, statusCode }`.
 
 ## Handoff readiness

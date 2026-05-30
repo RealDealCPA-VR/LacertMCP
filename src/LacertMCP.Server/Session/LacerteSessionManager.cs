@@ -7,10 +7,12 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Bridge;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Logging;
+using LacertMCP.Server.Odbc;
 using LacertMCP.Server.Resilience;
 using LacertMCP.Server.Schema;
 
@@ -57,7 +59,14 @@ namespace LacertMCP.Server.Session
         // BridgeUnavailable throw so non-Windows hosts still get a clean
         // structured error instead of a NullReferenceException.
         private readonly ILacerteBridge? _bridge;
-        private readonly object? _odbc = null;   // Phase 4 task #39 still pending wire-up.
+
+        // Phase 4 task #39 — constructed lazily on first ODBC read with the
+        // active DSN connection string; null until then. Typed (not object?)
+        // so a future contributor can't accidentally route around the proper
+        // reader. See ARCHITECTURE.md "Module Boundaries" for the read path.
+#pragma warning disable CS0649 // assigned in Phase 4 wire-up; null sentinel for now
+        private LacerteDsnReader? _odbc;
+#pragma warning restore CS0649
 
         // ----- Auth lifecycle ----------------------------------------------
 
@@ -88,6 +97,22 @@ namespace LacertMCP.Server.Session
 
         private readonly ConcurrentDictionary<string, IdempotencyCacheEntry> _idempotencyCache =
             new ConcurrentDictionary<string, IdempotencyCacheEntry>();
+
+        // Per-key semaphores to serialize concurrent same-key writes so the
+        // TryReplay → execute → StoreIdempotent triple is atomic per key.
+        // Without this, two concurrent identical writes both miss the cache
+        // and both execute, defeating the idempotency contract.
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _idempotencyLocks =
+            new ConcurrentDictionary<string, SemaphoreSlim>();
+
+        // P14-013/P14-064 — bound the cache so a long-running session can't
+        // leak idempotency entries forever. TTL matches the 24h Intuit auth
+        // window (entries created before re-auth are semantically stale).
+        // Eviction is opportunistic — checked on TryReplay (expired entries
+        // treated as miss + removed) and StoreIdempotent (over-cap → prune
+        // expired entries + drop oldest by CreatedAt).
+        private const int IdempotencyCacheMaxEntries = 10_000;
+        private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromHours(24);
 
         // ===================================================================
         // Construction
@@ -269,7 +294,10 @@ namespace LacertMCP.Server.Session
                 Context: Context,
                 AppName: _appName,
                 AppId: "***",
-                Edition: edition);
+                Edition: edition,
+                // P14-040: echo the assembly InformationalVersion so operators get
+                // a copy-pasteable build stamp via lacerte_session_status.
+                BuildVersion: Diagnostics.BuildInfo.Version);
         }
 
         /// <summary>
@@ -289,7 +317,33 @@ namespace LacertMCP.Server.Session
                 if (_edition != null) return _edition;
                 // Sim path: pass null bridge → sentinel values. Live: pass
                 // the bridge so the late-bound probe reads real values.
-                _edition = EditionDetection.Probe(Mode == SessionMode.Live ? _bridge : null);
+                // P14-061 — cache the attempt (success OR failure) so the
+                // docstring's "never re-probed for the lifetime of the
+                // process" contract holds even when Probe() throws (which is
+                // the steady state today — Phase 9 hasn't wired the live
+                // probe). A failed probe is recorded as the "Unavailable"
+                // sentinel so subsequent SessionStatus calls return cheaply
+                // instead of re-entering Probe.
+                try
+                {
+                    _edition = EditionDetection.Probe(Mode == SessionMode.Live ? _bridge : null);
+                }
+                catch (Exception ex)
+                {
+                    // Log the first (and only) probe failure via WireLog so
+                    // operators see why Edition stays "Unavailable" instead
+                    // of silent null. RecordSync swallows any logging
+                    // exception internally; wrap in try/catch defensively in
+                    // case the underlying writer throws synchronously.
+                    try
+                    {
+                        WireLog.RecordSync<object?>("EditionDetection.Probe",
+                            new { mode = Mode.ToString() },
+                            () => throw ex);
+                    }
+                    catch { /* logging is best-effort; never poison the probe */ }
+                    _edition = new EditionInfo("Unavailable", "Unavailable", "Unavailable");
+                }
                 return _edition;
             }
         }
@@ -311,6 +365,15 @@ namespace LacertMCP.Server.Session
                 var ctx = new Dictionary<string, object?> { ["reason"] = "dataPath is required." };
                 throw new LacerteSDKError(SyntheticStatusCodes.ContextNotSet, ctx);
             }
+
+            // P14-049 — defensive path-string validation. Rejects relative
+            // paths, '..' traversal, control characters, UNC (without the
+            // LACERTE_ALLOW_UNC escape hatch), and paths outside
+            // LACERTE_DATA_ROOT when that env var is set. Throws
+            // LacerteSDKError(9013 InvalidDataPath) with {dataPath, reason}
+            // — preserves the structured-error invariant so the tool layer
+            // surfaces a precise rejection.
+            PathValidation.ValidateDataPath(dataPath);
 
             if (taxYear < 2018)
             {
@@ -394,7 +457,7 @@ namespace LacertMCP.Server.Session
                 "ListClients", new { lastNameFilter, limit }, () =>
             {
                 var ctx = RequireContext();
-                EnsureLive();
+                ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
                 IEnumerable<DbfRow> rows = module.Clients.Values;
 
@@ -423,7 +486,7 @@ namespace LacertMCP.Server.Session
                 "ReadClient", new { clientNumber }, () =>
             {
                 var ctx = RequireContext();
-                EnsureLive();
+                ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
                 IReadOnlyDictionary<string, object?>? result = null;
                 if (module.Clients.TryGetValue(clientNumber, out var row))
@@ -454,7 +517,7 @@ namespace LacertMCP.Server.Session
             int table, string? clientNumber, string? stateAbbrev)
         {
             var ctx = RequireContext();
-            EnsureLive();
+            ThrowIfLiveUnwired();
             var module = RequireSimModule(ctx);
 
             IEnumerable<DbfRow> rows;
@@ -514,7 +577,7 @@ namespace LacertMCP.Server.Session
             return WireLog.Record<IReadOnlyList<DetailRow>>("ReadDetail", new { clientNumber }, () =>
             {
                 var ctx = RequireContext();
-                EnsureLive();
+                ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
                 IReadOnlyList<DetailRow> result = module.Details.TryGetValue(clientNumber, out var list)
                     ? (IReadOnlyList<DetailRow>)list.ToList()
@@ -535,7 +598,7 @@ namespace LacertMCP.Server.Session
                 "ReadEFStatus", args: null, () =>
             {
                 var ctx = RequireContext();
-                EnsureLive();
+                ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
 
                 var joined = from f in module.EFilings
@@ -582,96 +645,136 @@ namespace LacertMCP.Server.Session
             var ctx = RequireContext();
             RejectIfReadOnly("WriteField", table: table, fieldName: field);
 
-            // Idempotency check (synchronous; before any side effect).
-            var payload = BuildPayload(
-                "WriteField",
-                table, clientNumber, field, value, subClientID, stateAbbrev);
-            if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
+            // Spec §2 table-access invariant: DATA6 (Display) and DATA7
+            // (Forms) are read-only at the TABLE level. We gate here in the
+            // chokepoint so the rule holds independent of access-map state
+            // (today the base maps are empty, which means today's fail-closed
+            // behaviour already rejects table 6/7 writes; the moment the map
+            // gains a writable DATA6/DATA7 entry, this gate keeps the spec
+            // invariant load-bearing). See P14-054.
+            if (table == 6 || table == 7)
             {
-                return cached;
+                throw new LacerteSDKError(StatusCodes.ExposedForRead,
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = table,
+                        ["reason"] = "DATA" + table + " is read-only per spec §2 (Display/Forms tables are not writable through the SDK).",
+                    });
             }
 
-            // Access-map gate.
-            FieldAccessMapLoader.AssertWritable(ctx.Module, table, field, ctx.Year);
-
-            // F11 — log AFTER the access-map check so a client-side-rejected
-            // value (e.g. trying to write a read-only field) never hits the
-            // log. Args include the value because once we're past the gate
-            // it's authorized for the wire.
-            int result = await WireLog.Record<int>("WriteField",
-                new { table, clientNumber, field, value, subClientID, stateAbbrev, dryRun },
-                async () =>
+            // P14-005 — per-key serialization. Concurrent same-key calls wait
+            // here so TryReplay → execute → StoreIdempotent runs atomically.
+            // Null/empty key: skip locking (no idempotency contract to honor).
+            return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
-                // TY21+ branching is the session manager's job (Boundary Invariant 5).
-                // Live verification deferred to Windows + Lacerte box.
-                var useNew = CanUseNewApis(ctx.Year, ctx.Module);
+                // P14-042 — only compute the payload fingerprint when there's
+                // an idempotency key. JSON serialize + SHA-256 + base64 is
+                // wasted work on the common no-key write path.
+                string payload = string.IsNullOrEmpty(idempotencyKey)
+                    ? string.Empty
+                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientID, stateAbbrev);
 
-                int inner;
-                if (Mode == SessionMode.Live)
+                if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
-                    // Phase 9 task #67 — bridge wire-up. dryRun is sim-only
-                    // (the bridge can't snapshot a real DBF cheaply); we honor
-                    // dryRun here by short-circuiting BEFORE the wire call and
-                    // returning Success without persisting.
-                    if (_bridge == null)
+                    return cached;
+                }
+
+                // Access-map gate.
+                FieldAccessMapLoader.AssertWritable(ctx.Module, table, field, ctx.Year);
+
+                // F11 — log AFTER the access-map check so a client-side-rejected
+                // value (e.g. trying to write a read-only field) never hits the
+                // log. Args include the value because once we're past the gate
+                // it's authorized for the wire.
+                int result = await WireLog.Record<int>("WriteField",
+                    new { table, clientNumber, field, value, subClientID, stateAbbrev, dryRun },
+                    async () =>
+                {
+                    // TY21+ branching is the session manager's job (Boundary Invariant 5).
+                    // Live verification deferred to Windows + Lacerte box.
+                    var useNew = CanUseNewApis(ctx.Year, ctx.Module);
+
+                    int inner;
+                    if (Mode == SessionMode.Live)
                     {
-                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
-                    }
-                    if (dryRun)
-                    {
-                        inner = StatusCodes.Success;
-                    }
-                    else
-                    {
-                        var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                        if (useNew)
+                        // Phase 9 task #67 — bridge wire-up. dryRun is sim-only
+                        // (the bridge can't snapshot a real DBF cheaply); we honor
+                        // dryRun here by short-circuiting BEFORE the wire call and
+                        // returning Success without persisting.
+                        if (_bridge == null)
                         {
-                            // TY21+ → UpdateTaxReturn keyed by ClientNumber.
-                            // F12 — wrap in AutoReconnect for transient COM retries.
-                            inner = await AutoReconnect.WithRetry<int>(() =>
-                                Task.FromResult(_bridge.UpdateTaxReturn(appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                    table, clientNumber, field, value, subClientID, stateAbbrev)))
-                                .ConfigureAwait(false);
+                            throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
+                        }
+                        if (dryRun)
+                        {
+                            inner = StatusCodes.Success;
                         }
                         else
                         {
-                            // Pre-TY21 → WriteToDBFDatabase keyed by row number.
-                            // The session manager does not track row numbers (it
-                            // works in ClientNumber-space); the live caller is
-                            // expected to translate ClientNumber → rowNum
-                            // upstream. For now pass int.Parse(clientNumber) as
-                            // the row number — the field-write tool layer (Phase
-                            // 6 task #51) replaces this with the real lookup.
-                            int rowNum = int.TryParse(clientNumber, out var rn) ? rn : -1;
-                            // F12 — wrap in AutoReconnect.
-                            inner = await AutoReconnect.WithRetry<int>(() =>
-                                Task.FromResult(_bridge.WriteField(appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                    table, rowNum, field, value)))
-                                .ConfigureAwait(false);
+                            var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
+                            if (useNew)
+                            {
+                                // TY21+ → UpdateTaxReturn keyed by ClientNumber.
+                                // F12 — wrap in AutoReconnect for transient COM retries.
+                                inner = await AutoReconnect.WithRetry<int>(() =>
+                                    Task.FromResult(_bridge.UpdateTaxReturn(appId, ctx.DataPath, ctx.Year, ctx.Module,
+                                        table, clientNumber, field, value, subClientID, stateAbbrev)))
+                                    .ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                // P14-022/P14-031 — Pre-TY21 → WriteToDBFDatabase keyed
+                                // by ROW number, not ClientNumber. The session manager
+                                // works in ClientNumber-space; translating
+                                // ClientNumber → row index requires an ODBC lookup
+                                // (Phase 4 task #39 + follow-up). Until that lookup
+                                // lands the only safe behavior is to refuse the
+                                // write with a structured error rather than silently
+                                // fall through with rowNum=-1 (which the live SDK
+                                // will reject with OutOfIndex at best or, worse,
+                                // overwrite a sentinel row). Use SimulationOnly
+                                // (9202) since the operator's remediation is the
+                                // same: stick to TY21+ for now or run in sim.
+                                throw new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
+                                    new Dictionary<string, object?>
+                                    {
+                                        ["op"] = "WriteField",
+                                        ["reason"] = "Pre-TY21 live writes require a ClientNumber → row-number lookup that is not yet implemented (Todo task #51 follow-up). Use TY21+ or run in simulation mode.",
+                                        ["year"] = ctx.Year,
+                                        ["module"] = ctx.Module.ToString(),
+                                        ["clientNumber"] = clientNumber,
+                                    });
+                            }
                         }
                     }
-                }
-                else if (dryRun)
-                {
-                    var snap = SimSnapshot();
-                    try
+                    else if (dryRun)
+                    {
+                        // P14-043 — per-operation undo: locate the row first
+                        // (validation throws happen here), then capture the
+                        // single (table, key, field, prior) tuple, then write,
+                        // then restore in finally. Cost: O(1) per dry-run
+                        // write vs O(active-module) for the old whole-module
+                        // snapshot.
+                        Action? undo = null;
+                        try
+                        {
+                            inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientID, stateAbbrev, useNew, out undo);
+                        }
+                        finally
+                        {
+                            undo?.Invoke();
+                        }
+                    }
+                    else
                     {
                         inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientID, stateAbbrev, useNew);
                     }
-                    finally
-                    {
-                        SimRestore(snap);
-                    }
-                }
-                else
-                {
-                    inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientID, stateAbbrev, useNew);
-                }
-                return inner;
-            }).ConfigureAwait(false);
+                    return inner;
+                }).ConfigureAwait(false);
 
-            StoreIdempotent(idempotencyKey, payload, result);
-            return result;
+                StoreIdempotent(idempotencyKey, payload, result);
+                return result;
+            }).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -686,69 +789,82 @@ namespace LacertMCP.Server.Session
             // Detail-row writes target a whole row (Series/Code/Amount) — no
             // single "field" to name, so we surface just the operation +
             // active module/year via RejectIfReadOnly's context payload.
+            // P14-002 — no AssertWritable here; see DECISIONS.md "Detail-row +
+            // whole-row writes are outside the access-map gate". The map's
+            // (module|table|field) key shape can't address detail rows.
+            // Safety net: DetailsTools.ValidateDetailWrite handles row-shape
+            // validation before this method is invoked.
             RejectIfReadOnly("WriteDetail");
 
-            var payload = BuildPayload("WriteDetail", clientNumber, row, replaceIndex);
-            if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
+            return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
-                return cached;
-            }
+                // P14-042 — only compute payload when an idempotency key exists.
+                string payload = string.IsNullOrEmpty(idempotencyKey)
+                    ? string.Empty
+                    : BuildPayload("WriteDetail", clientNumber, row, replaceIndex);
 
-            // F11 — log AFTER read-only + idempotency gates. row is logged
-            // verbatim; WireLog.Redact strips SSN/EIN/BankAccountNumber/
-            // RoutingNumber before the line hits disk.
-            int result = await WireLog.Record<int>("WriteDetail",
-                new { clientNumber, row, replaceIndex, dryRun }, async () =>
-            {
-                int inner;
-                if (Mode == SessionMode.Live)
+                if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
-                    // Phase 9 task #67 — bridge wire-up. Live verification
-                    // deferred to Windows + Lacerte box.
-                    if (_bridge == null)
+                    return cached;
+                }
+
+                // F11 — log AFTER read-only + idempotency gates. row is logged
+                // verbatim; WireLog.Redact strips SSN/EIN/BankAccountNumber/
+                // RoutingNumber before the line hits disk.
+                int result = await WireLog.Record<int>("WriteDetail",
+                    new { clientNumber, row, replaceIndex, dryRun }, async () =>
+                {
+                    int inner;
+                    if (Mode == SessionMode.Live)
                     {
-                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
+                        // Phase 9 task #67 — bridge wire-up. Live verification
+                        // deferred to Windows + Lacerte box.
+                        if (_bridge == null)
+                        {
+                            throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
+                        }
+                        if (dryRun)
+                        {
+                            // Detail-file writes have no SDK-level snapshot path;
+                            // honor dryRun by short-circuiting before the wire call.
+                            _ = replaceIndex;
+                            inner = StatusCodes.Success;
+                        }
+                        else
+                        {
+                            var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
+                            _ = replaceIndex;
+                            // F12 — wrap in AutoReconnect.
+                            inner = await AutoReconnect.WithRetry<int>(() =>
+                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row)))
+                                .ConfigureAwait(false);
+                        }
                     }
-                    if (dryRun)
+                    else if (dryRun)
                     {
-                        // Detail-file writes have no SDK-level snapshot path;
-                        // honor dryRun by short-circuiting before the wire call.
-                        // replaceIndex isn't validated against live rows in dry
-                        // mode — that fidelity is deferred to a future hardening
-                        // pass.
-                        _ = replaceIndex;
-                        inner = StatusCodes.Success;
+                        // P14-043 — per-operation undo. Capture (clientNumber,
+                        // index, priorRow) inside the lock, mutate, restore on
+                        // exit. O(1) vs old whole-module snapshot.
+                        Action? undo = null;
+                        try
+                        {
+                            inner = ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo);
+                        }
+                        finally
+                        {
+                            undo?.Invoke();
+                        }
                     }
                     else
                     {
-                        var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                        // replaceIndex semantics in live mode: the spec's detail
-                        // write is row-ordered append only; replace is a sim
-                        // convenience. For now ignore replaceIndex live-side and
-                        // append unconditionally (the tool layer enforces the
-                        // append-only contract in Phase 6 task #53).
-                        _ = replaceIndex;
-                        // F12 — wrap in AutoReconnect.
-                        inner = await AutoReconnect.WithRetry<int>(() =>
-                            Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row)))
-                            .ConfigureAwait(false);
+                        inner = ApplySimDetailWrite(ctx, clientNumber, row, replaceIndex);
                     }
-                }
-                else if (dryRun)
-                {
-                    var snap = SimSnapshot();
-                    try { inner = ApplySimDetailWrite(ctx, clientNumber, row, replaceIndex); }
-                    finally { SimRestore(snap); }
-                }
-                else
-                {
-                    inner = ApplySimDetailWrite(ctx, clientNumber, row, replaceIndex);
-                }
-                return inner;
-            }).ConfigureAwait(false);
+                    return inner;
+                }).ConfigureAwait(false);
 
-            StoreIdempotent(idempotencyKey, payload, result);
-            return result;
+                StoreIdempotent(idempotencyKey, payload, result);
+                return result;
+            }).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -762,78 +878,99 @@ namespace LacertMCP.Server.Session
             // CreateClient writes a whole DATA1 row (5-field ctor on the SDK
             // side); there is no single field to surface, so the read-only
             // rejection just carries the operation + active module/year.
+            // P14-002 — no AssertWritable here; see DECISIONS.md "Detail-row +
+            // whole-row writes are outside the access-map gate". CreateClient
+            // writes an entire row whose fields aren't enumerable until after
+            // the SDK assigns the row; client-side safety is ClientID length
+            // (here) + SimulateCreateClient's full TAPIStatus gate chain.
             RejectIfReadOnly("CreateClient");
             if (args == null) throw new ArgumentNullException(nameof(args));
 
-            var payload = BuildPayload("CreateClient", args);
-            if (TryReplayIdempotent(idempotencyKey, payload, out CreateClientResult cached))
+            return await ExecuteWithIdempotencyLock<CreateClientResult>(idempotencyKey, async () =>
             {
-                return cached;
-            }
+                // P14-042 — only compute payload when an idempotency key exists.
+                string payload = string.IsNullOrEmpty(idempotencyKey)
+                    ? string.Empty
+                    : BuildPayload("CreateClient", args);
 
-            // Client-side validation per agent 06 §6.
-            if (string.IsNullOrEmpty(args.ClientID) || args.ClientID.Length > 8)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.ClientIDTooLong,
-                    new Dictionary<string, object?> { ["clientID"] = args.ClientID });
-            }
-            if (ctx.Year < 2018)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.TaxYearTooOld,
-                    new Dictionary<string, object?> { ["taxYear"] = ctx.Year });
-            }
-
-            // F11 — log AFTER client-side validation gates (read-only +
-            // ClientID length + taxYear floor). args is logged verbatim;
-            // WireLog redacts secret fields before disk.
-            CreateClientResult result = await WireLog.Record<CreateClientResult>(
-                "CreateClient", new { args, dryRun }, async () =>
-            {
-                CreateClientResult inner;
-                if (Mode == SessionMode.Live)
+                if (TryReplayIdempotent(idempotencyKey, payload, out CreateClientResult cached))
                 {
-                    // Phase 9 task #67 — bridge wire-up. Live verification
-                    // deferred to Windows + Lacerte box.
-                    if (_bridge == null)
+                    return cached;
+                }
+
+                // Client-side validation per agent 06 §6.
+                if (string.IsNullOrEmpty(args.ClientID) || args.ClientID.Length > 8)
+                {
+                    throw new LacerteSDKError(SyntheticStatusCodes.ClientIDTooLong,
+                        new Dictionary<string, object?> { ["clientID"] = args.ClientID });
+                }
+                if (ctx.Year < 2018)
+                {
+                    throw new LacerteSDKError(SyntheticStatusCodes.TaxYearTooOld,
+                        new Dictionary<string, object?> { ["taxYear"] = ctx.Year });
+                }
+
+                // F11 — log AFTER client-side validation gates (read-only +
+                // ClientID length + taxYear floor). args is logged verbatim;
+                // WireLog redacts secret fields before disk.
+                CreateClientResult result = await WireLog.Record<CreateClientResult>(
+                    "CreateClient", new { args, dryRun }, async () =>
+                {
+                    CreateClientResult inner;
+                    if (Mode == SessionMode.Live)
                     {
-                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
+                        // Phase 9 task #67 — bridge wire-up. Live verification
+                        // deferred to Windows + Lacerte box.
+                        if (_bridge == null)
+                        {
+                            throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
+                        }
+                        if (dryRun)
+                        {
+                            // CreateClient on the SDK has no dry-run primitive;
+                            // honor dryRun by short-circuiting before the wire call.
+                            // Return a synthetic Success without a ClientNumber so
+                            // callers can distinguish dry-run from real allocation.
+                            inner = new CreateClientResult(StatusCodes.Success, null);
+                        }
+                        else
+                        {
+                            var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
+                            // F12 — wrap in AutoReconnect.
+                            var bridgeResult = await AutoReconnect.WithRetry<BridgeCreateClientResult>(() =>
+                                Task.FromResult(_bridge.CreateClient(
+                                    appId, ctx.DataPath, ctx.Year, ctx.Module,
+                                    args.ClientID, args.TaxType,
+                                    args.FirstName, args.LastName, args.EmailID)))
+                                .ConfigureAwait(false);
+                            inner = new CreateClientResult(bridgeResult.Status, bridgeResult.ClientNumber);
+                        }
                     }
-                    if (dryRun)
+                    else if (dryRun)
                     {
-                        // CreateClient on the SDK has no dry-run primitive;
-                        // honor dryRun by short-circuiting before the wire call.
-                        // Return a synthetic Success without a ClientNumber so
-                        // callers can distinguish dry-run from real allocation.
-                        inner = new CreateClientResult(StatusCodes.Success, null);
+                        // P14-043 — per-operation undo. CreateClient mints a
+                        // ClientNumber + adds one Clients entry; undo decrements
+                        // NextClientNumber + removes the entry.
+                        Action? undo = null;
+                        try
+                        {
+                            inner = ApplySimCreateClientWithUndo(ctx, args, out undo);
+                        }
+                        finally
+                        {
+                            undo?.Invoke();
+                        }
                     }
                     else
                     {
-                        var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                        // F12 — wrap in AutoReconnect.
-                        var bridgeResult = await AutoReconnect.WithRetry<BridgeCreateClientResult>(() =>
-                            Task.FromResult(_bridge.CreateClient(
-                                appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                args.ClientID, args.TaxType,
-                                args.FirstName, args.LastName, args.EmailID)))
-                            .ConfigureAwait(false);
-                        inner = new CreateClientResult(bridgeResult.Status, bridgeResult.ClientNumber);
+                        inner = ApplySimCreateClient(ctx, args);
                     }
-                }
-                else if (dryRun)
-                {
-                    var snap = SimSnapshot();
-                    try { inner = ApplySimCreateClient(ctx, args); }
-                    finally { SimRestore(snap); }
-                }
-                else
-                {
-                    inner = ApplySimCreateClient(ctx, args);
-                }
-                return inner;
-            }).ConfigureAwait(false);
+                    return inner;
+                }).ConfigureAwait(false);
 
-            StoreIdempotent(idempotencyKey, payload, result);
-            return result;
+                StoreIdempotent(idempotencyKey, payload, result);
+                return result;
+            }).ConfigureAwait(false);
         }
 
         // ===================================================================
@@ -877,10 +1014,21 @@ namespace LacertMCP.Server.Session
             throw new LacerteSDKError(SyntheticStatusCodes.FieldIsReadOnly, data);
         }
 
-        private void EnsureLive()
+        /// <summary>
+        /// P14-003/P14-052/P14-059 — Read paths are sim-only until Phase 9
+        /// wires the bridge + ODBC. Sim falls through; live throws
+        /// BridgeUnavailable. Name is intentionally inverted-as-explicit so
+        /// the call sites read truthfully ("throw if we're in live mode and
+        /// the wire isn't there yet"). When Phase 4 task #39 lands and ODBC
+        /// reads are wired, this helper plus its five call sites can be
+        /// deleted in one sweep.
+        ///
+        /// <para>NOTE: <see cref="LacerteAccessClient.EnsureLive"/> exists in
+        /// the bridge layer with OPPOSITE semantics (throws when COM is not
+        /// available). The rename here resolves the name collision.</para>
+        /// </summary>
+        private void ThrowIfLiveUnwired()
         {
-            // Sim path is always live (the in-memory store is always there).
-            // Live path throws until Phase 9 wires the bridge + ODBC.
             if (Mode == SessionMode.Live)
             {
                 throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
@@ -890,14 +1038,20 @@ namespace LacertMCP.Server.Session
         // ===================================================================
         // Internals — sim adapters
         //
-        // The session manager touches the sim store directly via ModuleStore
-        // for now. Stream A is filling in the spec-shaped Simulate* methods on
-        // SimulationStore; once those land, swap these helpers to delegate.
+        // Sim helpers below operate on ModuleStore directly rather than
+        // delegating to SimulationStore.SimulateFieldWrite / WriteDetail.
+        // The store methods exist (Phase 2 tasks #19-21) but layer in their
+        // own TAPIStatus guards (e.g. NotSignedIn checks) that this manager
+        // either runs at a different gate-order point or doesn't need;
+        // double-checking would change observable error ordering. Keep the
+        // direct path for field/detail writes.
+        //
+        // CreateClient IS delegated to SimulationStore.SimulateCreateClient
+        // (P14-030) because the spec-faithful gate chain there (IsRegistered
+        // → year → length → regex → TaxType↔Module → duplicate) was being
+        // bypassed when callers reached the session manager directly, making
+        // sim and live observationally divergent.
         // ===================================================================
-
-        // TODO Stream A: when SimulationStore.ProcessQuery / SimulateFieldWrite /
-        // SimulateCreateClient / WriteDetail land with their full TAPIStatus
-        // return-path coverage, swap these helpers to delegate.
 
         private ModuleStore RequireSimModule(SessionContext ctx)
         {
@@ -908,12 +1062,35 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, int table, string clientNumber, string field, object? value,
             int? subClientID, string? stateAbbrev, bool useNewApis)
         {
+            Action? _;
+            return ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value,
+                subClientID, stateAbbrev, useNewApis, out _, registerUndo: false);
+        }
+
+        // P14-043 — overload that captures a per-operation undo closure so
+        // dry-run can roll back in O(1) instead of cloning the whole module.
+        // When registerUndo is false, undo is set to null and the call is
+        // a normal (non-dry-run) write.
+        private int ApplySimFieldWriteWithUndo(
+            SessionContext ctx, int table, string clientNumber, string field, object? value,
+            int? subClientID, string? stateAbbrev, bool useNewApis, out Action? undo)
+        {
+            return ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value,
+                subClientID, stateAbbrev, useNewApis, out undo, registerUndo: true);
+        }
+
+        private int ApplySimFieldWriteWithUndo(
+            SessionContext ctx, int table, string clientNumber, string field, object? value,
+            int? subClientID, string? stateAbbrev, bool useNewApis,
+            out Action? undo, bool registerUndo)
+        {
             // useNewApis is observable here — live mode in Phase 9 picks
             // UpdateTaxReturn vs WriteToDBFDatabase based on it. In sim both
             // paths share the same writer because the store is the canonical
             // source either way.
             _ = useNewApis;
 
+            undo = null;
             var module = RequireSimModule(ctx);
 
             DbfRow? row = null;
@@ -960,12 +1137,43 @@ namespace LacertMCP.Server.Session
                     });
             }
 
+            // Capture the prior value (if any) BEFORE mutating so dry-run can
+            // restore it exactly. A missing entry undoes by Remove; an existing
+            // entry undoes by re-assigning the prior boxed value.
+            if (registerUndo)
+            {
+                var capturedRow = row;
+                var capturedField = field;
+                var hadPrior = row.Fields.TryGetValue(field, out var priorValue);
+                undo = () =>
+                {
+                    if (hadPrior) capturedRow.Fields[capturedField] = priorValue;
+                    else capturedRow.Fields.Remove(capturedField);
+                };
+            }
+
             row.Fields[field] = value;
             return StatusCodes.Success;
         }
 
         private int ApplySimDetailWrite(SessionContext ctx, string clientNumber, DetailRow row, int? replaceIndex)
         {
+            Action? _;
+            return ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out _, registerUndo: false);
+        }
+
+        // P14-043 — overload that captures an O(1) per-op undo for dry-run.
+        private int ApplySimDetailWriteWithUndo(
+            SessionContext ctx, string clientNumber, DetailRow row, int? replaceIndex, out Action? undo)
+        {
+            return ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo, registerUndo: true);
+        }
+
+        private int ApplySimDetailWriteWithUndo(
+            SessionContext ctx, string clientNumber, DetailRow row, int? replaceIndex,
+            out Action? undo, bool registerUndo)
+        {
+            undo = null;
             var module = RequireSimModule(ctx);
             var list = module.Details.GetOrAdd(clientNumber, _ => new List<DetailRow>());
             lock (list)
@@ -978,134 +1186,108 @@ namespace LacertMCP.Server.Session
                         throw new LacerteSDKError(StatusCodes.OutOfIndex,
                             new Dictionary<string, object?> { ["replaceIndex"] = i });
                     }
+                    if (registerUndo)
+                    {
+                        var capturedList = list;
+                        var capturedIndex = i;
+                        var prior = list[i];
+                        undo = () =>
+                        {
+                            lock (capturedList) { capturedList[capturedIndex] = prior; }
+                        };
+                    }
                     list[i] = row;
                 }
                 else
                 {
+                    if (registerUndo)
+                    {
+                        var capturedList = list;
+                        undo = () =>
+                        {
+                            lock (capturedList)
+                            {
+                                if (capturedList.Count > 0)
+                                    capturedList.RemoveAt(capturedList.Count - 1);
+                            }
+                        };
+                    }
                     list.Add(row);
                 }
             }
             return StatusCodes.Success;
         }
 
+        // P14-030 — delegate to SimulationStore.SimulateCreateClient so the
+        // spec-faithful gate order (NotSignedIn → year → length → regex →
+        // TaxType↔Module → duplicate) runs uniformly in sim. Translates the
+        // (status, clientNumber) tuple back to the manager's throw-on-error
+        // contract.
         private CreateClientResult ApplySimCreateClient(SessionContext ctx, CreateClientArgs args)
         {
-            var module = RequireSimModule(ctx);
+            Action? _;
+            return ApplySimCreateClientWithUndo(ctx, args, out _, registerUndo: false);
+        }
 
-            // Duplicate ClientID check — scan DATA1 for matching ClientID.
-            foreach (var existing in module.Clients.Values)
+        private CreateClientResult ApplySimCreateClientWithUndo(
+            SessionContext ctx, CreateClientArgs args, out Action? undo)
+        {
+            return ApplySimCreateClientWithUndo(ctx, args, out undo, registerUndo: true);
+        }
+
+        private CreateClientResult ApplySimCreateClientWithUndo(
+            SessionContext ctx, CreateClientArgs args, out Action? undo, bool registerUndo)
+        {
+            undo = null;
+            var simArgs = new SimulateCreateClientArgs(
+                ctx.DataPath, ctx.Year, ctx.Module,
+                args.ClientID, args.TaxType,
+                args.FirstName, args.LastName, args.EmailID);
+
+            // Capture pre-state for undo BEFORE calling SimulateCreateClient so
+            // a successful create can be rolled back atomically for dry-run.
+            var module = registerUndo ? RequireSimModule(ctx) : null;
+            var priorNext = module?.NextClientNumber ?? 0;
+
+            var (status, clientNumber) = _sim!.SimulateCreateClient(simArgs);
+            if (status != StatusCodes.Success)
             {
-                if (existing.Fields.TryGetValue("ClientID", out var v) &&
-                    v is string s &&
-                    string.Equals(s, args.ClientID, StringComparison.OrdinalIgnoreCase))
+                throw new LacerteSDKError(status, new Dictionary<string, object?>
                 {
-                    throw new LacerteSDKError(StatusCodes.DuplicateClient,
-                        new Dictionary<string, object?> { ["clientID"] = args.ClientID });
-                }
+                    ["clientID"] = args.ClientID,
+                    ["taxType"] = args.TaxType,
+                    ["module"] = ctx.Module.ToString(),
+                });
             }
 
-            var clientNumber = System.Threading.Interlocked.Increment(ref module.NextClientNumber).ToString();
-            // Interlocked.Increment returned the post-increment value; we want
-            // the pre-increment slot. Compensate.
-            clientNumber = (int.Parse(clientNumber) - 1).ToString();
-
-            var row = new DbfRow(clientNumber)
+            if (registerUndo && module != null && clientNumber != null)
             {
-                Fields =
+                var capturedModule = module;
+                var capturedClient = clientNumber;
+                var capturedPriorNext = priorNext;
+                undo = () =>
                 {
-                    ["C1_0"] = clientNumber,
-                    ["C1_1"] = args.FirstName,
-                    ["C1_2"] = args.LastName,
-                    ["C1_3"] = args.EmailID,
-                    ["ClientID"] = args.ClientID,
-                    ["TaxType"] = args.TaxType,
-                },
-            };
-            module.Clients[clientNumber] = row;
-            return new CreateClientResult(StatusCodes.Success, clientNumber);
+                    capturedModule.Clients.TryRemove(capturedClient, out _);
+                    capturedModule.Details.TryRemove(capturedClient, out _);
+                    Interlocked.Exchange(ref capturedModule.NextClientNumber, capturedPriorNext);
+                };
+            }
+
+            return new CreateClientResult(status, clientNumber);
         }
 
         // ===================================================================
-        // Internals — snapshot/restore for dry-run
+        // Internals — row-shape clone for read paths
+        //
+        // P14-043/P14-070 — The old whole-module SimSnapshot/SimRestore pair
+        // is gone. Dry-run write chokepoints use per-operation undo closures
+        // returned by ApplySim*WithUndo helpers above. The change drops dry-run
+        // cost from O(active-module) to O(1) and resolves the stale "TODO
+        // Stream A" pointing at SimulationStore.Snapshot/Restore (task #23
+        // completed; the broader Snapshot/Restore primitive is intentionally
+        // not used here because it clones every module, not just the active
+        // one, and the dry-run contract only needs single-op rollback).
         // ===================================================================
-
-        // TODO Stream A: SimulationStore.Snapshot/Restore (task #23) will
-        // supersede this — at which point delegate to _sim.Snapshot/Restore.
-        // For now a per-call deep clone of only the active module is enough
-        // for write chokepoint dry-run semantics.
-
-        private sealed class SimDryRunSnapshot
-        {
-            public string DataPath = "";
-            public int Year;
-            public char Module;
-            public List<KeyValuePair<string, DbfRow>> Clients = new List<KeyValuePair<string, DbfRow>>();
-            public List<KeyValuePair<(string, int), DbfRow>> SubClients = new List<KeyValuePair<(string, int), DbfRow>>();
-            public List<KeyValuePair<(string, string), DbfRow>> States = new List<KeyValuePair<(string, string), DbfRow>>();
-            public List<KeyValuePair<(string, int, string), DbfRow>> StateSubs = new List<KeyValuePair<(string, int, string), DbfRow>>();
-            public List<KeyValuePair<string, DbfRow>> Statuses = new List<KeyValuePair<string, DbfRow>>();
-            public List<KeyValuePair<string, DbfRow>> Displays = new List<KeyValuePair<string, DbfRow>>();
-            public List<KeyValuePair<string, List<DbfRow>>> Forms = new List<KeyValuePair<string, List<DbfRow>>>();
-            public List<KeyValuePair<string, List<DetailRow>>> Details = new List<KeyValuePair<string, List<DetailRow>>>();
-            public int NextClientNumber;
-            public int NextEFilingId;
-        }
-
-        private SimDryRunSnapshot SimSnapshot()
-        {
-            var ctx = RequireContext();
-            var module = RequireSimModule(ctx);
-            var snap = new SimDryRunSnapshot
-            {
-                DataPath = ctx.DataPath,
-                Year = ctx.Year,
-                Module = ctx.Module,
-                NextClientNumber = module.NextClientNumber,
-                NextEFilingId = module.NextEFilingId,
-            };
-            foreach (var kv in module.Clients) snap.Clients.Add(new KeyValuePair<string, DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.SubClients) snap.SubClients.Add(new KeyValuePair<(string, int), DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.States) snap.States.Add(new KeyValuePair<(string, string), DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.StateSubs) snap.StateSubs.Add(new KeyValuePair<(string, int, string), DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.Statuses) snap.Statuses.Add(new KeyValuePair<string, DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.Displays) snap.Displays.Add(new KeyValuePair<string, DbfRow>(kv.Key, CloneDbfRow(kv.Value)));
-            foreach (var kv in module.Forms) snap.Forms.Add(new KeyValuePair<string, List<DbfRow>>(kv.Key, kv.Value.Select(CloneDbfRow).ToList()));
-            foreach (var kv in module.Details) snap.Details.Add(new KeyValuePair<string, List<DetailRow>>(kv.Key, kv.Value.ToList()));
-            return snap;
-        }
-
-        private void SimRestore(SimDryRunSnapshot snap)
-        {
-            var module = _sim!.GetOrAddModule(snap.DataPath, snap.Year, snap.Module);
-            module.Clients.Clear();
-            foreach (var kv in snap.Clients) module.Clients[kv.Key] = kv.Value;
-            module.SubClients.Clear();
-            foreach (var kv in snap.SubClients) module.SubClients[kv.Key] = kv.Value;
-            module.States.Clear();
-            foreach (var kv in snap.States) module.States[kv.Key] = kv.Value;
-            module.StateSubs.Clear();
-            foreach (var kv in snap.StateSubs) module.StateSubs[kv.Key] = kv.Value;
-            module.Statuses.Clear();
-            foreach (var kv in snap.Statuses) module.Statuses[kv.Key] = kv.Value;
-            module.Displays.Clear();
-            foreach (var kv in snap.Displays) module.Displays[kv.Key] = kv.Value;
-            module.Forms.Clear();
-            foreach (var kv in snap.Forms) module.Forms[kv.Key] = kv.Value;
-            module.Details.Clear();
-            foreach (var kv in snap.Details) module.Details[kv.Key] = kv.Value;
-            module.NextClientNumber = snap.NextClientNumber;
-            module.NextEFilingId = snap.NextEFilingId;
-        }
-
-        private static DbfRow CloneDbfRow(DbfRow src)
-        {
-            var copy = new DbfRow(src.ClientNumber, src.SubClientID, src.StateAbbrev);
-            foreach (var kv in src.Fields)
-            {
-                copy.Fields[kv.Key] = kv.Value;
-            }
-            return copy;
-        }
 
         private static Dictionary<string, object?> CloneRow(DbfRow src)
         {
@@ -1126,6 +1308,31 @@ namespace LacertMCP.Server.Session
         // Internals — idempotency cache
         // ===================================================================
 
+        // P14-005 — wraps the (TryReplay → execute body → StoreIdempotent)
+        // triple in a per-key SemaphoreSlim so concurrent same-key writes are
+        // serialized. Null/empty key bypasses locking entirely (no idempotency
+        // contract). The semaphore stays in _idempotencyLocks for the life of
+        // the session — cheap to leak (one SemaphoreSlim per unique key) and
+        // removing introduces a separate race.
+        private async Task<T> ExecuteWithIdempotencyLock<T>(string? key, Func<Task<T>> body)
+        {
+            if (body == null) throw new ArgumentNullException(nameof(body));
+            if (string.IsNullOrEmpty(key))
+            {
+                return await body().ConfigureAwait(false);
+            }
+            var sem = _idempotencyLocks.GetOrAdd(key!, _ => new SemaphoreSlim(1, 1));
+            await sem.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                return await body().ConfigureAwait(false);
+            }
+            finally
+            {
+                sem.Release();
+            }
+        }
+
         private bool TryReplayIdempotent<T>(string? key, string payload, out T cached)
         {
             cached = default!;
@@ -1133,6 +1340,12 @@ namespace LacertMCP.Server.Session
 
             if (_idempotencyCache.TryGetValue(key!, out var entry))
             {
+                // P14-013/P14-064 — expired entries: treat as miss + evict.
+                if (DateTimeOffset.UtcNow - entry.CreatedAt > IdempotencyTtl)
+                {
+                    _idempotencyCache.TryRemove(key!, out _);
+                    return false;
+                }
                 if (entry.PayloadFingerprint == payload)
                 {
                     if (entry.Result is T match) { cached = match; return true; }
@@ -1153,7 +1366,40 @@ namespace LacertMCP.Server.Session
             if (string.IsNullOrEmpty(key)) return;
             _idempotencyCache[key!] = new IdempotencyCacheEntry(
                 payload, result, DateTimeOffset.UtcNow);
+
+            // P14-013/P14-064 — opportunistic eviction when over cap. Drop
+            // expired entries first; if still over cap, drop the single
+            // oldest entry by CreatedAt. Single LINQ scan over ~10k entries
+            // is fine for the cold path.
+            if (_idempotencyCache.Count > IdempotencyCacheMaxEntries)
+            {
+                var cutoff = DateTimeOffset.UtcNow - IdempotencyTtl;
+                foreach (var kv in _idempotencyCache)
+                {
+                    if (kv.Value.CreatedAt < cutoff)
+                    {
+                        _idempotencyCache.TryRemove(kv.Key, out _);
+                    }
+                }
+                if (_idempotencyCache.Count > IdempotencyCacheMaxEntries)
+                {
+                    var oldestKey = _idempotencyCache
+                        .OrderBy(kv => kv.Value.CreatedAt)
+                        .Select(kv => kv.Key)
+                        .FirstOrDefault();
+                    if (oldestKey != null)
+                    {
+                        _idempotencyCache.TryRemove(oldestKey, out _);
+                    }
+                }
+            }
         }
+
+        // P14-042 — single cached JsonSerializerOptions to avoid the default-
+        // options allocation per call. Once the no-key path is short-circuited
+        // upstream, BuildPayload only runs for explicit idempotency-key
+        // writes, but the options cache is essentially free.
+        private static readonly JsonSerializerOptions s_payloadJsonOptions = new JsonSerializerOptions();
 
         private static string BuildPayload(string op, params object?[] args)
         {
@@ -1166,7 +1412,7 @@ namespace LacertMCP.Server.Session
                 ["op"] = op,
                 ["args"] = args,
             };
-            var json = JsonSerializer.Serialize(canon);
+            var json = JsonSerializer.Serialize(canon, s_payloadJsonOptions);
             using (var sha = SHA256.Create())
             {
                 var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(json));
@@ -1212,7 +1458,11 @@ namespace LacertMCP.Server.Session
             // no disposable resources today; the live bridge will when Phase 9
             // wires it.
             (_bridge as IDisposable)?.Dispose();
-            (_odbc as IDisposable)?.Dispose();
+            // P14-060 — _odbc is typed LacerteDsnReader? now; direct dispose
+            // is cleaner than the as-IDisposable cast that hid the type.
+            _odbc?.Dispose();
+            // Dispose all idempotency-lock semaphores.
+            foreach (var sem in _idempotencyLocks.Values) sem.Dispose();
         }
     }
 

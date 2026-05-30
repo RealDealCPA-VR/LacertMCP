@@ -25,20 +25,8 @@ namespace LacertMCP.Server.Tools
     [McpServerToolType]
     public class MetadataTools
     {
-        // Module char → friendly basename — mirrors the loader's internal map
-        // so the metadata response can label the source shard.
-        private static readonly IReadOnlyDictionary<char, string> _moduleFileName = new Dictionary<char, string>
-        {
-            { 'I', "individual" },
-            { 'C', "corporate" },
-            { 'P', "partnership" },
-            { 'S', "scorp" },
-            { 'F', "fiduciary" },
-            { 'R', "exempt" },
-            { 'T', "estate" },
-            { 'N', "gift" },
-            { 'B', "benefit" },
-        };
+        // Per-module file-basename + accepted-module-set both live on
+        // Schema.Modules now (single source of truth).
 
         [McpServerTool]
         [Description("Return the resolved field access map for (module, table, year). Includes (a) the universal C{t}_0 -> ReadOnly rule, and (b) every cataloged field for the module/table from the loaded JSON shard. Useful before attempting a field write — the same gate runs server-side via AssertWritable.")]
@@ -49,14 +37,15 @@ namespace LacertMCP.Server.Tools
         {
             return WrapToolHandler.Run(() =>
             {
-                if (!_moduleFileName.ContainsKey(module))
+                var moduleInfo = Modules.GetByChar(module);
+                if (moduleInfo == null)
                 {
                     throw new LacerteSDKError(
                         StatusCodes.InValidClientName,
                         new Dictionary<string, object?>
                         {
                             ["module"] = module.ToString(),
-                            ["validModules"] = string.Join(",", _moduleFileName.Keys),
+                            ["validModules"] = string.Join(",", Modules.All.Select(m => m.Char)),
                         });
                 }
                 if (table < 1 || table > 7)
@@ -120,7 +109,7 @@ namespace LacertMCP.Server.Tools
                 return Task.FromResult<object>(new
                 {
                     module = module.ToString(),
-                    moduleName = _moduleFileName[module],
+                    moduleName = moduleInfo.Name,
                     table,
                     year,
                     count = entries.Count,

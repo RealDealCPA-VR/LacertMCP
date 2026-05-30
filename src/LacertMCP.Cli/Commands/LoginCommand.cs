@@ -49,7 +49,11 @@ namespace LacertMCP.Cli.Commands
             }
 
             Console.WriteLine("Refreshing Lacerte SDK session:");
-            Console.WriteLine($"  AppID  : {existing.Value:D}");
+            // Login runs frequently (every 24h ticket refresh); always print the masked AppID.
+            // The full GUID was already surfaced once at register-time for the operator's backup —
+            // re-echoing it on every refresh is unnecessary credential exposure. Re-fetch the full
+            // GUID via `lacerte-mcp status --show-app-id` if a backup is needed.
+            Console.WriteLine($"  AppID  : {AppIdStore.Mask(existing.Value)}");
             Console.WriteLine($"  AppName: {appName}");
             Console.WriteLine($"  TaxYear: {taxYear}");
             Console.WriteLine();

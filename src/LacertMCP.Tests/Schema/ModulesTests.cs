@@ -79,5 +79,60 @@ namespace LacertMCP.Tests.Schema
             var distinctCount = Modules.All.Select(m => m.ReturnType).Distinct().Count();
             Assert.Equal(Modules.All.Count, distinctCount);
         }
+
+        [Theory]
+        [InlineData('I', "individual")]
+        [InlineData('C', "corporate")]
+        [InlineData('P', "partnership")]
+        [InlineData('S', "scorp")]
+        [InlineData('F', "fiduciary")]
+        [InlineData('R', "exempt")]
+        [InlineData('T', "estate")]
+        [InlineData('N', "gift")]
+        [InlineData('B', "benefit")]
+        public void FileBasenameFor_Returns_Expected(char c, string expected)
+        {
+            Assert.Equal(expected, Modules.FileBasenameFor(c));
+        }
+
+        [Fact]
+        public void FileBasenameFor_Unknown_Returns_Null()
+        {
+            Assert.Null(Modules.FileBasenameFor('Z'));
+        }
+
+        [Theory]
+        [InlineData('I', "Individual", true)]
+        [InlineData('I', "1040", true)]
+        [InlineData('I', "individual", true)]     // case-insensitive
+        [InlineData('I', "INDIVIDUAL", true)]
+        [InlineData('I', "Corporate", false)]    // wrong module
+        [InlineData('S', "SCorporate", true)]
+        [InlineData('S', "1120S", true)]
+        [InlineData('S', "scorp", true)]          // case-insensitive
+        [InlineData('S', "S-Corporation", true)]
+        [InlineData('B', "5500", true)]
+        [InlineData('Z', "Anything", false)]      // unknown module
+        [InlineData('I', "", false)]              // empty taxType
+        [InlineData('I', null, false)]            // null taxType
+        public void AcceptsTaxType_Returns_Expected(char c, string? taxType, bool expected)
+        {
+            Assert.Equal(expected, Modules.AcceptsTaxType(c, taxType));
+        }
+
+        [Fact]
+        public void TaxTypeAliasesFor_Unknown_Returns_Null()
+        {
+            Assert.Null(Modules.TaxTypeAliasesFor('Z'));
+        }
+
+        [Fact]
+        public void TaxTypeAliasesFor_Individual_Contains_Both_Aliases()
+        {
+            var aliases = Modules.TaxTypeAliasesFor('I');
+            Assert.NotNull(aliases);
+            Assert.Contains("Individual", aliases!);
+            Assert.Contains("1040", aliases!);
+        }
     }
 }

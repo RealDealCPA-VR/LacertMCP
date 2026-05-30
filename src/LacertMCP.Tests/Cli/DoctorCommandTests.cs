@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using LacertMCP.Cli.Commands;
@@ -12,6 +13,86 @@ namespace LacertMCP.Tests.Cli
     [Collection(CliCollection.Name)]
     public class DoctorCommandTests
     {
+        // P14-071 helpers: build synthetic ProbeResult lists for pinning ComputeExitCode.
+        private static DoctorCommand.ProbeResult Pass(string n = "p") =>
+            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Pass, "ok");
+        private static DoctorCommand.ProbeResult Fail(string n = "p") =>
+            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Fail, "bad", "fix it");
+        private static DoctorCommand.ProbeResult Skip(string n = "p") =>
+            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Skipped, "skipped: x");
+        private static DoctorCommand.ProbeResult Warn(string n = "p") =>
+            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Warn, "warn");
+
+        /// <summary>
+        /// P14-071: all-Pass results → exit 0. Pins the green-path contract.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_AllPass_Returns0()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Pass("b"), Pass("c") };
+            Assert.Equal(0, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: a Warn alongside Passes still counts as green (Warn is advisory).
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_PassesPlusWarn_Returns0()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Warn("b"), Pass("c") };
+            Assert.Equal(0, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: at least one Fail → exit 1. Pins the red-path contract.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_OneFail_Returns1()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Fail("b"), Pass("c") };
+            Assert.Equal(1, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: at least one Skipped, no Fails → exit 2. Pins the partial-path contract.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_OneSkipNoFail_Returns2()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Skip("b"), Pass("c") };
+            Assert.Equal(2, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: Fail trumps Skip — a red probe always wins over a skipped one,
+        /// even when both are present. Confirms the precedence ordering.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_FailTrumpsSkip_Returns1()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Skip("a"), Fail("b"), Pass("c") };
+            Assert.Equal(1, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: defensive — empty results = no failures, no skips = green path.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_Empty_Returns0()
+        {
+            var results = new List<DoctorCommand.ProbeResult>();
+            Assert.Equal(0, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// P14-071: null guard — argument validation on the pure function.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_Null_Throws()
+        {
+            Assert.Throws<ArgumentNullException>(() => DoctorCommand.ComputeExitCode(null!));
+        }
+
         [Fact]
         public void Doctor_Run_Emits_Output_And_Returns_Valid_Exit_Code()
         {

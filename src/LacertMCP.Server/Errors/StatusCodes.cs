@@ -77,7 +77,7 @@ namespace LacertMCP.Server.Errors
                 "Error",
                 Severity.Error,
                 "Lacerte returned a generic error with no further detail.",
-                "Re-run with LACERTE_DEBUG=1 to capture the bridge call args; check Windows Event Viewer for SDK traces."),
+                "Re-run with LACERTE_DEBUG_WIRE=1 to capture the bridge call args; check Windows Event Viewer for SDK traces."),
 
             [Success] = new StatusInfo(
                 "Success",
@@ -89,7 +89,7 @@ namespace LacertMCP.Server.Errors
                 "DBFNotAccessable",
                 Severity.Error,
                 "The Lacerte data file is missing, locked, or on a path this MCP can't reach.",
-                "Confirm LACERTE_DATAPATH exists and the user account has read/write on it; close the file in Lacerte if open exclusively."),
+                "Confirm LACERTE_DATA_PATH exists and the user account has read/write on it; close the file in Lacerte if open exclusively."),
 
             [CodeBaseError] = new StatusInfo(
                 "CodeBaseError",

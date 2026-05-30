@@ -97,58 +97,88 @@ namespace LacertMCP.Server.Session.Fixtures
         // Detail-row starter sets. 2-3 rows per client is enough to exercise
         // read/write paths; expand to 5-15 once the chokepoint methods land.
         // TODO: expand to 5-15 per client per task #17.
+        //
+        // Series IDs (P14-055): the detail-file Series column is a NUMERIC
+        // Lacerte screen identifier per spec §2 and the live ODBC wire
+        // shape (agent 03 §4 example: `Series = 11`). DetailRow.Series is
+        // typed `string` to preserve the wire shape, but seed values use
+        // numeric strings so the in-memory store is observationally
+        // identical to live for any future SQL-driven detail-row read
+        // path (e.g. SqlTemplates.DetailBySeries which emits
+        // `where Series = 11`). The SeriesIds class below names the
+        // documented IDs for readability.
         // ----------------------------------------------------------------
+
+        /// <summary>
+        /// Named constants for the documented Lacerte detail-file Series IDs
+        /// (spec §2 / agent 03 §4). Stored as numeric strings — the wire
+        /// shape of <see cref="DetailRow.Series"/> is <c>string</c>, but the
+        /// values are guaranteed parseable integers so SQL templates that
+        /// emit unquoted integer literals (e.g. <c>where Series = 11</c>)
+        /// match the in-memory rows correctly. Source: audit task P14-055,
+        /// Lacerte SDK Developer Instructions §2 detail-file column table.
+        /// </summary>
+        public static class SeriesIds
+        {
+            public const string Wages   = "11"; // W-2 income
+            public const string Int     = "12"; // Interest income (1099-INT)
+            public const string Div     = "13"; // Dividend income (1099-DIV)
+            public const string Dep     = "14"; // Dependent listings
+            public const string Inc     = "20"; // Corporate / partnership income
+            public const string State   = "30"; // State apportionment
+            public const string Partner = "40"; // Partnership partner rows
+        }
 
         public static List<DetailRow> SmithDetails() => new List<DetailRow>
         {
-            new DetailRow("Wages", "",  "1",  "", "", "", "W2",      "T", "", 75000.00, "ACME Industries W-2"),
-            new DetailRow("Int",   "",  "1",  "", "", "", "1099INT", "T", "",   320.50, "First Bank interest"),
+            new DetailRow(SeriesIds.Wages, "",  "1",  "", "", "", "W2",      "T", "", 75000.00, "ACME Industries W-2"),
+            new DetailRow(SeriesIds.Int,   "",  "1",  "", "", "", "1099INT", "T", "",   320.50, "First Bank interest"),
         };
 
         public static List<DetailRow> JonesDetails() => new List<DetailRow>
         {
-            new DetailRow("Wages", "", "1", "", "", "", "W2",      "J", "", 120000.00, "Joint household wages"),
-            new DetailRow("Div",   "", "1", "", "", "", "1099DIV", "J", "",   1850.75, "Brokerage dividends"),
-            new DetailRow("Dep",   "", "1", "", "", "", "",        "",  "",      0.00, "Dependent: Susan Jones, age 8"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",      "J", "", 120000.00, "Joint household wages"),
+            new DetailRow(SeriesIds.Div,   "", "1", "", "", "", "1099DIV", "J", "",   1850.75, "Brokerage dividends"),
+            new DetailRow(SeriesIds.Dep,   "", "1", "", "", "", "",        "",  "",      0.00, "Dependent: Susan Jones, age 8"),
         };
 
         public static List<DetailRow> RejectedDetails() => new List<DetailRow>
         {
-            new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 45000.00, "Single wages — return rejected"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2", "T", "", 45000.00, "Single wages — return rejected"),
         };
 
         public static List<DetailRow> BrownDetails() => new List<DetailRow>
         {
-            new DetailRow("Wages", "", "1", "", "", "", "W2",      "T", "", 95000.00, "Bill primary wages"),
-            new DetailRow("Wages", "", "2", "", "", "", "W2",      "S", "", 82000.00, "Spouse wages"),
-            new DetailRow("Dep",   "", "1", "", "", "", "",        "",  "",     0.00, "Dependent: Tim Brown, age 12"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",      "T", "", 95000.00, "Bill primary wages"),
+            new DetailRow(SeriesIds.Wages, "", "2", "", "", "", "W2",      "S", "", 82000.00, "Spouse wages"),
+            new DetailRow(SeriesIds.Dep,   "", "1", "", "", "", "",        "",  "",     0.00, "Dependent: Tim Brown, age 12"),
         };
 
         public static List<DetailRow> PendDetails() => new List<DetailRow>
         {
-            new DetailRow("Wages", "", "1", "", "", "", "W2",  "J", "", 210000.00, "Joint EF in-flight"),
-            new DetailRow("Int",   "", "1", "", "", "", "1099INT", "J", "", 1200.00, "EF in-flight interest"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",  "J", "", 210000.00, "Joint EF in-flight"),
+            new DetailRow(SeriesIds.Int,   "", "1", "", "", "", "1099INT", "J", "", 1200.00, "EF in-flight interest"),
         };
 
         public static List<DetailRow> AcmeDetails() => new List<DetailRow>
         {
-            new DetailRow("Inc",   "", "1", "", "",   "", "",  "", "", 5_200_000.00, "Gross receipts"),
-            new DetailRow("State", "", "1", "", "CA", "", "",  "", "", 3_100_000.00, "CA apportioned income"),
-            new DetailRow("State", "", "2", "", "NY", "", "",  "", "", 2_100_000.00, "NY apportioned income"),
+            new DetailRow(SeriesIds.Inc,   "", "1", "", "",   "", "",  "", "", 5_200_000.00, "Gross receipts"),
+            new DetailRow(SeriesIds.State, "", "1", "", "CA", "", "",  "", "", 3_100_000.00, "CA apportioned income"),
+            new DetailRow(SeriesIds.State, "", "2", "", "NY", "", "",  "", "", 2_100_000.00, "NY apportioned income"),
         };
 
         public static List<DetailRow> WidgDetails() => new List<DetailRow>
         {
-            new DetailRow("Inc",   "", "1", "", "",   "", "", "", "", 850_000.00, "Gross receipts"),
-            new DetailRow("State", "", "1", "", "TX", "", "", "", "", 850_000.00, "TX apportioned income"),
+            new DetailRow(SeriesIds.Inc,   "", "1", "", "",   "", "", "", "", 850_000.00, "Gross receipts"),
+            new DetailRow(SeriesIds.State, "", "1", "", "TX", "", "", "", "", 850_000.00, "TX apportioned income"),
         };
 
         public static List<DetailRow> PartDetails() => new List<DetailRow>
         {
-            new DetailRow("Inc",     "", "1", "", "", "", "", "", "", 1_500_000.00, "Ordinary income"),
-            new DetailRow("Partner", "", "1", "", "", "", "", "", "",   750_000.00, "Alice share — 50%"),
-            new DetailRow("Partner", "", "2", "", "", "", "", "", "",   450_000.00, "Bob share — 30%"),
-            new DetailRow("Partner", "", "3", "", "", "", "", "", "",   300_000.00, "Carol share — 20%"),
+            new DetailRow(SeriesIds.Inc,     "", "1", "", "", "", "", "", "", 1_500_000.00, "Ordinary income"),
+            new DetailRow(SeriesIds.Partner, "", "1", "", "", "", "", "", "",   750_000.00, "Alice share — 50%"),
+            new DetailRow(SeriesIds.Partner, "", "2", "", "", "", "", "", "",   450_000.00, "Bob share — 30%"),
+            new DetailRow(SeriesIds.Partner, "", "3", "", "", "", "", "", "",   300_000.00, "Carol share — 20%"),
         };
     }
 

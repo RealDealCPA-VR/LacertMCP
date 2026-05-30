@@ -23,21 +23,9 @@ namespace LacertMCP.Cli.Commands
     /// </summary>
     public static class FieldAccessCommand
     {
-        // Char → filename basename, mirroring FieldAccessMapLoader._moduleFileName.
-        // Duplicated here because the server's table is private; one source of truth
-        // can be extracted in a later cleanup if it drifts.
-        private static readonly IReadOnlyDictionary<char, string> _moduleFileName = new Dictionary<char, string>
-        {
-            { 'I', "individual" },
-            { 'C', "corporate" },
-            { 'P', "partnership" },
-            { 'S', "scorp" },
-            { 'F', "fiduciary" },
-            { 'R', "exempt" },
-            { 'T', "estate" },
-            { 'N', "gift" },
-            { 'B', "benefit" },
-        };
+        // Char → filename basename now lives on Schema.Modules.FileBasenameFor
+        // (single source of truth — formerly duplicated in this CLI, in the
+        // server's FieldAccessMapLoader, and in MetadataTools).
 
         public static Command Build()
         {
@@ -88,7 +76,7 @@ namespace LacertMCP.Cli.Commands
 
         public static int RunList(char module, int table, int year, TextWriter writer)
         {
-            if (!_moduleFileName.ContainsKey(module))
+            if (Modules.FileBasenameFor(module) == null)
             {
                 Console.Error.WriteLine($"Unknown module '{module}'. Expected one of I/C/P/S/F/R/T/N/B.");
                 return 1;
@@ -172,7 +160,8 @@ namespace LacertMCP.Cli.Commands
         public static int RunSet(char module, int table, string field, string accessRaw,
             string? dataType, int? maxLength, string source, string? note, TextWriter writer)
         {
-            if (!_moduleFileName.TryGetValue(module, out var basename))
+            var basename = Modules.FileBasenameFor(module);
+            if (basename == null)
             {
                 Console.Error.WriteLine($"Unknown module '{module}'.");
                 return 1;
@@ -265,7 +254,8 @@ namespace LacertMCP.Cli.Commands
 
         private static Dictionary<string, FieldEntry> ReadShard(char module)
         {
-            if (!_moduleFileName.TryGetValue(module, out var basename))
+            var basename = Modules.FileBasenameFor(module);
+            if (basename == null)
             {
                 return new Dictionary<string, FieldEntry>();
             }

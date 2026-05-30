@@ -23,7 +23,7 @@ namespace LacertMCP.Server.Bridge
     /// does NOT reference the Cli assembly (Cli references Server, not the
     /// other way around), so this file duplicates the minimal CredRead path
     /// from <c>LacertMCP.Cli.Storage.AppIdStore.Get()</c>. Kept in sync with
-    /// that file at the same target/account constants.
+    /// that file at the same target constant.
     /// </para>
     ///
     /// <para>
@@ -33,9 +33,10 @@ namespace LacertMCP.Server.Bridge
     /// </summary>
     public static class Registration
     {
-        // Mirrors LacertMCP.Cli.Storage.AppIdStore constants.
+        // Mirrors LacertMCP.Cli.Storage.AppIdStore constants. Registration only
+        // reads the credential (TryCredRead uses TargetName only), so the account
+        // half lives on the Cli writer side and is not duplicated here.
         public const string CredentialTarget = "lacerte-mcp";
-        public const string CredentialAccount = "app-id";
 
         /// <summary>
         /// Calls <c>ITPRegistration.Register(appName, appId, taxYear)</c> via
@@ -104,31 +105,6 @@ namespace LacertMCP.Server.Bridge
                         ["reason"] = ex.Message,
                     }, ex);
             }
-        }
-
-        /// <summary>
-        /// Convenience overload: pulls the AppID from Windows Credential
-        /// Manager (or the file fallback off-Windows) and forwards to
-        /// <see cref="Register(string, string, int)"/>.
-        ///
-        /// <para>
-        /// Throws <see cref="SyntheticStatusCodes.AppNotRegistered"/> (9006)
-        /// when no AppID has been minted yet — operator must run
-        /// <c>lacerte-mcp register</c> first.
-        /// </para>
-        /// </summary>
-        public static int RegisterWithStoredAppId(string appName, int taxYear)
-        {
-            var appId = GetStoredAppId();
-            if (appId == null)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.AppNotRegistered,
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = "No AppID found in Credential Manager. Run `lacerte-mcp register` first.",
-                    });
-            }
-            return Register(appName, appId.Value.ToString("D"), taxYear);
         }
 
         /// <summary>

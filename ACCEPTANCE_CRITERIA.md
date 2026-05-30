@@ -14,7 +14,7 @@ Per-task definitions of "done." Each `Todo.md` task should reference an entry he
 > Calling it with `clientNumber: 'TOOLONGCLIENTID'` returns a validation error before any SDK call (client-side enforcement of the 8-char rule).
 > When the session context is TY21+, the call routes through `UpdateTaxReturn(...)` keyed by `clientNumber` (visible in `LACERTE_DEBUG_WIRE=1` log).
 > When the session context is TY18–TY20, the call routes through `WriteToDBFDatabase(...)` keyed by row number — and the simulation harness resolves the row from `clientNumber`.
-> `npm run build` passes.
+> `dotnet build LacertMCP.sln -c Debug -p:Platform=x64` reports 0 warnings / 0 errors and `dotnet test src/LacertMCP.Tests` is green.
 
 ---
 
@@ -46,13 +46,13 @@ All Phase 5 tools share these baseline guarantees (do not repeat per entry):
 
 #### #42 — `ClientsTools.cs`
 
-* `lacerte_client_list` accepts optional `nameFilter` (case-insensitive prefix) and `limit` (default 100). Returns `{count, clients}`. Filter matches C1_2 (last name) on module I, C1_1 (entity name) on other modules.
+* `lacerte_client_list` accepts optional `nameFilter` (case-insensitive prefix), `limit` (default 100), and `offset` (default 0). Returns the paginated envelope `{rows, total, limit, offset, hasMore, nextOffset}`; legacy `{count, clients}` keys retained for back-compat through v0.1.x and REMOVED in v0.2 per DECISIONS.md (add the decision entry if missing). Filter matches C1_2 (last name) on module I, C1_1 (entity name) on other modules.
 * `lacerte_client_read` accepts `clientNumber`. Returns `{clientNumber, found, client}`; `client` is null when not found.
 * Both return 9009 (`ContextNotSet`) when `lacerte_set_context` has not been called.
 
 #### #43 — `TablesTools.cs`
 
-* `lacerte_table_read` accepts `table` (1-7), optional `clientNumber`, optional `stateAbbrev`. Returns `{table, clientNumber, stateAbbrev, count, rows}`.
+* `lacerte_table_read` accepts `table` (1-7), optional `clientNumber`, optional `stateAbbrev`, optional `limit` (default 100), and optional `offset` (default 0). Returns `{table, clientNumber, stateAbbrev, rows, total, limit, offset, hasMore, nextOffset}`; legacy top-level `count` retained for back-compat through v0.1.x and REMOVED in v0.2 per DECISIONS.md.
 * Table 8+ returns 5 (`DBNotSupported`) — DATA8 is reserved.
 * TY21+ branching is the session manager's job; the tool just passes the table number through.
 * Returns 9009 without context.
@@ -89,7 +89,7 @@ All Phase 5 tools share these baseline guarantees (do not repeat per entry):
 #### #50 — Acceptance + README
 
 * This section exists in `ACCEPTANCE_CRITERIA.md`.
-* README has a "Tools (Phase 5 — Read)" table listing all 11 read tools.
+* README has a "Tools (Phase 5 — Read)" table listing all 15 Phase 5 read tools plus `lacerte_health` (Phase 0 health probe).
 * All Phase 5 tool tests pass under `dotnet test --filter "FullyQualifiedName~Tools.<Name>ToolsTests"`.
 
 ---
@@ -168,3 +168,21 @@ All write tools share these baseline guarantees (do not repeat per entry):
 #### #61 — `MetadataTools.cs` (`lacerte_return_codes`)
 
 * `lacerte_return_codes` returns `{count, codes: [{code, name, severity, userMessage, remediation, origin}]}` for every entry in `StatusCodes.StatusTable` (TAPIStatus 0..28 + TPSDKStatus 200..204) AND `SyntheticStatusCodes.StatusTable` (9xxx). `origin` is one of `TAPIStatus | TPSDKStatus | Synthetic`. At least 30 entries shipped.
+
+---
+
+### Phase 11 — MCP Prompts
+
+All Phase 11 prompts share these baseline guarantees (do not repeat per entry):
+* Each prompt lives on a `[McpServerPromptType]`-decorated static class (`WorkflowPrompts`) and is exposed by a `[McpServerPrompt(Name = "lacerte_*")]`-decorated static method.
+* Registered via `.WithPromptsFromAssembly()` on the `McpServer` builder in `Program.cs` so they appear in the MCP `prompts/list` response without per-prompt wiring.
+* Each method returns a single-message `GetPromptResult` whose lone `PromptMessage` has `Role.User` and a `TextContentBlock` body.
+* Prompt bodies reference ONLY real `lacerte_*` tool names — no fabricated tools. Every tool name in the body must resolve to an actual `[McpServerTool]` in the registered tool assembly.
+* Each prompt's parameter list carries `[Description("...")]` on every argument so `prompts/list` surfaces useful help text.
+* `prompts/get` round-trips through the MCP test harness in `WorkflowPromptsTests`.
+
+#### #79 — `WorkflowPrompts.cs`
+
+* `lacerte_client_intake(clientName?)` — onboarding walkthrough. Body references `lacerte_session_status`, `lacerte_list_datapaths`, `lacerte_set_context`, `lacerte_client_create`, `lacerte_field_write`, `lacerte_field_access_map`, `lacerte_detail_write`, `lacerte_client_list`, and `lacerte_client_read`. `clientName` is optional; default behavior is to ask the user.
+* `lacerte_review_ef_status(taxYear?)` — e-file triage sweep. Body references `lacerte_session_status`, `lacerte_set_context`, `lacerte_ef_status`, and `lacerte_detail_read`. `taxYear` is optional; default uses the active context's year.
+* `lacerte_bulk_field_update(table=1, field?, previewCount=3)` — bulk-write workflow that ENFORCES a dry-run preview AND idempotency keys. Body references `lacerte_session_status`, `lacerte_set_context`, `lacerte_field_access_map`, `lacerte_field_write`, `lacerte_client_list`, and `lacerte_client_read`. STOPs on the first non-Success status — does not skip+continue.

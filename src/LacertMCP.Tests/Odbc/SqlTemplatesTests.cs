@@ -1,5 +1,8 @@
+using System.Collections.Generic;
+using System.Linq;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Odbc;
+using LacertMCP.Server.Session;
 using Xunit;
 
 namespace LacertMCP.Tests.Odbc
@@ -59,6 +62,57 @@ namespace LacertMCP.Tests.Odbc
         {
             var sql = SqlTemplates.Data1Where("SMIT");
             Assert.Equal("select * from [DATA1-Client Info] where C1_0 = 'SMIT'", sql);
+        }
+
+        // -------------------------------------------------------------------
+        // Data1Top — TOP-based pagination push-down (P14-014)
+        // -------------------------------------------------------------------
+
+        [Fact]
+        public void Data1Top_Emits_TOP_n_With_Validated_Integer()
+        {
+            Assert.Equal("select top 100 * from [DATA1-Client Info]", SqlTemplates.Data1Top(100));
+            Assert.Equal("select top 1 * from [DATA1-Client Info]", SqlTemplates.Data1Top(1));
+            Assert.Equal("select top 25000 * from [DATA1-Client Info]", SqlTemplates.Data1Top(25000));
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(-1)]
+        [InlineData(int.MinValue)]
+        [InlineData(100_001)]
+        public void Data1Top_Rejects_NonPositive_Or_Out_Of_Range(int limit)
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() => SqlTemplates.Data1Top(limit));
+            Assert.Equal(StatusCodes.OutOfIndex, ex.StatusCode);
+        }
+
+        [Fact]
+        public void Data1TopWhereName_Emits_TOP_With_Like_Prefix()
+        {
+            Assert.Equal(
+                "select top 50 * from [DATA1-Client Info] where C1_2 like 'Smi%'",
+                SqlTemplates.Data1TopWhereName(50, "C1_2", "Smi"));
+        }
+
+        [Fact]
+        public void Data1TopWhereName_Escapes_SingleQuote_In_NamePrefix()
+        {
+            // O'Reilly — SQL injection attempt via embedded single quote should
+            // be doubled per SQL-92 literal escape rules.
+            var sql = SqlTemplates.Data1TopWhereName(10, "C1_2", "O'Re");
+            Assert.Contains("'O''Re%'", sql);
+        }
+
+        [Theory]
+        [InlineData("C1_2; drop")]  // semicolon
+        [InlineData("col2")]         // not C{t}_N shape
+        [InlineData("C8_0")]         // out of 1..7 table range
+        [InlineData("")]
+        public void Data1TopWhereName_Rejects_Invalid_Column(string column)
+        {
+            Assert.Throws<LacerteSDKError>(
+                () => SqlTemplates.Data1TopWhereName(10, column, "X"));
         }
 
         // -------------------------------------------------------------------
@@ -181,6 +235,30 @@ namespace LacertMCP.Tests.Odbc
             Assert.Contains("ef.Id = s.EFilingId", SqlTemplates.EfStatusJoin);
         }
 
+        /// <summary>
+        /// Audit task P14-021 — the SELECT list MUST project all 6 columns the
+        /// sim path (<c>LacerteSessionManager.ReadEFStatus</c>) returns so the
+        /// live and sim wire shapes stay observationally identical per
+        /// CLAUDE.md two-mode parity invariant. Any future drift in the SELECT
+        /// list fails this test.
+        /// </summary>
+        [Fact]
+        public void EfStatusJoin_Projects_All_Sim_Parity_Columns()
+        {
+            var sql = SqlTemplates.EfStatusJoin;
+            Assert.Contains("ClientId", sql);
+            Assert.Contains("EFilingId", sql);
+            Assert.Contains("EFId", sql);
+            Assert.Contains("InstanceId", sql);
+            Assert.Contains("Status", sql);
+            Assert.Contains("StatusDate", sql);
+            // Aliases must use the exact key names ReadEFStatus emits.
+            Assert.Contains("ci.C1_0 as ClientId", sql);
+            Assert.Contains("ef.Id as EFilingId", sql);
+            Assert.Contains("s.EFStatus as Status", sql);
+            Assert.Contains("s.EFStatusDate as StatusDate", sql);
+        }
+
         // -------------------------------------------------------------------
         // Detail tables — per-client [<CLIENT>-Detail] logical table per §5
         // -------------------------------------------------------------------
@@ -216,6 +294,84 @@ namespace LacertMCP.Tests.Odbc
         {
             var sql = SqlTemplates.DetailByCode("JOHNS", 800);
             Assert.Equal("select * from [JOHNS-Detail] where Code = 800", sql);
+        }
+
+        // -------------------------------------------------------------------
+        // P14-055: Series column is typed `string` on DetailRow but the SQL
+        // template emits an unquoted integer literal so the SQL engine runs
+        // a NUMERIC comparison. This test pins the lighter-fix contract:
+        // (1) The emitted SQL uses unquoted integer literals — no single
+        //     quotes around the value — so an ODBC driver compiling the
+        //     statement treats it as int = int (not string = string, which
+        //     in lexicographic order would put "10" between "1" and "2").
+        // (2) An equivalent in-memory predicate constructed by parsing the
+        //     Series strings as ints agrees with the SQL semantics: filtering
+        //     for Series=10 against a set containing "0", "1", "2", "10"
+        //     returns exactly the "10" row, not "1" or "0" (which a naive
+        //     lexicographic / prefix compare would mishandle).
+        // -------------------------------------------------------------------
+
+        [Fact]
+        public void DetailBySeries_Emits_Unquoted_Integer_For_Numeric_Comparison()
+        {
+            // The integer literal is bare — no surrounding quotes. That is
+            // what forces SQL to run a numeric comparison (the column itself
+            // is numeric in the live DBF; the unquoted literal lines up).
+            Assert.Equal("select * from [JOHNS-Detail] where Series = 0",  SqlTemplates.DetailBySeries("JOHNS", 0));
+            Assert.Equal("select * from [JOHNS-Detail] where Series = 1",  SqlTemplates.DetailBySeries("JOHNS", 1));
+            Assert.Equal("select * from [JOHNS-Detail] where Series = 10", SqlTemplates.DetailBySeries("JOHNS", 10));
+
+            // No quoted variant should appear — that would shift the
+            // comparison into string-equality territory and `Series = '10'`
+            // would lex-order between '1' and '2', not numerically.
+            Assert.DoesNotContain("'0'",  SqlTemplates.DetailBySeries("JOHNS", 0));
+            Assert.DoesNotContain("'10'", SqlTemplates.DetailBySeries("JOHNS", 10));
+        }
+
+        [Fact]
+        public void DetailBySeries_NumericFilter_DistinguishesZeroTenAndOne()
+        {
+            // Build a synthetic detail-row set with neighboring Series values
+            // that a string compare would mis-order: lexicographically
+            // sorted, "0" < "1" < "10" < "2"; numerically, 0 < 1 < 2 < 10.
+            // Series stays `string` per the lighter-fix contract — these
+            // strings are guaranteed parseable integers (^\\d+$ enforced at
+            // the DetailsTools validator boundary and at the seed fixture).
+            var rows = new List<DetailRow>
+            {
+                new DetailRow("0",  "", "0",  "", "", "", "", "", "", 100.0, "series-zero"),
+                new DetailRow("1",  "", "1",  "", "", "", "", "", "", 200.0, "series-one"),
+                new DetailRow("2",  "", "2",  "", "", "", "", "", "", 300.0, "series-two"),
+                new DetailRow("10", "", "10", "", "", "", "", "", "", 999.0, "series-ten"),
+            };
+
+            // Numeric semantics: filter for 10 returns ONLY the "10" row.
+            // (A lex/prefix compare against "10" would incorrectly include
+            //  "1" if it ever degraded to a LIKE/StartsWith.)
+            var ten = rows.Where(r => int.Parse(r.Series) == 10).ToList();
+            Assert.Single(ten);
+            Assert.Equal("series-ten", ten[0].Description);
+
+            // Filter for 0 returns ONLY the "0" row — not "10" (which starts
+            // with "1", but a buggy substring check on "0" could be tricked).
+            var zero = rows.Where(r => int.Parse(r.Series) == 0).ToList();
+            Assert.Single(zero);
+            Assert.Equal("series-zero", zero[0].Description);
+
+            // Filter for 1 returns ONLY the "1" row — not "10".
+            var one = rows.Where(r => int.Parse(r.Series) == 1).ToList();
+            Assert.Single(one);
+            Assert.Equal("series-one", one[0].Description);
+
+            // Sanity: ordering by parsed int gives 0, 1, 2, 10 (NOT the
+            // lex order 0, 1, 10, 2 a naive string sort would produce).
+            var sorted = rows.OrderBy(r => int.Parse(r.Series)).Select(r => r.Series).ToList();
+            Assert.Equal(new[] { "0", "1", "2", "10" }, sorted);
+
+            // And the SQL template that drives the live path emits the
+            // same numeric literal that this in-memory predicate uses,
+            // so live + sim agree.
+            Assert.Equal("select * from [TEST-Detail] where Series = 10", SqlTemplates.DetailBySeries("TEST", 10));
         }
 
         [Fact]

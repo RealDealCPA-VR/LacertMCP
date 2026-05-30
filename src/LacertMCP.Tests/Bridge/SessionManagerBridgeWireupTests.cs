@@ -148,21 +148,27 @@ namespace LacertMCP.Tests.Bridge
         }
 
         [Fact]
-        public async Task Live_WriteField_TY20_RoutesToWriteField()
+        public async Task Live_WriteField_PreTY21_ThrowsSimulationOnly_NotSilentlyMinusOne()
         {
+            // P14-022/P14-031 — Pre-TY21 live writes need a ClientNumber → row
+            // number lookup that is not yet wired (Phase 4 task #39 follow-up).
+            // The chokepoint refuses the write with a structured SimulationOnly
+            // error rather than silently fall through with rowNum=-1. This test
+            // pins that contract — a regression that re-introduces the silent
+            // -1 (or any partial bridge call) would fail here.
             EnsureWritableFieldSeeded();
             var fake = new RecordingBridge { CanUseNewApisResult = false };
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\20data", 2020, WritableModule);
 
-            var result = await mgr.WriteField(
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteField(
                 table: WritableTable,
-                clientNumber: "1",
+                clientNumber: "JOHNS",
                 field: WritableField,
-                value: "test-value");
+                value: "test-value"));
 
-            Assert.Equal(StatusCodes.Success, result);
-            Assert.Equal(1, fake.WriteFieldCalls);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
+            Assert.Equal(0, fake.WriteFieldCalls);
             Assert.Equal(0, fake.UpdateTaxReturnCalls);
         }
 

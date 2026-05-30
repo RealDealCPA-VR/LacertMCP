@@ -53,8 +53,47 @@ namespace LacertMCP.Server.Odbc
         // DATA1 — Client Info (global, both forms)
         // -------------------------------------------------------------------
 
-        /// <summary>Full client roster.</summary>
+        /// <summary>Full client roster (unbounded — callers should prefer
+        /// <see cref="Data1Top"/> for paginated reads).</summary>
         public const string Data1All = "select * from [DATA1-Client Info]";
+
+        /// <summary>
+        /// First <paramref name="limit"/> rows from the client roster. Uses
+        /// <c>SELECT TOP n</c> which the Lacerte ODBC (FoxPro-style) driver
+        /// supports per agent 03 §4.
+        ///
+        /// <para><b>Pagination caveat:</b> the Lacerte ODBC dialect does NOT
+        /// support <c>OFFSET</c>/<c>FETCH NEXT</c>/<c>ROW_NUMBER()</c>, so true
+        /// server-side OFFSET-based paging is not available. Live mode must
+        /// either (a) overfetch <c>offset + limit</c> rows via this template
+        /// and slice in-memory, or (b) issue a separate <c>SELECT COUNT(*)</c>
+        /// for total and use TOP per page. The current
+        /// <c>ClientsTools.LacerteClientList</c> uses the in-memory slice path
+        /// because <c>Pagination.Page&lt;T&gt;</c> needs an exact <c>total</c>
+        /// that a single TOP query cannot provide.</para>
+        /// </summary>
+        public static string Data1Top(int limit)
+        {
+            ValidateLimit(limit);
+            return $"select top {limit} * from [DATA1-Client Info]";
+        }
+
+        /// <summary>
+        /// First <paramref name="limit"/> rows from the client roster whose
+        /// conventional name field starts with <paramref name="namePrefix"/>.
+        /// <para><paramref name="nameColumn"/> is the C1_N column to filter on
+        /// (typically C1_2 for individual modules, C1_1 for entity modules).
+        /// It is validated as a C{t}_N identifier to prevent SQL injection.</para>
+        /// <para>Same OFFSET caveat as <see cref="Data1Top"/>: callers needing a
+        /// stable <c>total</c> must overfetch and slice in-memory.</para>
+        /// </summary>
+        public static string Data1TopWhereName(int limit, string nameColumn, string namePrefix)
+        {
+            ValidateLimit(limit);
+            ValidateColumn(nameColumn);
+            var safePrefix = EscapeSqlLiteral(namePrefix);
+            return $"select top {limit} * from [DATA1-Client Info] where {nameColumn} like '{safePrefix}%'";
+        }
 
         /// <summary>One client row keyed by client number.</summary>
         public static string Data1Where(string client)
@@ -155,9 +194,20 @@ namespace LacertMCP.Server.Odbc
         // EF Status — TY19+ EFilings + EFStatuses JOIN per agent 03 §4
         // -------------------------------------------------------------------
 
-        /// <summary>Latest EF status per client (joined across DATA1, EFilings, EFStatuses).</summary>
+        /// <summary>
+        /// All EF status rows joined per client (full history, no MAX/window
+        /// filter). Column projection MUST stay in lock-step with
+        /// <c>LacerteSessionManager.ReadEFStatus</c> and the
+        /// <c>EFileTools.LacerteEfStatus</c> tool description — the live wire
+        /// shape and the sim shape are required to be observationally identical
+        /// per <c>CLAUDE.md</c> "Simulation and live must be observationally
+        /// identical for the happy path".
+        ///
+        /// <para>Columns: ClientId, EFilingId, EFId, InstanceId, Status, StatusDate.</para>
+        /// </summary>
         public const string EfStatusJoin =
-            "select ci.C1_0, ci.C1_2, ci.C1_3, s.EFStatus, s.EFStatusDate " +
+            "select ci.C1_0 as ClientId, ef.Id as EFilingId, ef.EFId, ef.InstanceId, " +
+            "s.EFStatus as Status, s.EFStatusDate as StatusDate " +
             "from [DATA1-Client Info] as ci " +
             "left outer join [EFilings] as ef on ci.C1_0 = ef.ClientId " +
             "left outer join [EFStatuses] as s on ef.Id = s.EFilingId";
@@ -176,14 +226,41 @@ namespace LacertMCP.Server.Odbc
                 $"from [{client}-Detail]";
         }
 
-        /// <summary>Filter detail rows by Series (e.g. 11 = W-2, 12 = Interest).</summary>
+        /// <summary>
+        /// Filter detail rows by Series (e.g. 11 = W-2, 12 = Interest, 13 = Dividends,
+        /// 14 = Dependents, 20 = Income, 30 = State apportionment, 40 = Partners).
+        ///
+        /// <para>Series is a NUMERIC screen identifier per spec §2 and the
+        /// live ODBC wire shape (agent 03 §4 example: <c>Series = 11</c>) —
+        /// the WHERE clause emits an unquoted integer literal so the SQL
+        /// engine performs an integer comparison (not lexicographic, which
+        /// would order "0","1","10","2"). The sim contract is aligned via
+        /// (a) <see cref="LacertMCP.Server.Tools.DetailsTools"/> tool-layer
+        /// validation enforcing <c>Series</c> matches <c>^\d+$</c> on every
+        /// write, and (b) the seed fixture emitting numeric Series strings
+        /// (e.g. "11" for Wages) instead of the older friendly labels.
+        /// Together these ensure the in-memory <see cref="LacertMCP.Server.Session.DetailRow"/>
+        /// Series strings are always parseable integers, so a live-SQL filter
+        /// produced by this template will agree with a sim-side predicate
+        /// (audit task P14-055 closed via lighter-fix path: column stays
+        /// <c>string</c> on the wire, numeric-string invariant enforced at
+        /// the validator + seed boundary).</para>
+        /// </summary>
         public static string DetailBySeries(string client, int series)
         {
             ValidateClient(client);
             return $"select * from [{client}-Detail] where Series = {series}";
         }
 
-        /// <summary>Filter detail rows by Code (e.g. 800 = description labels).</summary>
+        /// <summary>
+        /// Filter detail rows by Code (e.g. 800 = description labels).
+        ///
+        /// <para>Same NUMERIC-column contract as <see cref="DetailBySeries"/>:
+        /// the WHERE clause emits an unquoted integer literal, matching the
+        /// live wire shape documented in agent 03 §4. The sim contract is
+        /// aligned via tool-layer validation enforcing <c>Code</c> matches
+        /// <c>^-?\d+$</c> (see <see cref="LacertMCP.Server.Tools.DetailsTools"/>).</para>
+        /// </summary>
         public static string DetailByCode(string client, int code)
         {
             ValidateClient(client);
@@ -210,6 +287,53 @@ namespace LacertMCP.Server.Odbc
                         ["expected"] = "2 uppercase ASCII letters",
                     });
             }
+        }
+
+        // -------------------------------------------------------------------
+        // Pagination + column-identifier guards
+        // -------------------------------------------------------------------
+
+        // C{t}_N column identifier shape: C, digit (1-7), underscore, digits/G.
+        // Permits both ordinal (C1_2) and global-state (C3_G1) columns.
+        private static readonly Regex ColumnIdentifierPattern = new Regex(
+            "^C[1-7]_(G?[0-9]+)$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static void ValidateLimit(int limit)
+        {
+            if (limit <= 0 || limit > 100_000)
+            {
+                throw new LacerteSDKError(
+                    StatusCodes.OutOfIndex,
+                    new Dictionary<string, object?>
+                    {
+                        ["limit"] = limit,
+                        ["expected"] = "1..100000",
+                    });
+            }
+        }
+
+        private static void ValidateColumn(string column)
+        {
+            if (column == null || !ColumnIdentifierPattern.IsMatch(column))
+            {
+                throw new LacerteSDKError(
+                    StatusCodes.InValidStateAbbrev,
+                    new Dictionary<string, object?>
+                    {
+                        ["column"] = column,
+                        ["expected"] = "C{t}_N or C{t}_GN per DBF column convention",
+                    });
+            }
+        }
+
+        // Safe single-quote escape for SQL string literals (doubles internal
+        // single-quotes, the standard SQL-92 escape). Prefix-only filters
+        // never appear in identifier position.
+        private static string EscapeSqlLiteral(string input)
+        {
+            if (input == null) return string.Empty;
+            return input.Replace("'", "''");
         }
     }
 }

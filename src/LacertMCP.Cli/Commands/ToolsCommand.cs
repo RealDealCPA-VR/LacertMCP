@@ -1,0 +1,244 @@
+using System;
+using System.Collections.Generic;
+using System.CommandLine;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace LacertMCP.Cli.Commands
+{
+    /// <summary>
+    /// <c>lacerte-mcp tools [--json]</c>
+    ///
+    /// <para>
+    /// Lists every MCP tool the server registers, by reflecting over the
+    /// <c>LacertMCP.Server</c> assembly the CLI already references. Mirrors the
+    /// SDK's own <c>WithToolsFromAssembly()</c> discovery: types decorated with
+    /// <see cref="ModelContextProtocol.Server.McpServerToolTypeAttribute"/> are
+    /// scanned, and every method carrying <see cref="ModelContextProtocol.Server.McpServerToolAttribute"/>
+    /// is enumerated. Tool name defaults to the PascalCase method name converted
+    /// to <c>snake_case</c> (the SDK convention — overrideable via
+    /// <c>[McpServerTool(Name = "...")]</c>, which we honor when present).
+    /// </para>
+    ///
+    /// <para>
+    /// Useful for two operator workflows: (a) sanity-checking the tool surface
+    /// before pasting into a Claude Desktop / Cursor MCP config, and (b) quick
+    /// before/after smoke between Phase milestones without booting the stdio
+    /// transport.
+    /// </para>
+    ///
+    /// <para>
+    /// Per P14-046 refinedRecommendation: this is a pure off-Windows verb (no
+    /// SDK / no Lacerte install needed) — the reflection runs against the
+    /// already-compiled <c>LacertMCP.Server</c> assembly.
+    /// </para>
+    /// </summary>
+    public static class ToolsCommand
+    {
+        public static Command Build()
+        {
+            var cmd = new Command("tools",
+                "List every MCP tool the server registers (by reflecting on [McpServerTool] attributes).");
+
+            var jsonOpt = new Option<bool>("--json", () => false,
+                "Emit a machine-parseable JSON array instead of the human table.");
+
+            cmd.AddOption(jsonOpt);
+
+            cmd.SetHandler((context) =>
+            {
+                var asJson = context.ParseResult.GetValueForOption(jsonOpt);
+                context.ExitCode = Run(asJson, Console.Out);
+            });
+
+            return cmd;
+        }
+
+        public sealed class ToolEntry
+        {
+            public string Name { get; set; } = "";
+            public string? Description { get; set; }
+            public string DeclaringType { get; set; } = "";
+            public List<ParamEntry> Parameters { get; set; } = new List<ParamEntry>();
+        }
+
+        public sealed class ParamEntry
+        {
+            public string Name { get; set; } = "";
+            public string Type { get; set; } = "";
+            public string? Description { get; set; }
+            public bool Optional { get; set; }
+        }
+
+        public static int Run(bool asJson, TextWriter writer)
+        {
+            var tools = DiscoverTools();
+
+            if (asJson)
+            {
+                // camelCase keys to mirror the rest of the CLI's JSON surface (status
+                // command emits camelCase via anonymous objects), so MCP clients that
+                // consume both can use one casing policy.
+                var json = JsonSerializer.Serialize(tools, new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+                });
+                writer.WriteLine(json);
+                return 0;
+            }
+
+            writer.WriteLine($"lacerte-mcp tools — {tools.Count} registered");
+            writer.WriteLine(new string('-', 60));
+            foreach (var t in tools.OrderBy(x => x.Name, StringComparer.Ordinal))
+            {
+                writer.WriteLine($"  {t.Name}");
+                if (!string.IsNullOrEmpty(t.Description))
+                {
+                    writer.WriteLine($"    {t.Description}");
+                }
+                if (t.Parameters.Count > 0)
+                {
+                    foreach (var p in t.Parameters)
+                    {
+                        var opt = p.Optional ? "?" : "";
+                        writer.WriteLine($"      - {p.Name}{opt}: {p.Type}");
+                    }
+                }
+                writer.WriteLine();
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Public for tests — discovers tools in the <c>LacertMCP.Server</c> assembly
+        /// using the same mechanism the SDK's <c>WithToolsFromAssembly()</c> uses.
+        /// </summary>
+        public static List<ToolEntry> DiscoverTools()
+        {
+            // Anchor on a known Server type rather than walking AppDomain assemblies —
+            // FieldAccessMapLoader is already referenced by FieldAccessCommand so this
+            // keeps the reflection scope explicit and predictable.
+            var serverAsm = typeof(LacertMCP.Server.Schema.FieldAccessMapLoader).Assembly;
+            var result = new List<ToolEntry>();
+
+            Type[] types;
+            try
+            {
+                types = serverAsm.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                // Some Server types depend on COM/.NET interop that may not load off-Windows
+                // (Bridge/*). Filter to the types that did load — the [McpServerToolType]
+                // classes themselves are pure DI plumbing and load fine cross-platform.
+                types = ex.Types.Where(t => t != null).ToArray()!;
+            }
+
+            foreach (var type in types)
+            {
+                if (type == null) continue;
+                if (!HasAttribute(type, "McpServerToolTypeAttribute")) continue;
+
+                foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                {
+                    var toolAttr = method.GetCustomAttributes(inherit: false)
+                        .FirstOrDefault(a => a.GetType().Name == "McpServerToolAttribute");
+                    if (toolAttr == null) continue;
+
+                    var entry = new ToolEntry
+                    {
+                        Name = ResolveToolName(toolAttr, method),
+                        Description = ResolveDescription(method),
+                        DeclaringType = type.FullName ?? type.Name,
+                    };
+
+                    foreach (var p in method.GetParameters())
+                    {
+                        entry.Parameters.Add(new ParamEntry
+                        {
+                            Name = p.Name ?? "(unnamed)",
+                            Type = FriendlyTypeName(p.ParameterType),
+                            Description = ResolveDescription(p),
+                            Optional = p.IsOptional || p.HasDefaultValue,
+                        });
+                    }
+
+                    result.Add(entry);
+                }
+            }
+
+            return result;
+        }
+
+        private static bool HasAttribute(MemberInfo m, string attrName)
+        {
+            return m.GetCustomAttributes(inherit: false)
+                .Any(a => a.GetType().Name == attrName);
+        }
+
+        private static string ResolveToolName(object toolAttr, MethodInfo method)
+        {
+            // Honor explicit [McpServerTool(Name = "...")] when present.
+            var nameProp = toolAttr.GetType().GetProperty("Name");
+            var explicitName = nameProp?.GetValue(toolAttr) as string;
+            if (!string.IsNullOrEmpty(explicitName)) return explicitName!;
+
+            // SDK convention: PascalCase method → snake_case tool name
+            // (e.g. LacerteClientList → lacerte_client_list).
+            return ToSnakeCase(method.Name);
+        }
+
+        private static string? ResolveDescription(MemberInfo m)
+        {
+            var descAttr = m.GetCustomAttributes(inherit: false)
+                .FirstOrDefault(a => a.GetType().Name == "DescriptionAttribute");
+            if (descAttr == null) return null;
+            var prop = descAttr.GetType().GetProperty("Description");
+            return prop?.GetValue(descAttr) as string;
+        }
+
+        private static string? ResolveDescription(ParameterInfo p)
+        {
+            var descAttr = p.GetCustomAttributes(inherit: false)
+                .FirstOrDefault(a => a.GetType().Name == "DescriptionAttribute");
+            if (descAttr == null) return null;
+            var prop = descAttr.GetType().GetProperty("Description");
+            return prop?.GetValue(descAttr) as string;
+        }
+
+        /// <summary>
+        /// PascalCase → snake_case. <c>LacerteClientList</c> → <c>lacerte_client_list</c>.
+        /// Matches the ModelContextProtocol SDK's default name transform; pinning it here
+        /// (rather than calling into the SDK) keeps the CLI from booting any of the server
+        /// DI plumbing just to enumerate tool names.
+        /// </summary>
+        public static string ToSnakeCase(string pascal)
+        {
+            if (string.IsNullOrEmpty(pascal)) return pascal;
+            // Insert underscore between a lowercase/digit and an uppercase, then lowercase.
+            var withUnderscores = Regex.Replace(pascal, "([a-z0-9])([A-Z])", "$1_$2");
+            return withUnderscores.ToLowerInvariant();
+        }
+
+        private static string FriendlyTypeName(Type t)
+        {
+            // Strip Nullable<T> shell so the operator sees `int?` not `Nullable<Int32>`.
+            var underlying = Nullable.GetUnderlyingType(t);
+            if (underlying != null) return FriendlyTypeName(underlying) + "?";
+            if (t == typeof(string)) return "string";
+            if (t == typeof(int)) return "int";
+            if (t == typeof(long)) return "long";
+            if (t == typeof(bool)) return "bool";
+            if (t == typeof(double)) return "double";
+            if (t == typeof(decimal)) return "decimal";
+            if (t == typeof(object)) return "object";
+            return t.Name;
+        }
+    }
+}

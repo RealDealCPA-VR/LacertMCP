@@ -73,6 +73,9 @@ namespace LacertMCP.Tests.Logging
 
                 var mgr = new LacerteSessionManager(new Dictionary<string, string?>());
                 mgr.SetContext(SeedData.DataPathIData2024, 2024, WritableModule);
+                // P14-030 — CreateClient delegates to SimulateCreateClient which
+                // requires Register first (NotSignedIn gate).
+                await mgr.Register();
 
                 // 1) ListClients — should write op="ListClients".
                 var clients = await mgr.ListClients(limit: 100);
@@ -106,6 +109,11 @@ namespace LacertMCP.Tests.Logging
                 Assert.Equal(StatusCodes.Success, createResult.Status);
 
                 // Assert: the logfile exists and contains one line per op.
+                // P14-012: WireLog now caches the StreamWriter per logfile
+                // path across records (perf — avoids per-call open/close).
+                // FlushForTests closes the cached handle so File.ReadAllLines
+                // can open the file with its default FileShare.Read mode.
+                WireLog.FlushForTests(dir);
                 var files = Directory.GetFiles(dir, "lacerte-*.log");
                 Assert.Single(files);
 
@@ -127,6 +135,10 @@ namespace LacertMCP.Tests.Logging
                 var sensitive = new { SSN = "111-22-3333", BankAccountNumber = "9999" };
                 WireLog.WriteForTest(dir, "Redaction.Probe", sensitive, new { ok = true }, durationMs: 1);
 
+                // WriteForTest flushes its own writer on exit, but the
+                // earlier Record/RecordSync calls may have left a cached
+                // writer open. Flush again before the second ReadAllLines.
+                WireLog.FlushForTests(dir);
                 var afterLines = File.ReadAllLines(files[0]);
                 var probeLine = afterLines.Last(l => l.Contains("Redaction.Probe"));
                 Assert.DoesNotContain("111-22-3333", probeLine);

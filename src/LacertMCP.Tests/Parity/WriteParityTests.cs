@@ -20,6 +20,11 @@ namespace LacertMCP.Tests.Parity
         {
             var mgr = ParitySessionFactory.For(mode);
             mgr.SetContext(dataPath ?? SeedData.DataPathIData2024, year, module, readOnly);
+            // P14-030 — CreateClient now delegates to SimulationStore.SimulateCreateClient
+            // which enforces the NotSignedIn gate. Register synchronously here so every
+            // CreateClient-bearing test in this class can reach the happy/conflict path.
+            // Sim Register flips an in-memory latch — no real I/O.
+            mgr.Register().GetAwaiter().GetResult();
             return mgr;
         }
 
@@ -110,6 +115,43 @@ namespace LacertMCP.Tests.Parity
             // fail-closed contract in FieldAccessMapLoader.AssertWritable.
             // Distinct from 9001 (FieldIsReadOnly) so callers can tell
             // "no map entry" apart from "known non-writable".
+            Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, err.StatusCode);
+        }
+
+        // -----------------------------------------------------------------
+        // WriteField — DATA6 / DATA7 spec invariant (read-only tables)
+        // P14-054: gate fires in the session manager chokepoint BEFORE the
+        // per-field access map, so the rejection holds regardless of map
+        // contents. DATA5 still flows through the per-field gate.
+        // -----------------------------------------------------------------
+
+        [Theory, BothModesData]
+        public async Task WriteField_Data6_ThrowsExposedForRead(SessionMode mode)
+        {
+            using var mgr = NewWithContext(mode);
+            var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
+                await mgr.WriteField(6, "1001", "C6_1", "x"));
+            Assert.Equal(StatusCodes.ExposedForRead, err.StatusCode);
+        }
+
+        [Theory, BothModesData]
+        public async Task WriteField_Data7_ThrowsExposedForRead(SessionMode mode)
+        {
+            using var mgr = NewWithContext(mode);
+            var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
+                await mgr.WriteField(7, "1001", "C7_1", "x"));
+            Assert.Equal(StatusCodes.ExposedForRead, err.StatusCode);
+        }
+
+        [Theory, BothModesData]
+        public async Task WriteField_Data5_StillFlowsThroughPerFieldGate(SessionMode mode)
+        {
+            // DATA5 is NOT covered by the table-level gate (spec: "some
+            // globals R/W"); the per-field access map remains the
+            // enforcement point. Empty base map → Unknown → 9012.
+            using var mgr = NewWithContext(mode);
+            var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
+                await mgr.WriteField(5, "1001", "C5_1", "x"));
             Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, err.StatusCode);
         }
 

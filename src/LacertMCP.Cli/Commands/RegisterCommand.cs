@@ -53,7 +53,10 @@ namespace LacertMCP.Cli.Commands
             {
                 appId = existing.Value;
                 Console.WriteLine("AppID already minted — re-using existing GUID.");
-                Console.WriteLine($"  AppID  : {appId:D}");
+                // Re-use path: print only the masked form. The operator already saw the full GUID
+                // once at original-mint time (the new-mint branch below) and was told to back it up.
+                // Use `lacerte-mcp status --show-app-id` if a re-reveal is needed.
+                Console.WriteLine($"  AppID  : {AppIdStore.Mask(appId)}");
                 Console.WriteLine($"  AppName: {appName}");
                 Console.WriteLine($"  TaxYear: {taxYear}");
                 Console.WriteLine();
@@ -63,10 +66,16 @@ namespace LacertMCP.Cli.Commands
             {
                 if (reset && existing.HasValue)
                 {
-                    Console.WriteLine($"Resetting AppID (was: {existing.Value:D}).");
+                    // Print the OLD GUID in masked form only — the operator's confirmation that we're
+                    // wiping the right install comes from the first 8 chars; we don't need to leak the
+                    // full bearer credential just to announce a reset.
+                    Console.WriteLine($"Resetting AppID (was: {AppIdStore.Mask(existing.Value)}).");
                 }
                 appId = Guid.NewGuid();
                 AppIdStore.Set(appId);
+                // New-mint path: this is the ONE channel where the full GUID is intentionally
+                // surfaced — the operator must see it once to back it up (per P14-065 refined
+                // recommendation, this print is preserved on purpose).
                 Console.WriteLine("Minted new AppID GUID:");
                 Console.WriteLine();
                 Console.WriteLine($"  {appId:D}");

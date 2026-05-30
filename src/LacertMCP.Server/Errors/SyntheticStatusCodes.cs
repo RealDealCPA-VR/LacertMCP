@@ -41,6 +41,15 @@ namespace LacertMCP.Server.Errors
         // `lacerte-mcp field-access discover` or override with force:true.
         public const int UnknownFieldAccess = 9012;
 
+        // 9013 — dataPath failed PathValidation in SetContext. Distinct from
+        // 9009 (ContextNotSet — missing entirely): the operator supplied a
+        // dataPath that is relative, UNC (without the env escape hatch),
+        // contains '..' traversal, contains control characters, or escapes the
+        // LACERTE_DATA_ROOT allowlist when that env var is set. Carried
+        // context includes {dataPath, reason} so the tool layer can render the
+        // specific rejection.
+        public const int InvalidDataPath = 9013;
+
         // ---- 9100–9199: auth lifecycle ----
         // 9101 reserved for the architecture-doc cross-reference (re-auth surfacing path).
         // 9102 idempotency-conflict per session manager design in Todo.md task #31.
@@ -128,6 +137,12 @@ namespace LacertMCP.Server.Errors
                 "Field not in access map.",
                 "Run `lacerte-mcp field-access discover` to populate the map, or pass force:true to override."),
 
+            [InvalidDataPath] = new StatusInfo(
+                "InvalidDataPath",
+                Severity.Error,
+                "lacerte_set_context rejected the dataPath — relative path, '..' traversal, control characters, UNC without LACERTE_ALLOW_UNC=1, or outside LACERTE_DATA_ROOT.",
+                "Pass an absolute local path under the Lacerte install root (e.g. C:\\Lacerte\\24Tax\\IData). Set LACERTE_ALLOW_UNC=1 to permit \\\\server\\share paths."),
+
             [ReAuthRequired] = new StatusInfo(
                 "ReAuthRequired",
                 Severity.Error,
@@ -144,7 +159,7 @@ namespace LacertMCP.Server.Errors
                 "BridgeUnavailable",
                 Severity.Error,
                 "Live mode requested but the .NET/COM bridge process didn't start or crashed.",
-                "Confirm running on Windows with the SDK installed; check LACERTE_BRIDGE_LOG for the bridge stderr."),
+                "Confirm running on Windows with the SDK installed; re-run with LACERTE_DEBUG_WIRE=1 and inspect logs/lacerte-YYYYMMDD.log for the bridge stderr."),
 
             [SimulationOnly] = new StatusInfo(
                 "SimulationOnly",
@@ -157,7 +172,7 @@ namespace LacertMCP.Server.Errors
                 "BridgeUnavailable",
                 Severity.Error,
                 "Live mode requested but the .NET/COM bridge process didn't start or crashed.",
-                "Confirm running on Windows with the SDK installed; check LACERTE_BRIDGE_LOG for the bridge stderr."),
+                "Confirm running on Windows with the SDK installed; re-run with LACERTE_DEBUG_WIRE=1 and inspect logs/lacerte-YYYYMMDD.log for the bridge stderr."),
 
             [SimulationOnlyLegacy] = new StatusInfo(
                 "SimulationOnly",

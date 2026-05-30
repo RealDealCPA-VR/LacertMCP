@@ -1,3 +1,16 @@
+// Design note (lifted from the deleted ConnectionPool.cs):
+// We DO NOT implement an MCP-level pool for ODBC connections. The .NET
+// System.Data.Odbc provider already maintains an internal connection pool keyed on
+// the literal connection string (same scheme our pool would have used) and that
+// pool is correctly torn down on AppDomain shutdown. Adding a second layer would
+// duplicate the bookkeeping, complicate lifetime semantics, and undermine the
+// "single-threaded; one reader per worker" model documented on LacerteDsnReader.
+//
+// Per agent 03 §3: "Pool with the connection string verbatim — the ODBC provider
+// keys its pool on the literal connection string, so consistent casing/ordering
+// matters." We rely on that built-in pool. Callers should construct
+// LacerteDsnReader directly (or inject it) rather than going through a factory.
+
 using System;
 using System.Collections.Generic;
 using System.Data;

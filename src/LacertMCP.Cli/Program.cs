@@ -6,7 +6,7 @@ using LacertMCP.Cli.Commands;
 namespace LacertMCP.Cli
 {
     /// <summary>
-    /// Operator CLI dispatcher — <c>lacerte-mcp register | login | status | field-access | doctor</c>.
+    /// Operator CLI dispatcher — <c>lacerte-mcp register | login | status | unregister | tools | field-access | doctor</c>.
     ///
     /// <para>
     /// Built on <c>System.CommandLine</c> 2.0.0-beta4 (preview API — surface is subject to
@@ -18,6 +18,9 @@ namespace LacertMCP.Cli
     /// Each subcommand lives under <c>Commands/</c> and exposes a static <c>Build()</c>
     /// factory; this file just wires them into the root. Operator surface designed per
     /// <c>docs/research/agents/02-auth-flow.md</c> and <c>Todo.md</c> Phase 10 tasks #69-74.
+    /// P14-046 added <c>tools</c> (reflective enumeration of registered MCP tools — useful
+    /// for client-config generation) and <c>unregister</c> (typed-confirmation AppID wipe —
+    /// the discoverable counterpart to <c>register --reset</c>).
     /// </para>
     /// </summary>
     public static class Program
@@ -32,6 +35,8 @@ namespace LacertMCP.Cli
             root.AddCommand(RegisterCommand.Build());
             root.AddCommand(LoginCommand.Build());
             root.AddCommand(StatusCommand.Build());
+            root.AddCommand(UnregisterCommand.Build());
+            root.AddCommand(ToolsCommand.Build());
             root.AddCommand(FieldAccessCommand.Build());
             root.AddCommand(DoctorCommand.Build());
 

@@ -7,7 +7,7 @@ Locked from research synthesis on 2026-05-30. Update only when a structural rule
 ## Stack
 
 * **Language / runtime:** C# / **.NET Framework 4.8** (net48), x64.
-* **MCP SDK:** `ModelContextProtocol` 1.3.0 (Microsoft + Anthropic official), stdio transport.
+* **MCP SDK:** `ModelContextProtocol` 0.3.0-preview.4 (Microsoft + Anthropic official preview; 1.x not yet on NuGet), stdio transport. See `DECISIONS.md` "MCP SDK version pinning" 2026-05-30.
 * **COM interop:** Direct references to `LacerteSDK_Access.dll` / `LacerteSDK_Interfaces.dll` / `LacerteSDK_SharedInterfaces.dll`.
 * **ODBC:** `System.Data.Odbc` built-in, against `LacerteDSIIDriver` (DSN `LacerteDSII` or DSN-less).
 * **Tests:** xUnit.
@@ -53,11 +53,15 @@ Each layer has one responsibility. Crossing layers is the most common form of dr
 |---|---|---|---|
 | **Tool** | `LacertMCP.Server/Tools/*.cs` | `[McpServerTool]` methods. Validate input via parameter attributes, call session manager, format response. | Construct SQL strings. Read/write the simulation store directly. Hold persistent state. Catch generic Exception (use `WrapToolHandler`). |
 | **Session** | `LacertMCP.Server/Session/LacerteSessionManager.cs` | Manage registration lifecycle, context (datapath/year/module), TY21+ routing, read-only/dry-run/idempotency gates. Dispatch reads to ODBC, writes to COM bridge, both to simulation when in sim mode. | Know about specific tools. Validate field access (that's the schema layer). Construct SQL directly (use Odbc helpers). |
-| **Bridge** | `LacertMCP.Server/Bridge/LacerteAccessClient.cs` + helpers | COM interop with `LacerteSDK_Access`. Registration. CreateClient. Pre-TY21 `WriteToDBFDatabase`. TY21+ `UpdateTaxReturn`. Detail-file writes via `IDBFWriter`. Translate COM HRESULTs + `TAPIStatus` returns to structured exceptions. | Hold session state. Be called from tools directly. |
+| **Bridge** | `LacertMCP.Server/Bridge/`: `ILacerteBridge.cs` (interface seam for swappable bridge — live vs null/sim), `LacerteAccessClient.cs` (late-bound `LacerteSDK_Access` aggregate + lifetime owner), `Registration.cs` (`ITPRegistration` ceremony, called once at startup per Boundary Invariant #8), `Reader.cs` (`IDBFReader` COM surface — introspection only; 99% reads go via ODBC per #6), `Writer.cs` (`IDBFWriter`: pre-TY21 `WriteToDBFDatabase`, TY21+ `UpdateTaxReturn`, detail-file writes), `EditionDetection.cs` (cached `{LacerteEdition, LacerteBuild, SdkVersion}` probe — ≤1× per process), `CanUseNewApisProbe.cs` (TY21+ branch probe; cache lives on session manager). | Hold session state. Be called from tools directly. |
 | **ODBC** | `LacertMCP.Server/Odbc/*.cs` | SQL reads only (no writes — spec §1 corrected per `DECISIONS.md` 2026-05-30). Connection-string building. TY21+/pre-TY21 SQL template branching. SQLSTATE → TAPIStatus normalization. | Execute INSERT/UPDATE/DELETE. Hold session state. |
-| **Simulation** | `LacertMCP.Server/Session/SimulationStore.cs` + `Session/Fixtures/Seed.cs` | In-memory implementation of the SDK for dev/tests. Seeded data. Same TAPIStatus return shape as live. | Be referenced by tools. Diverge behaviorally from live. |
+| **Simulation** | `LacertMCP.Server/Session/SimulationStore.cs` + `SimulationStore.Query.cs` + `SimulationStore.Seed.cs` (three partials) + `Session/Fixtures/SeedData.cs` | In-memory implementation of the SDK for dev/tests. Seeded data. Same TAPIStatus return shape as live. | Be referenced by tools. Diverge behaviorally from live. |
 | **Schema** | `LacertMCP.Server/Schema/*.cs` + `Schema/FieldAccessMap/*.json` | Module characters table, table catalog, per-field access map (with TY-version overlays), TAPIStatus constants. | Hold runtime mutable state. |
 | **Errors** | `LacertMCP.Server/Errors/*.cs` | `LacerteSDKError` exception, status-code table, synthetic 9xxx codes, `WrapToolHandler` decorator. | Anything else. |
+| **Logging** | `LacertMCP.Server/Logging/WireLog.cs` | Structured wire-level trace of COM/ODBC calls when `LACERTE_DEBUG_WIRE=1`. PII-redacted (SSN/EIN/BankAccountNumber/RoutingNumber). | Log secrets (AppID, ticket bodies, PII fields). Be required for correctness — the logging-disabled path must behave identically. |
+| **Resilience** | `LacertMCP.Server/Resilience/AutoReconnect.cs` | Detect `NotSignedIn` / disconnect, surface synthetic 9101 with remediation, optional one-shot reconnect on idempotent reads. | Re-auth the 24h Intuit ticket inside a tool call (Boundary Invariant #8). Retry non-idempotent writes. |
+| **Pagination** | `LacertMCP.Server/Pagination/Pagination.cs` | Stable cursor encoding for large reads. Limit/offset envelope (`rows, total, limit, offset, hasMore, nextOffset`). | Hold session state. Embed SQL. |
+| **Prompts** | `LacertMCP.Server/Prompts/WorkflowPrompts.cs` | `[McpServerPrompt]` workflow scripts registered via `WithPromptsFromAssembly()`. | Execute tools directly. Bypass the session manager. |
 | **CLI** | `LacertMCP.Cli/` (separate project) | `lacerte-mcp register`, `lacerte-mcp login`, `lacerte-mcp status`, `lacerte-mcp field-access set/list/discover`, `lacerte-mcp doctor`. | Touch the MCP server runtime — CLI runs in its own process. |
 | **Entrypoint** | `LacertMCP.Server/Program.cs` | `Host.CreateApplicationBuilder` → `AddMcpServer` → `WithStdioServerTransport` → register tool classes via attribute discovery → start. | Implement tool logic. |
 
@@ -172,12 +176,13 @@ Environment-variable driven, resolved once in `Program.cs`. The full list lives 
 | `LACERTE_DATA_PATH` | Default datapath if `lacerte_set_context` not yet called. |
 | `LACERTE_LIVE` | `1` → enable live mode. |
 | `LACERTE_SIMULATION` | `1` → force simulation regardless of platform. |
-| `LACERTE_DSN` | ODBC DSN name; default `LacerteDSII`. |
 | `LACERTE_DEBUG_WIRE` | `1` → log COM calls + SQL to `logs/`. |
 | `LACERTE_DEBUG_LOG_PATH` | Override log directory. |
 | `LACERTE_SIM_EXPIRED` | `1` → simulate an expired 24h session (testing only). |
 
 New env vars must be documented in both `README.md` and `.env.example`.
+
+> ODBC connections are DSN-less — `ConnectionStringBuilder` composes them from driver + datapath + module + year. No `LACERTE_DSN` env var is honored; the `LacerteDSII` DSN name is only probed by `lacerte-mcp doctor` as an install-sanity check.
 
 ---
 
@@ -198,4 +203,3 @@ These are deferred subsystems. When introduced, require an architecture update:
 * Persistent caching of live responses.
 * Streaming iterator-based pagination for very large queries.
 * Multi-Lacerte-install support (one process serving multiple SDK installs).
-* MCP Prompts API for workflow bundles (`lacerte_client_intake`, `lacerte_review_efile_status`).

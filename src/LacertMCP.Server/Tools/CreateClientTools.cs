@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
+using LacertMCP.Server.Schema;
 using LacertMCP.Server.Session;
 using ModelContextProtocol.Server;
 
@@ -32,23 +33,10 @@ namespace LacertMCP.Server.Tools
             @"^[A-Z0-9]+$",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        // Per-module accepted TaxType strings. Mirrors SimulationStore's
-        // _moduleTaxTypes table — kept here so the tool can pre-flight the
-        // mismatch before reaching the session (the live SDK also enforces
-        // this server-side; we catch it earlier with a clearer message).
-        private static readonly System.Collections.Generic.IReadOnlyDictionary<char, string[]> _moduleTaxTypes =
-            new System.Collections.Generic.Dictionary<char, string[]>
-            {
-                { 'I', new[] { "Individual", "1040" } },
-                { 'C', new[] { "Corporate", "1120" } },
-                { 'P', new[] { "Partnership", "1065" } },
-                { 'S', new[] { "SCorporate", "1120S", "S-Corporation", "SCorp" } },
-                { 'F', new[] { "Fiduciary", "1041" } },
-                { 'R', new[] { "Exempt", "990" } },
-                { 'T', new[] { "Estate", "706" } },
-                { 'N', new[] { "Gift", "709" } },
-                { 'B', new[] { "Benefit", "5500" } },
-            };
+        // Per-module accepted TaxType strings now live on
+        // Schema.Modules.TaxTypeAliases — single source of truth shared
+        // with SimulationStore (preserves observational identity between
+        // sim and live per the two-mode discipline).
 
         private readonly LacerteSessionManager _session;
 
@@ -58,13 +46,13 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Create a new client in the active datapath/year/module. ClientID must be <= 8 alphanumeric chars. TaxType must match the module (e.g. 'Individual' or '1040' for module I). Returns the freshly-minted ClientNumber on success.")]
+        [Description("Create a new client in the active datapath/year/module. ClientID must be <= 8 alphanumeric chars. TaxType must match the module (e.g. 'Individual' or '1040' for module I). FirstName, LastName and EmailID are required per spec §4 and REQUIREMENTS §Create. Returns the freshly-minted ClientNumber on success.")]
         public Task<string> LacerteClientCreate(
             [Description("Operator-chosen ClientID. <= 8 chars, alphanumeric only.")] string clientID,
             [Description("TaxType string passed to the SDK's IClient constructor. Must match the active module (e.g. 'Individual' / '1040' for module I).")] string taxType,
-            [Description("First name (individual) OR entity-name override. Optional.")] string? firstName = null,
-            [Description("Last name (individual). Optional.")] string? lastName = null,
-            [Description("EmailID. Optional.")] string? emailID = null,
+            [Description("First name (individual) OR entity-name override. Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string firstName,
+            [Description("Last name (individual). Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
+            [Description("EmailID. Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailID,
             [Description("If true, validate + simulate the create then roll back without persisting.")] bool dryRun = false,
             [Description("Optional idempotency key. Same key + same payload returns the cached result; same key + different payload throws 9102.")] string? idempotencyKey = null)
         {
@@ -124,33 +112,64 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
+                // Per Lacerte_MCP_Structure_Spec.md §4 and REQUIREMENTS.md §Create,
+                // FirstName, LastName, and EmailID are part of the minimum-required
+                // field set for lacerte_client_create. Enforce here so the failure
+                // surfaces as a structured InValidClientName (24) BEFORE the
+                // session call rather than as a late SDK rejection with less
+                // actionable context.
+                if (string.IsNullOrWhiteSpace(firstName))
+                {
+                    throw new LacerteSDKError(
+                        StatusCodes.InValidClientName,
+                        new Dictionary<string, object?>
+                        {
+                            ["field"] = "firstName",
+                            ["reason"] = "FirstName is required per spec §4 / REQUIREMENTS §Create.",
+                        });
+                }
+
+                if (string.IsNullOrWhiteSpace(lastName))
+                {
+                    throw new LacerteSDKError(
+                        StatusCodes.InValidClientName,
+                        new Dictionary<string, object?>
+                        {
+                            ["field"] = "lastName",
+                            ["reason"] = "LastName is required per spec §4 / REQUIREMENTS §Create.",
+                        });
+                }
+
+                if (string.IsNullOrWhiteSpace(emailID))
+                {
+                    throw new LacerteSDKError(
+                        StatusCodes.InValidClientName,
+                        new Dictionary<string, object?>
+                        {
+                            ["field"] = "emailID",
+                            ["reason"] = "EmailID is required per spec §4 / REQUIREMENTS §Create.",
+                        });
+                }
+
                 // TaxType must match the active module per agent 06 §6. The
                 // session manager's ApplySimCreateClient does not enforce this
                 // (it just appends to the active module store) — so the gate
                 // lives here in the tool layer. The live SDK enforces server-
                 // side; we just surface the error earlier with the right name.
-                if (_session.Context != null
-                    && _moduleTaxTypes.TryGetValue(_session.Context.Module, out var accepted))
+                if (_session.Context != null)
                 {
-                    bool ok = false;
-                    foreach (var a in accepted)
-                    {
-                        if (string.Equals(a, taxType, System.StringComparison.OrdinalIgnoreCase))
-                        {
-                            ok = true;
-                            break;
-                        }
-                    }
-                    if (!ok)
+                    var moduleChar = _session.Context.Module;
+                    var accepted = Modules.TaxTypeAliasesFor(moduleChar);
+                    if (accepted != null && !Modules.AcceptsTaxType(moduleChar, taxType))
                     {
                         throw new LacerteSDKError(
                             StatusCodes.TaxModuleMismatch,
                             new Dictionary<string, object?>
                             {
                                 ["taxType"] = taxType,
-                                ["module"] = _session.Context.Module.ToString(),
+                                ["module"] = moduleChar.ToString(),
                                 ["acceptedTaxTypes"] = accepted,
-                                ["reason"] = $"TaxType '{taxType}' is not valid for module '{_session.Context.Module}'.",
+                                ["reason"] = $"TaxType '{taxType}' is not valid for module '{moduleChar}'.",
                             });
                     }
                 }

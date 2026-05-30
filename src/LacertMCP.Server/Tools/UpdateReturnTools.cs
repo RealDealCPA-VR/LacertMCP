@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Threading.Tasks;
-using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
+using LacertMCP.Server.Tools.Internal;
 using ModelContextProtocol.Server;
 
 namespace LacertMCP.Server.Tools
@@ -27,6 +27,15 @@ namespace LacertMCP.Server.Tools
     /// the operator over strict per-tool year gating. Callers who need an
     /// explicit pre-TY21 path should use <c>lacerte_field_write</c>.
     /// </para>
+    ///
+    /// <para>
+    /// The response intentionally does NOT carry an <c>api</c> label — the
+    /// tool name signals operator intent, but the live wire choice belongs to
+    /// the session manager (Boundary Invariant #5). A previous version
+    /// hard-coded <c>api = "UpdateTaxReturn"</c> which was provably wrong for
+    /// pre-TY21 contexts (finding P14-026). Body lives in
+    /// <see cref="FieldWriteCore"/> so both write tools cannot drift.
+    /// </para>
     /// </summary>
     [McpServerToolType]
     public class UpdateReturnTools
@@ -41,7 +50,7 @@ namespace LacertMCP.Server.Tools
         [McpServerTool]
         [Description("TY21+ explicit write entrypoint (UpdateTaxReturn under the hood, keyed by ClientNumber). Equivalent surface to lacerte_field_write — both go through the same session chokepoint which year-routes the backend call. Use this when you specifically want the TY21+ API in a TY21+ context. Returns the TAPIStatus integer (1=Success).")]
         public Task<string> LacerteUpdateReturn(
-            [Description("DBF table number (1..7).")] int table,
+            [Description("DBF table number. 1..5 are writable; 6 (Display) and 7 (Forms) are read-only per spec §2.")] int table,
             [Description("Lacerte ClientNumber (the C{t}_0 identifier).")] string clientNumber,
             [Description("Field name (e.g. C1_1).")] string field,
             [Description("Value to write. JSON-serializable scalar — string, number, or boolean.")] object? value,
@@ -50,24 +59,9 @@ namespace LacertMCP.Server.Tools
             [Description("If true, validate + roll back without persisting.")] bool dryRun = false,
             [Description("Optional idempotency key.")] string? idempotencyKey = null)
         {
-            return WrapToolHandler.Run(async () =>
-            {
-                var status = await _session.WriteField(
-                    table, clientNumber, field, value,
-                    subClientID, stateAbbrev, dryRun, idempotencyKey);
-
-                var info = StatusCodes.GetStatusInfo(status);
-                return (object)new
-                {
-                    statusCode = status,
-                    statusName = info.Name,
-                    table,
-                    clientNumber,
-                    field,
-                    dryRun,
-                    api = "UpdateTaxReturn",
-                };
-            });
+            return FieldWriteCore.Run(
+                _session, table, clientNumber, field, value,
+                subClientID, stateAbbrev, dryRun, idempotencyKey);
         }
     }
 }

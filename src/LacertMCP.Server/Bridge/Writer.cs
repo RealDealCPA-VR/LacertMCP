@@ -33,6 +33,14 @@ namespace LacertMCP.Server.Bridge
         public static int WriteToDBFDatabase(
             string appId, string dataPath, string dbf, int rowNum, string field, object? value)
         {
+            // P14-050 — bridge-boundary defense-in-depth. Validation runs
+            // BEFORE WireLog + AcquireWriter so a bad arg is rejected before
+            // we log the args OR try to acquire the COM RCW. Off-Windows the
+            // BridgeUnavailable throw would mask the validation error
+            // otherwise.
+            BridgeInputValidation.ValidateWriteToDBFDatabaseArgs(
+                appId, dataPath, dbf, rowNum, field, value);
+
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<int>("Bridge.WriteToDBFDatabase",
                 new { dbf, rowNum, field, value }, () =>
@@ -40,22 +48,35 @@ namespace LacertMCP.Server.Bridge
                 var writer = AcquireWriter("WriteToDBFDatabase");
                 try
                 {
-                    dynamic w = writer;
-                    int status = (int)w.WriteToDBFDatabase(appId, dataPath, dbf, rowNum, field, value);
-                    return status;
+                    try
+                    {
+                        dynamic w = writer;
+                        int status = (int)w.WriteToDBFDatabase(appId, dataPath, dbf, rowNum, field, value);
+                        return status;
+                    }
+                    catch (LacerteSDKError) { throw; }
+                    catch (Exception ex)
+                    {
+                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
+                            new Dictionary<string, object?>
+                            {
+                                ["op"] = "WriteToDBFDatabase",
+                                ["dbf"] = dbf,
+                                ["rowNum"] = rowNum,
+                                ["field"] = field,
+                                ["reason"] = ex.Message,
+                            }, ex);
+                    }
                 }
-                catch (LacerteSDKError) { throw; }
-                catch (Exception ex)
+                finally
                 {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = "WriteToDBFDatabase",
-                            ["dbf"] = dbf,
-                            ["rowNum"] = rowNum,
-                            ["field"] = field,
-                            ["reason"] = ex.Message,
-                        }, ex);
+                    // P14-004 — release RCW per-call to avoid COM leak. Canonical
+                    // pattern from CanUseNewApisProbe.cs:96-103.
+                    if (writer != null)
+                    {
+                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
+                        catch (Exception) { /* best-effort */ }
+                    }
                 }
             });
         }
@@ -69,6 +90,10 @@ namespace LacertMCP.Server.Bridge
             string appId, string dataPath, string dbf, string clientNumber,
             string field, object? value, int? subClientID, string? stateAbbrev)
         {
+            // P14-050 — bridge-boundary defense-in-depth. See WriteToDBFDatabase.
+            BridgeInputValidation.ValidateUpdateTaxReturnArgs(
+                appId, dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev);
+
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<int>("Bridge.UpdateTaxReturn",
                 new { dbf, clientNumber, field, value, subClientID, stateAbbrev }, () =>
@@ -76,24 +101,37 @@ namespace LacertMCP.Server.Bridge
                 var writer = AcquireWriter("UpdateTaxReturn");
                 try
                 {
-                    dynamic w = writer;
-                    int status = (int)w.UpdateTaxReturn(
-                        appId, dataPath, dbf, clientNumber, field, value,
-                        subClientID ?? 0, stateAbbrev ?? string.Empty);
-                    return status;
+                    try
+                    {
+                        dynamic w = writer;
+                        int status = (int)w.UpdateTaxReturn(
+                            appId, dataPath, dbf, clientNumber, field, value,
+                            subClientID ?? 0, stateAbbrev ?? string.Empty);
+                        return status;
+                    }
+                    catch (LacerteSDKError) { throw; }
+                    catch (Exception ex)
+                    {
+                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
+                            new Dictionary<string, object?>
+                            {
+                                ["op"] = "UpdateTaxReturn",
+                                ["dbf"] = dbf,
+                                ["clientNumber"] = clientNumber,
+                                ["field"] = field,
+                                ["reason"] = ex.Message,
+                            }, ex);
+                    }
                 }
-                catch (LacerteSDKError) { throw; }
-                catch (Exception ex)
+                finally
                 {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = "UpdateTaxReturn",
-                            ["dbf"] = dbf,
-                            ["clientNumber"] = clientNumber,
-                            ["field"] = field,
-                            ["reason"] = ex.Message,
-                        }, ex);
+                    // P14-004 — release RCW per-call to avoid COM leak. Canonical
+                    // pattern from CanUseNewApisProbe.cs:96-103.
+                    if (writer != null)
+                    {
+                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
+                        catch (Exception) { /* best-effort */ }
+                    }
                 }
             });
         }
@@ -108,6 +146,16 @@ namespace LacertMCP.Server.Bridge
             string appId, string dataPath, string clientNumber, DetailRow row)
         {
             if (row == null) throw new ArgumentNullException(nameof(row));
+
+            // P14-050 — bridge-boundary defense-in-depth. Validates every
+            // string on DetailRow (Series/Prefix/Code/Suffix/StateAbbr/
+            // CityAbbr/Source/TSJ/ImportSrc/Description) for length caps
+            // and control-char content (esp. NUL — COM marshallers truncate
+            // strings at the first NUL, so "OK\0; DROP" would silently
+            // become "OK" in the DBF).
+            BridgeInputValidation.ValidateWriteDetailArgs(
+                appId, dataPath, clientNumber, row);
+
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<int>("Bridge.WriteDetail",
                 new { clientNumber, row }, () =>
@@ -115,30 +163,43 @@ namespace LacertMCP.Server.Bridge
                 var writer = AcquireWriter("WriteDetail");
                 try
                 {
-                    dynamic w = writer;
-                    // Live verification deferred to Windows + Lacerte box.
-                    // Best-guess COM method shape is WriteToDetailFile(appId,
-                    // dataPath, clientNumber, series, prefix, code, suffix,
-                    // stateAbbr, cityAbbr, source, tsj, importSrc, amount,
-                    // description) — confirm against the SDK headers during the
-                    // live verification session.
-                    int status = (int)w.WriteToDetailFile(
-                        appId, dataPath, clientNumber,
-                        row.Series, row.Prefix, row.Code, row.Suffix,
-                        row.StateAbbr, row.CityAbbr, row.Source, row.TSJ,
-                        row.ImportSrc, row.Amount ?? 0.0, row.Description);
-                    return status;
+                    try
+                    {
+                        dynamic w = writer;
+                        // Live verification deferred to Windows + Lacerte box.
+                        // Best-guess COM method shape is WriteToDetailFile(appId,
+                        // dataPath, clientNumber, series, prefix, code, suffix,
+                        // stateAbbr, cityAbbr, source, tsj, importSrc, amount,
+                        // description) — confirm against the SDK headers during the
+                        // live verification session.
+                        int status = (int)w.WriteToDetailFile(
+                            appId, dataPath, clientNumber,
+                            row.Series, row.Prefix, row.Code, row.Suffix,
+                            row.StateAbbr, row.CityAbbr, row.Source, row.TSJ,
+                            row.ImportSrc, row.Amount ?? 0.0, row.Description);
+                        return status;
+                    }
+                    catch (LacerteSDKError) { throw; }
+                    catch (Exception ex)
+                    {
+                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
+                            new Dictionary<string, object?>
+                            {
+                                ["op"] = "WriteDetail",
+                                ["clientNumber"] = clientNumber,
+                                ["reason"] = ex.Message,
+                            }, ex);
+                    }
                 }
-                catch (LacerteSDKError) { throw; }
-                catch (Exception ex)
+                finally
                 {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = "WriteDetail",
-                            ["clientNumber"] = clientNumber,
-                            ["reason"] = ex.Message,
-                        }, ex);
+                    // P14-004 — release RCW per-call to avoid COM leak. Canonical
+                    // pattern from CanUseNewApisProbe.cs:96-103.
+                    if (writer != null)
+                    {
+                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
+                        catch (Exception) { /* best-effort */ }
+                    }
                 }
             });
         }

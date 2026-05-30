@@ -26,5 +26,10 @@ namespace LacertMCP.Server.Session
         SessionContext? Context,
         string? AppName,
         string AppId,
-        EditionInfo? Edition = null);
+        EditionInfo? Edition = null,
+        // P14-040: build stamp for bug reports — the operator's dev box (sim) and
+        // Windows operator box (live) are necessarily different machines and the
+        // operator will hand-copy binaries between them. The version comes from
+        // Directory.Build.props -> AssemblyInformationalVersion via BuildInfo.
+        string? BuildVersion = null);
 }

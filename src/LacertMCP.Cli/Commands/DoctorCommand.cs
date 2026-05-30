@@ -4,6 +4,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.IO;
 using LacertMCP.Cli.Storage;
+using LacertMCP.Server.Diagnostics;
 
 namespace LacertMCP.Cli.Commands
 {
@@ -81,6 +82,32 @@ namespace LacertMCP.Cli.Commands
             }
             writer.WriteLine(new string('-', 60));
 
+            var exit = ComputeExitCode(results);
+            switch (exit)
+            {
+                case 1:
+                    writer.WriteLine("Result: FAIL (one or more probes red). Exit 1.");
+                    break;
+                case 2:
+                    writer.WriteLine("Result: PARTIAL (one or more probes skipped — not on Windows). Exit 2.");
+                    break;
+                default:
+                    writer.WriteLine("Result: OK (all probes green). Exit 0.");
+                    break;
+            }
+            return exit;
+        }
+
+        /// <summary>
+        /// P14-071: pure, side-effect-free exit-code decision so the
+        /// <c>0 green / 1 red / 2 skipped</c> contract (Fail trumps Skip)
+        /// is directly testable without I/O. Public so xUnit can pin it
+        /// with synthetic <see cref="ProbeResult"/> lists.
+        /// </summary>
+        public static int ComputeExitCode(IList<ProbeResult> results)
+        {
+            if (results == null) throw new ArgumentNullException(nameof(results));
+
             var hasFail = false;
             var hasSkip = false;
             foreach (var r in results)
@@ -88,18 +115,9 @@ namespace LacertMCP.Cli.Commands
                 if (r.Status == ProbeStatus.Fail) hasFail = true;
                 if (r.Status == ProbeStatus.Skipped) hasSkip = true;
             }
-
-            if (hasFail)
-            {
-                writer.WriteLine("Result: FAIL (one or more probes red). Exit 1.");
-                return 1;
-            }
-            if (hasSkip)
-            {
-                writer.WriteLine("Result: PARTIAL (one or more probes skipped — not on Windows). Exit 2.");
-                return 2;
-            }
-            writer.WriteLine("Result: OK (all probes green). Exit 0.");
+            // Fail trumps Skip — a red probe always wins over a skipped one.
+            if (hasFail) return 1;
+            if (hasSkip) return 2;
             return 0;
         }
 
@@ -107,6 +125,11 @@ namespace LacertMCP.Cli.Commands
         {
             var results = new List<ProbeResult>();
             var onWindows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+
+            // 0. Build version — always Pass; exists so the operator can copy
+            //    the build stamp into bug reports (P14-040). Sourced from
+            //    Directory.Build.props -> AssemblyInformationalVersion.
+            results.Add(new ProbeResult("Build version", ProbeStatus.Pass, BuildInfo.Version));
 
             // 1. OS / Windows version
             if (onWindows)
@@ -192,10 +215,12 @@ namespace LacertMCP.Cli.Commands
             var appId = AppIdStore.Get();
             if (appId.HasValue)
             {
-                var first8 = appId.Value.ToString("D").Substring(0, 8);
+                // Use the shared canonical mask so every CLI surface (status/login/doctor) prints
+                // the AppID in the same masked form. Operators back up the full GUID once at
+                // register-time; `lacerte-mcp status --show-app-id` is the documented re-reveal path.
                 results.Add(new ProbeResult("AppID GUID",
                     ProbeStatus.Pass,
-                    $"persisted ({first8}-****) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")}"));
+                    $"persisted ({AppIdStore.Mask(appId.Value)}) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")}"));
             }
             else
             {

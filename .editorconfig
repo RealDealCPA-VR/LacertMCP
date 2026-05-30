@@ -1,0 +1,34 @@
+# P14-038 — formatting + style guardrails for a multi-session AI-contractor codebase.
+# Intentionally minimal: no analyzers, no StyleCop, no dotnet-format gate. Just enough
+# to keep indentation + newline conventions consistent so cross-session diffs don't
+# rot. End-of-line is intentionally unspecified for *.cs because off-Windows dev is
+# the default per CLAUDE.md (sim mode runs anywhere) — leaving it to git autocrlf
+# avoids spurious diffs when the same file flips between LF on dev box and CRLF on
+# the Windows operator box.
+
+root = true
+
+[*]
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+charset = utf-8
+
+# Don't trim markdown trailing spaces — they're significant (line breaks).
+[*.md]
+trim_trailing_whitespace = false
+
+[*.cs]
+indent_size = 4
+end_of_line = unset
+
+# MSBuild / config files conventionally use 2-space indent.
+[*.{json,csproj,props,targets,config,runsettings}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# PowerShell scripts in scripts/ follow PSScriptAnalyzer's 4-space convention.
+[*.ps1]
+indent_size = 4

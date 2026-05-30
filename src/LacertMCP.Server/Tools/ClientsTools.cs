@@ -26,9 +26,19 @@ namespace LacertMCP.Server.Tools
             [Description("Zero-based row offset into the filtered result set. Default 0.")] int offset = 0)
             => WrapToolHandler.Run(async () =>
             {
-                // Pull the full filtered set from the session (use a high limit so the
-                // server-side Take() doesn't truncate before we paginate), then page
-                // in-tool via Pagination.Page<T>.
+                // Pull the full filtered set from the session, then page in-tool via
+                // Pagination.Page<T> so 'total' is exact.
+                //
+                // PAGINATION LIMITATION (audit P14-014, cluster N_sql): the Lacerte
+                // ODBC driver (FoxPro-style) does NOT support OFFSET / FETCH NEXT /
+                // ROW_NUMBER(), so true server-side OFFSET-based paging is not
+                // available. The live-mode push-down templates SqlTemplates.Data1Top
+                // and Data1TopWhereName cap rows via TOP n but cannot skip; until the
+                // session exposes a (rows, total) overload that does an in-memory
+                // slice while preserving an exact total, this tool overfetches via
+                // int.MaxValue and slices here. Sim is in-memory so the overfetch is
+                // free; live mode will eat the full-table scan cost per paged request
+                // — slated for a session-level fix in a future phase.
                 var rows = await _session.ListClients(nameFilter, int.MaxValue).ConfigureAwait(false);
                 var page = Pagination.Pagination.Page(rows, limit, offset);
 

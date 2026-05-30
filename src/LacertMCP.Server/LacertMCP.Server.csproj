@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!--
+      P14-038: TargetFramework / PlatformTarget / Platforms / LangVersion / Nullable
+      live in Directory.Build.props at the repo root.
+      P14-040: Version / AssemblyVersion / FileVersion / InformationalVersion ditto.
+    -->
     <OutputType>Exe</OutputType>
-    <TargetFramework>net48</TargetFramework>
-    <PlatformTarget>x64</PlatformTarget>
-    <Platforms>x64</Platforms>
-    <LangVersion>latest</LangVersion>
-    <Nullable>enable</Nullable>
     <RootNamespace>LacertMCP.Server</RootNamespace>
     <AssemblyName>LacertMCP.Server</AssemblyName>
     <!-- Required for COM/.NET mixed-mode load of LacerteSDK_Access -->

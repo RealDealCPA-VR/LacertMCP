@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using LacertMCP.Server.Logging;
 
 namespace LacertMCP.Server.Errors
 {
@@ -22,6 +23,15 @@ namespace LacertMCP.Server.Errors
     ///     <see cref="LacerteSDKError"/> with code 0 (<c>Error</c>), preserving the raw
     ///     message in <c>context.rawError</c>, then formatted with the same shape.</description></item>
     /// </list>
+    ///
+    /// <para>
+    /// Redaction: BOTH the success envelope (which may carry ODBC-read row data
+    /// containing SSN/EIN columns) AND the error envelope (whose context dict can
+    /// carry write-payload values and COM-echoed exception messages) are run
+    /// through <see cref="WireLog.Redact"/> before they leave this method. This
+    /// closes the wire-vs-disk asymmetry where WireLog redacted disk lines but
+    /// the MCP wire envelope shipped unredacted PII to the LLM client.
+    /// </para>
     /// </summary>
     public static class WrapToolHandler
     {
@@ -48,7 +58,7 @@ namespace LacertMCP.Server.Errors
                     ["success"] = true,
                     ["result"] = result,
                 };
-                return JsonSerializer.Serialize(envelope, JsonOptions);
+                return WireLog.Redact(JsonSerializer.Serialize(envelope, JsonOptions));
             }
             catch (LacerteSDKError sdkErr)
             {
@@ -81,7 +91,7 @@ namespace LacertMCP.Server.Errors
                 ["remediation"] = err.Remediation,
                 ["context"] = err.Context,
             };
-            return JsonSerializer.Serialize(envelope, JsonOptions);
+            return WireLog.Redact(JsonSerializer.Serialize(envelope, JsonOptions));
         }
     }
 }

@@ -56,14 +56,21 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteClientCreate(
                 clientID: "TOOLONGNAME", // 11 chars — exceeds 8
-                taxType: "Individual");
+                taxType: "Individual",
+                firstName: "Too",
+                lastName: "Long",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(SyntheticStatusCodes.ClientIDTooLong,
                 root.GetProperty("statusCode").GetInt32());
-            // Per task brief: message mentions LengthExceeded semantics.
-            Assert.Contains("LengthExceeded",
+            // P14-019: context.reason is redacted on the wire (it commonly
+            // echoes COM-returned taxpayer data in the generic-exception
+            // path). The semantic invariant — the request was rejected with
+            // the ClientIDTooLong synthetic code — is asserted above; the
+            // human-readable reason now appears as the *** sentinel.
+            Assert.Equal("***",
                 root.GetProperty("context").GetProperty("reason").GetString()!);
         }
 
@@ -74,7 +81,10 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteClientCreate(
                 clientID: "BAD!", // ! is not in [A-Z0-9]
-                taxType: "Individual");
+                taxType: "Individual",
+                firstName: "Bad",
+                lastName: "Chars",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -90,7 +100,10 @@ namespace LacertMCP.Tests.Tools
             // BROW is seeded in TY24 IData — duplicate should fail.
             var json = await tool.LacerteClientCreate(
                 clientID: "BROW",
-                taxType: "Individual");
+                taxType: "Individual",
+                firstName: "Dup",
+                lastName: "Brown",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -128,7 +141,10 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteClientCreate(
                 clientID: "MISMTCH",
-                taxType: "Corporate"); // wrong for module I
+                taxType: "Corporate", // wrong for module I
+                firstName: "Mis",
+                lastName: "Match",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -143,7 +159,10 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteClientCreate(
                 clientID: "EMTYTYP",
-                taxType: "");
+                taxType: "",
+                firstName: "Empty",
+                lastName: "Type",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -158,7 +177,10 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteClientCreate(
                 clientID: "ROC1",
-                taxType: "Individual");
+                taxType: "Individual",
+                firstName: "Read",
+                lastName: "Only",
+                emailID: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -179,6 +201,7 @@ namespace LacertMCP.Tests.Tools
                 taxType: "Individual",
                 firstName: "Dry",
                 lastName: "Run",
+                emailID: "dry@example.com",
                 dryRun: true);
 
             Assert.True(Parse(json).GetProperty("success").GetBoolean(), json);
@@ -195,6 +218,9 @@ namespace LacertMCP.Tests.Tools
             var json1 = await tool.LacerteClientCreate(
                 clientID: "IDP1",
                 taxType: "Individual",
+                firstName: "Idem",
+                lastName: "Potent",
+                emailID: "idp@example.com",
                 idempotencyKey: "cc-1");
             Assert.True(Parse(json1).GetProperty("success").GetBoolean(), json1);
 
@@ -202,12 +228,79 @@ namespace LacertMCP.Tests.Tools
             var json2 = await tool.LacerteClientCreate(
                 clientID: "IDP2",
                 taxType: "Individual",
+                firstName: "Idem",
+                lastName: "Potent",
+                emailID: "idp@example.com",
                 idempotencyKey: "cc-1");
 
             var root2 = Parse(json2);
             Assert.False(root2.GetProperty("success").GetBoolean());
             Assert.Equal(SyntheticStatusCodes.IdempotencyConflict,
                 root2.GetProperty("statusCode").GetInt32());
+        }
+
+        // -----------------------------------------------------------------
+        // P14-053: Required-field gates for firstName / lastName / emailID
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task ClientCreate_MissingFirstName_ReturnsInValidClientName()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "NOFNAM",
+                taxType: "Individual",
+                firstName: "   ",
+                lastName: "Doe",
+                emailID: "x@example.com");
+
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(StatusCodes.InValidClientName,
+                root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("firstName",
+                root.GetProperty("context").GetProperty("field").GetString());
+        }
+
+        [Fact]
+        public async Task ClientCreate_MissingLastName_ReturnsInValidClientName()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "NOLNAM",
+                taxType: "Individual",
+                firstName: "John",
+                lastName: "",
+                emailID: "x@example.com");
+
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(StatusCodes.InValidClientName,
+                root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("lastName",
+                root.GetProperty("context").GetProperty("field").GetString());
+        }
+
+        [Fact]
+        public async Task ClientCreate_MissingEmailID_ReturnsInValidClientName()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "NOEMAIL",
+                taxType: "Individual",
+                firstName: "John",
+                lastName: "Doe",
+                emailID: "");
+
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(StatusCodes.InValidClientName,
+                root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("emailID",
+                root.GetProperty("context").GetProperty("field").GetString());
         }
     }
 }

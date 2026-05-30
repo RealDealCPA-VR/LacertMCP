@@ -64,7 +64,10 @@ namespace LacertMCP.Tests.Errors
             Assert.Equal("error", root.GetProperty("severity").GetString());
 
             var context = root.GetProperty("context");
-            Assert.Equal("boom", context.GetProperty("rawError").GetString());
+            // P14-019: rawError is now redacted before leaving the server.
+            // Generic-exception messages may carry SDK-echoed taxpayer data,
+            // so the value is replaced with the *** sentinel on the wire.
+            Assert.Equal("***", context.GetProperty("rawError").GetString());
             Assert.Contains("InvalidOperationException", context.GetProperty("exceptionType").GetString());
         }
 

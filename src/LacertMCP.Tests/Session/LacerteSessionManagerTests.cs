@@ -331,6 +331,10 @@ namespace LacertMCP.Tests.Session
         public async Task CreateClient_DryRun_DoesNotPersistNewClient()
         {
             var mgr = NewSimManagerWithContext();
+            // P14-030 — ApplySimCreateClient now delegates to
+            // SimulationStore.SimulateCreateClient which enforces the
+            // NotSignedIn gate. Register first so the create succeeds.
+            await mgr.Register();
             var beforeList = await mgr.ListClients(limit: 1000);
             var beforeCount = beforeList.Count;
 

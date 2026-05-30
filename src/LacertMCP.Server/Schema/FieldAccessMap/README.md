@@ -62,9 +62,24 @@ and does NOT need an entry.
 }
 ```
 
-Overlays only store **deltas** — usually a promotion to `NotSupported` when
-Intuit drops a field for that tax year. Lookup order is overlay (if the
-year matches) → base → `Unknown`.
+Overlays store the **per-year override** for that exact tax year — usually
+a promotion to `NotSupported` when Intuit drops a field for that build.
+Lookup order is overlay (if the year matches) → base → `Unknown`.
+
+### Per-year, full-replace — not cumulative
+
+Overlay files are scoped to the **exact** tax year named in the filename.
+The loader reads `ty{yy}-not-supported.json` for the requested year only
+and does NOT walk prior years or merge them. A `ty21-not-supported.json`
+entry is **not** automatically applied when looking up the same field in
+TY22, TY23, or TY24 — each TY must ship its own complete "not supported"
+list, even if a field was already dropped in an earlier year.
+
+This is per agent 04 §6 and the DECISIONS.md entry dated 2026-05-30
+("Per-year access-map overlay semantic"). The trade-off is explicit:
+authoring discipline (each year ships its own complete list) in exchange
+for a loader that never inherits an override across a TY boundary the
+author didn't intend.
 
 ## How to add a new entry
 

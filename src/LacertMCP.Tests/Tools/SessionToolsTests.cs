@@ -176,6 +176,170 @@ namespace LacertMCP.Tests.Tools
             Assert.Empty(SessionTools.DiscoverDatapaths(null!));
         }
 
+        // -----------------------------------------------------------------
+        // P14-049 — dataPath PathValidation gate (9013 InvalidDataPath)
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task SetContext_RelativePath_Returns9013()
+        {
+            // "foo\\bar" is not rooted — must be rejected before any sim
+            // backend write happens.
+            var tools = NewTools();
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteSetContext(@"foo\bar", 2024, "I"));
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task SetContext_DotDotTraversal_Returns9013()
+        {
+            // '..' as a separator-bounded segment is the textbook traversal
+            // primitive — Path.GetFullPath would silently collapse it; the
+            // PathValidation gate catches it BEFORE canonicalization.
+            var tools = NewTools();
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteSetContext(@"C:\Lacerte\24Tax\..\Windows", 2024, "I"));
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task SetContext_UncPath_RejectedWithout_AllowUnc()
+        {
+            // UNC paths are rejected by default; the escape hatch is
+            // LACERTE_ALLOW_UNC=1 (tested separately at the helper level so
+            // we don't have to mutate process env in xUnit).
+            var tools = NewTools();
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteSetContext(@"\\server\share\IData", 2024, "I"));
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task SetContext_NullByte_Returns9013()
+        {
+            // Control characters (< 0x20 OR 0x7F) are highest-risk parser
+            // confusion strings — null in particular has been used to slice
+            // strings in C-FFI marshalling boundaries.
+            var tools = NewTools();
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\0evil", 2024, "I"));
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task SetContext_CrLf_Returns9013()
+        {
+            var tools = NewTools();
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\r\n", 2024, "I"));
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
+        }
+
+        // -----------------------------------------------------------------
+        // P14-049 — PathValidation.ValidateDataPath helper (direct)
+        // -----------------------------------------------------------------
+        // These exercise the helper with explicit env dictionaries so we can
+        // cover the allowlist + escape-hatch branches without mutating the
+        // process-wide environment (xUnit runs tests in parallel — env
+        // mutation would race).
+
+        [Fact]
+        public void ValidateDataPath_AllowsUnc_WhenEscapeHatchSet()
+        {
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["LACERTE_ALLOW_UNC"] = "1",
+            };
+            // Must not throw; UNC paths pass when the escape hatch is set.
+            // Don't assert on the canonical return — GetFullPath behavior on
+            // UNC is host-dependent.
+            LacertMCP.Server.Session.PathValidation.ValidateDataPath(@"\\server\share\IData", env);
+        }
+
+        [Fact]
+        public void ValidateDataPath_DataRoot_RejectsOutsideRoot()
+        {
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["LACERTE_DATA_ROOT"] = @"C:\Lacerte",
+            };
+            var ex = Assert.Throws<LacertMCP.Server.Errors.LacerteSDKError>(
+                () => LacertMCP.Server.Session.PathValidation.ValidateDataPath(@"C:\Windows\System32", env));
+            Assert.Equal(9013, ex.StatusCode);
+        }
+
+        [Fact]
+        public void ValidateDataPath_DataRoot_AcceptsUnderRoot()
+        {
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["LACERTE_DATA_ROOT"] = @"C:\Lacerte",
+            };
+            // Must not throw; happy path under the allowlist root.
+            LacertMCP.Server.Session.PathValidation.ValidateDataPath(@"C:\Lacerte\24Tax\IData", env);
+        }
+
+        [Fact]
+        public void ValidateDataPath_DataRoot_NoFalseMatch_OnSiblingPrefix()
+        {
+            // Trailing-separator normalization: "C:\Lacerte2\foo" must NOT
+            // match root "C:\Lacerte" via naive StartsWith.
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["LACERTE_DATA_ROOT"] = @"C:\Lacerte",
+            };
+            var ex = Assert.Throws<LacertMCP.Server.Errors.LacerteSDKError>(
+                () => LacertMCP.Server.Session.PathValidation.ValidateDataPath(@"C:\Lacerte2\foo", env));
+            Assert.Equal(9013, ex.StatusCode);
+        }
+
+        [Fact]
+        public void ValidateLogDir_RejectsRelative()
+        {
+            var env = new System.Collections.Generic.Dictionary<string, string?>();
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"relative\logs", env);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_RejectsUnc_WithoutEscapeHatch()
+        {
+            var env = new System.Collections.Generic.Dictionary<string, string?>();
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"\\evil\share\logs", env);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_AcceptsUnderUserprofile()
+        {
+            // Allowlist test — when USERPROFILE is set and the log dir is
+            // under it, the canonical path is returned.
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["USERPROFILE"] = @"C:\Users\tester",
+            };
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"C:\Users\tester\AppData\logs", env);
+            Assert.NotNull(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_NoEnvAllowlistRoots_ReturnsCanonical()
+        {
+            // When the env dictionary has no allowlist roots (test env, no
+            // USERPROFILE / TEMP / LACERTE_DATA_ROOT), the helper returns the
+            // canonical path. Production env always has USERPROFILE on
+            // Windows so the allowlist is real there.
+            var env = new System.Collections.Generic.Dictionary<string, string?>();
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"C:\anywhere\logs", env);
+            Assert.NotNull(result);
+        }
+
         [Fact]
         public void DiscoverDatapaths_RealLayout_FindsYYTaxModuleData()
         {

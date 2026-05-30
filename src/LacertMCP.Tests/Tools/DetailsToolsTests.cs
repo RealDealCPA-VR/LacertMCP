@@ -41,7 +41,7 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "State",
+                series: SeedData.SeriesIds.State, // numeric "30" per P14-055
                 prefix: "",
                 code: "1",
                 suffix: "",
@@ -66,7 +66,7 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "abc", // INVALID — must be numeric
                 suffix: "",
@@ -118,7 +118,7 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "9",
                 suffix: "",
@@ -147,7 +147,7 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "1",
                 suffix: "",
@@ -174,7 +174,7 @@ namespace LacertMCP.Tests.Tools
 
             var json = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "1",
                 suffix: "",
@@ -199,7 +199,7 @@ namespace LacertMCP.Tests.Tools
 
             var json1 = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "1",
                 suffix: "",
@@ -216,7 +216,7 @@ namespace LacertMCP.Tests.Tools
             // Same key, different amount.
             var json2 = await tool.LacerteDetailWrite(
                 clientNumber: "1001",
-                series: "Wages",
+                series: SeedData.SeriesIds.Wages, // numeric "11" per P14-055
                 prefix: "",
                 code: "1",
                 suffix: "",

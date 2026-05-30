@@ -33,6 +33,19 @@ namespace LacertMCP.Cli.Storage
         public const string CredentialTarget = "lacerte-mcp";
         public const string CredentialAccount = "app-id";
 
+        /// <summary>
+        /// Canonical AppID masking convention shared by every CLI command that may print one
+        /// without an explicit <c>--show-app-id</c> opt-in (status, login, doctor). Shows the
+        /// first 8 chars only — enough to disambiguate two installs without leaking the full
+        /// GUID. Centralising here keeps masking consistent across commands so the
+        /// "AppID never leaks in a non-opt-in channel" invariant has a single audit point.
+        /// </summary>
+        public static string Mask(Guid id)
+        {
+            var s = id.ToString("D");
+            return s.Substring(0, 8) + "-****-****-****-************";
+        }
+
         // CRED_TYPE_GENERIC = 1; CRED_PERSIST_LOCAL_MACHINE = 2.
         private const uint CRED_TYPE_GENERIC = 1;
         private const uint CRED_PERSIST_LOCAL_MACHINE = 2;

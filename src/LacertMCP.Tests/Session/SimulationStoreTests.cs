@@ -362,9 +362,12 @@ namespace LacertMCP.Tests.Session
         public void ReadDetail_WithFilter_NarrowsResults()
         {
             var store = new SimulationStore();
+            // P14-055: seed fixture now emits numeric Series IDs (Wages = "11")
+            // so SQL templates that compare `where Series = 11` agree with the
+            // sim predicate. SeriesIds.Wages is the named constant in SeedData.
             var wagesOnly = store.ReadDetail(
                 SeedData.DataPathIData2024, 2024, 'I', "1001",
-                r => r.Series == "Wages");
+                r => r.Series == SeedData.SeriesIds.Wages);
             // BROW: 2 Wages rows (primary + spouse) + 1 Dep row → expect 2.
             Assert.Equal(2, wagesOnly.Count);
         }

@@ -1,0 +1,92 @@
+# P14-009 — Continuous Integration for LacertMCP.
+#
+# Two jobs:
+#   - windows-build-test: the primary gate. Restores, builds the full solution,
+#     and runs the full xUnit suite (sim mode is observationally identical to
+#     live for the happy path, so this exercises ~all paths except the 11
+#     Bridge tests tagged [Fact(Skip = "Requires real Lacerte SDK")]).
+#   - ubuntu-build-smoke: enforces the "sim runs anywhere" invariant
+#     (README "Two modes" + CLAUDE.md "Two-mode discipline"). Build only — net48
+#     test hosts need Mono and aren't worth wiring for the marginal extra
+#     signal. Catches Linux-incompatible API usage at the compile layer.
+#
+# Triggers on push to main/master and on every PR.
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  windows-build-test:
+    name: Build + test (windows-latest, sim)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore LacertMCP.sln
+
+      - name: Build (Debug x64)
+        run: dotnet build LacertMCP.sln -c Debug -p:Platform=x64 --no-restore
+
+      - name: Test (sim mode)
+        # Sim mode is the CI default — LACERTE_LIVE is unset so the session
+        # manager picks Simulation regardless of platform (per CLAUDE.md
+        # "Two-mode discipline"). The 11 live-only tests are [Fact(Skip = ...)].
+        run: dotnet test src/LacertMCP.Tests/LacertMCP.Tests.csproj -c Debug -p:Platform=x64 --no-build --logger "trx;LogFileName=test-results.trx" --logger "console;verbosity=normal"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: src/LacertMCP.Tests/TestResults/*.trx
+          if-no-files-found: warn
+
+  ubuntu-build-smoke:
+    name: Build smoke (ubuntu-latest, enforces "sim runs anywhere")
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore LacertMCP.sln
+
+      - name: Build (Debug x64)
+        # Build-only — net48 test hosts need Mono on Linux and the marginal
+        # signal over the windows job isn't worth the setup. The presence of
+        # Microsoft.NETFramework.ReferenceAssemblies (in Directory.Build.props)
+        # is what makes this build succeed on a Linux runner.
+        run: dotnet build LacertMCP.sln -c Debug -p:Platform=x64 --no-restore

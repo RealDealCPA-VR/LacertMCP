@@ -1,12 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- P14-038: shared TFM/platform/lang/nullable props live in Directory.Build.props. -->
     <OutputType>Exe</OutputType>
-    <TargetFramework>net48</TargetFramework>
-    <PlatformTarget>x64</PlatformTarget>
-    <Platforms>x64</Platforms>
-    <LangVersion>latest</LangVersion>
-    <Nullable>enable</Nullable>
     <RootNamespace>LacertMCP.FieldAccessDumper</RootNamespace>
     <AssemblyName>LacertMCP.FieldAccessDumper</AssemblyName>
   </PropertyGroup>

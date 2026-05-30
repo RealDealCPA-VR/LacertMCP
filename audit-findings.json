@@ -899,7 +899,7 @@
       "refinedRecommendation": "Minimal, in-session: add `<PackageReference Include=\"coverlet.collector\" Version=\"6.0.2\" />` (and ideally `coverlet.msbuild` for `/p:CollectCoverage=true` invocations) to LacertMCP.Tests.csproj, plus a checked-in `coverlet.runsettings` that excludes the FieldAccessDumper and generated bridge code, and a one-line README snippet documenting `dotnet test --collect:\"XPlat Code Coverage\" --settings coverlet.runsettings`. Skip the 80% threshold, ReportGenerator wiring, and coverage badge until a CI pipeline actually exists — those are bikeshedding for a solo-operator tool with no CI. Once coverage is measurable on-demand, the operator can spot-check that all 13 tools and every access-map branch (the genuine invariant worth measuring) are hit, without committing to a gate that would block unrelated work."
     },
     "taskId": "P14-041",
-    "cluster": "P_dx"
+    "cluster": "O_tests"
   },
   {
     "title": "BuildPayload SHA-256 + JsonSerializer runs on every write even when idempotencyKey is null",
