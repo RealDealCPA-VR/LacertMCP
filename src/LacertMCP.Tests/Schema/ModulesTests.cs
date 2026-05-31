@@ -134,5 +134,54 @@ namespace LacertMCP.Tests.Schema
             Assert.Contains("Individual", aliases!);
             Assert.Contains("1040", aliases!);
         }
+
+        // ============================================================
+        // P15-059 — CanonicalizeTaxType: form-number alias → canonical
+        // ============================================================
+
+        [Theory]
+        [InlineData('I', "Individual",    "Individual")]
+        [InlineData('I', "1040",          "Individual")]
+        [InlineData('I', "individual",    "Individual")]   // case-insensitive
+        [InlineData('I', "INDIVIDUAL",    "Individual")]
+        [InlineData('C', "Corporate",     "Corporate")]
+        [InlineData('C', "1120",          "Corporate")]
+        [InlineData('P', "Partnership",   "Partnership")]
+        [InlineData('P', "1065",          "Partnership")]
+        [InlineData('S', "SCorporate",    "SCorporate")]
+        [InlineData('S', "1120S",         "SCorporate")]
+        [InlineData('S', "S-Corporation", "SCorporate")]
+        [InlineData('S', "SCorp",         "SCorporate")]
+        [InlineData('S', "scorp",         "SCorporate")]   // case-insensitive
+        [InlineData('F', "1041",          "Fiduciary")]
+        [InlineData('R', "990",           "Exempt")]
+        [InlineData('T', "706",           "Estate")]
+        [InlineData('N', "709",           "Gift")]
+        [InlineData('B', "5500",          "Benefit")]
+        public void CanonicalizeTaxType_Returns_Canonical_ReturnType(char c, string input, string expected)
+        {
+            Assert.Equal(expected, Modules.CanonicalizeTaxType(c, input));
+        }
+
+        [Theory]
+        [InlineData('Z', "Individual")]   // unknown module
+        [InlineData('I', "Corporate")]    // wrong module's alias
+        [InlineData('I', "Bogus")]        // not an alias at all
+        [InlineData('I', "")]             // empty
+        [InlineData('I', null)]           // null
+        public void CanonicalizeTaxType_Returns_Null_For_NoMatch(char c, string? input)
+        {
+            Assert.Null(Modules.CanonicalizeTaxType(c, input));
+        }
+
+        [Fact]
+        public void CanonicalizeTaxType_Is_Idempotent_On_Canonical_Input()
+        {
+            // Canonical input should pass through unchanged for every module.
+            foreach (var m in Modules.All)
+            {
+                Assert.Equal(m.ReturnType, Modules.CanonicalizeTaxType(m.Char, m.ReturnType));
+            }
+        }
     }
 }

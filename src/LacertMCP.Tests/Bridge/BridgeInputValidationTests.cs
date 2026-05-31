@@ -143,7 +143,12 @@ namespace LacertMCP.Tests.Bridge
                 Writer.WriteToDBFDatabase(
                     badAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField, value: "ok"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.AppNotRegistered, ex.StatusCode);
+            // P15-007: malformed-shape appId now raises InvalidAppId (9103)
+            // instead of AppNotRegistered (9006). 9006's remediation is "run
+            // lacerte_register" which doesn't fix a length/charset failure on
+            // an already-registered AppID; 9103's remediation is unregister
+            // + re-register OR fix the LACERTE_APPID env var.
+            Assert.Equal(SyntheticStatusCodes.InvalidAppId, ex.StatusCode);
         }
 
         // -----------------------------------------------------------------
@@ -420,7 +425,8 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Reader.ReadFromDBFData("bad{appid}", GoodDataPath, GoodDbf));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.AppNotRegistered, ex.StatusCode);
+            // P15-007: see WriteToDBFDatabase_BadAppId_ThrowsBeforeBridge.
+            Assert.Equal(SyntheticStatusCodes.InvalidAppId, ex.StatusCode);
         }
 
         [Fact]
@@ -460,6 +466,206 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: null));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+        }
+
+        // -----------------------------------------------------------------
+        // P15-007 — AppId length cap now reports InvalidAppId (9103), not
+        // AppNotRegistered (9006).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void WriteToDBFDatabase_OversizeAppId_ReportsInvalidAppId()
+        {
+            // 129 chars exceeds AppIdMaxLength=128.
+            var oversize = new string('a', 129);
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    oversize, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: "ok"));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.InvalidAppId, ex.StatusCode);
+            Assert.Equal("appId", ex.Context["field"]);
+        }
+
+        // -----------------------------------------------------------------
+        // P15-061 — Generic numeric value paths reject NaN / Infinity (mirror
+        // of the existing WriteDetail row.Amount guard).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void WriteToDBFDatabase_NaNValue_ThrowsBeforeBridge()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: double.NaN));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("value", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void WriteToDBFDatabase_PositiveInfinityValue_ThrowsBeforeBridge()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: double.PositiveInfinity));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        [Fact]
+        public void WriteToDBFDatabase_NegativeInfinityFloatValue_ThrowsBeforeBridge()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: float.NegativeInfinity));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        [Fact]
+        public void UpdateTaxReturn_NaNValue_ThrowsBeforeBridge()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.UpdateTaxReturn(
+                    GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
+                    value: double.NaN, subClientID: null, stateAbbrev: null));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("value", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void WriteToDBFDatabase_JsonArrayValue_ThrowsBeforeBridge()
+        {
+            // P15-061 JsonElement gating — array/object reject as non-scalar.
+            using var doc = System.Text.Json.JsonDocument.Parse("[1,2,3]");
+            var arr = doc.RootElement;
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: arr));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("value", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void WriteToDBFDatabase_JsonObjectValue_ThrowsBeforeBridge()
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse("{\"k\":1}");
+            var obj = doc.RootElement;
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: obj));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        [Fact]
+        public void WriteToDBFDatabase_JsonStringScalar_AppliesEnsureSafeText()
+        {
+            // JsonElement string with NUL should still be rejected via the
+            // recursive EnsureSafeText branch.
+            using var doc = System.Text.Json.JsonDocument.Parse("\"OK\\u0000evil\"");
+            var s = doc.RootElement;
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                Writer.WriteToDBFDatabase(
+                    GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
+                    value: s));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        // -----------------------------------------------------------------
+        // P15-020 — CreateClient args validator (composite).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void ValidateCreateClientArgs_GoodInputs_DoesNotThrow()
+        {
+            BridgeInputValidation.ValidateCreateClientArgs(
+                GoodAppId, GoodDataPath, "NEW01", "Individual",
+                "Jane", "Doe", "jane@example.com");
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_NulInFirstName_Rejects()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    GoodAppId, GoodDataPath, "NEW01", "Individual",
+                    "bob\0", "Doe", "jane@example.com"));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("firstName", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_NulInLastName_Rejects()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    GoodAppId, GoodDataPath, "NEW01", "Individual",
+                    "Jane", "Doe\0; DROP", "jane@example.com"));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("lastName", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_OversizeEmail_Rejects()
+        {
+            // 255 chars exceeds EmailMaxLength (254).
+            var oversize = new string('x', 245) + "@e.com"; // 251 + 6 = 251
+            var bigEmail = new string('y', 250) + "@x.co"; // > 254
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    GoodAppId, GoodDataPath, "NEW01", "Individual",
+                    "Jane", "Doe", bigEmail));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("emailID", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_BadClientID_Rejects()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    GoodAppId, GoodDataPath, "BAD;CLIENT", "Individual",
+                    "Jane", "Doe", "jane@example.com"));
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_BadDataPath_Rejects()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    GoodAppId, "path\0nul", "NEW01", "Individual",
+                    "Jane", "Doe", "jane@example.com"));
+            Assert.Equal(SyntheticStatusCodes.InvalidDataPath, ex.StatusCode);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_BadAppId_Rejects()
+        {
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateCreateClientArgs(
+                    "app{id}", GoodDataPath, "NEW01", "Individual",
+                    "Jane", "Doe", "jane@example.com"));
+            Assert.Equal(SyntheticStatusCodes.InvalidAppId, ex.StatusCode);
+        }
+
+        [Fact]
+        public void ValidateCreateClientArgs_NullOptionalsOk()
+        {
+            // firstName/lastName/emailID are nullable in the COM signature.
+            BridgeInputValidation.ValidateCreateClientArgs(
+                GoodAppId, GoodDataPath, "NEW01", "Individual",
+                firstName: null, lastName: null, emailID: null);
         }
     }
 }

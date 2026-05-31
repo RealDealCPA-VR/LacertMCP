@@ -10,19 +10,19 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 ## Tests
 
-- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports **481 passed, 11 skipped, 0 failed**.
-- [ ] The 11 skips are the expected `[Fact(Skip = "Requires real Lacerte SDK")]` cases under `Tests/Bridge/` plus the one Windows-only Credential Manager round-trip under `Tests/Cli/`.
+- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports **695 passed, 10 skipped, 0 failed**.
+- [ ] The 10 skips are the 9 `[Fact(Skip = "Requires real Lacerte SDK …")]` cases under `Tests/Bridge/` (Reader, Writer, Registration, CanUseNewApisProbe, LacerteAccessClient) plus the one Windows-only Credential Manager P/Invoke round-trip in `Tests/Cli/AppIdStoreTests.cs`.
 
 ## Server startup
 
 - [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` starts the stdio MCP server without throwing (kill after confirming startup).
 - [ ] Simulation banner prints when expected (off-Windows or `LACERTE_SIMULATION=1`).
-- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` (16 tools per HANDOFF.md).
+- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` (22 tools today — count `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` rather than a hard-coded number, since this drifts every time a tool is added).
 
 ## CLI smoke
 
 - [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` exits **0** with a JSON payload.
-- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor` is expected to exit **1** off-Windows (no Lacerte install) — that's the documented behavior.
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor` is expected to exit **2** off-Windows = PARTIAL (Windows-only probes skipped, no real failures); exit 1 means a probe genuinely failed (e.g. AppID missing on a fresh checkout — run `lacerte-mcp register` to fix); exit 0 = all green (Windows + Lacerte install). Per DoctorCommand.cs:14-20.
 
 ## Dumper smoke
 
@@ -79,6 +79,7 @@ Mark each box `[x]` only after the operator personally observed the tool succeed
 ### Bridge wire round-trip (every method on `ILacerteBridge`)
 
 - [ ] `LacerteAccessClient` ctor on Windows + SDK present → `IsConnected == true`. Verify via `lacerte-mcp doctor` (probe added in Phase 11).
+- [ ] `BridgeInputValidation` fires PRE-wire on Writer + Reader paths. With `LACERTE_DEBUG_WIRE=1` enabled, invoke each of the four wired bridge paths with a deliberately bad input — (a) `Writer.WriteToDBFDatabase` with `dataPath` containing `\x00`, (b) `Writer.UpdateTaxReturn` with `clientNumber` > 8 chars, (c) `Writer.WriteDetail` with a detail `Source` > 50 chars, (d) `Reader.ReadFromDBFData` with `dbf` failing the `^[A-Z0-9]{1,12}\.[A-Z0-9]{1,4}$` pattern. For each: confirm the tool surfaces the structured error AND that the tail of `logs/lacerte-YYYYMMDD.log` contains NO record for the rejected call (the validator throws before `WireLog.AppendCall` runs). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] `Bridge.Registration.Register(appName, appId, 2024)` against a fresh AppID surfaces Intuit consent + sign-in dialogs; operator clicks through; returns `AccessGranted (201)`. Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] `Bridge.Registration.Register` against a previously-approved AppID within 24h cache window returns `AccessGranted (201)` SILENTLY (no dialogs). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] `Bridge.CanUseNewApisProbe.Probe(appId, 2024, 'I')` returns `true`. Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.

@@ -115,5 +115,44 @@ namespace LacertMCP.Server.Schema
         {
             return GetByChar(c)?.TaxTypeAliases;
         }
+
+        /// <summary>
+        /// P15-059 — Normalize an operator-supplied <paramref name="taxType"/>
+        /// (which may be a colloquial form-number alias like <c>"1040"</c>,
+        /// <c>"1120S"</c>, <c>"S-Corporation"</c>) to the canonical
+        /// SDK-accepted <see cref="ModuleInfo.ReturnType"/> string
+        /// (<c>"Individual"</c>, <c>"SCorporate"</c>, ...).
+        ///
+        /// <para>
+        /// Why this matters — the spec (<c>Lacerte_MCP_Structure_Spec.md</c> §2)
+        /// lists only 9 canonical <c>ReturnType</c> strings as valid for the
+        /// ODBC connection string AND for the live SDK's
+        /// <c>IClient(TaxType, ...)</c> constructor. The colloquial form-number
+        /// aliases are useful operator ergonomics but the SDK will reject
+        /// them with TaxModuleMismatch (14). Callers should canonicalize at
+        /// the tool boundary BEFORE handing the value to the bridge or the
+        /// simulator, so sim and live stay observationally identical per the
+        /// two-mode discipline.
+        /// </para>
+        ///
+        /// <para>
+        /// Returns <c>null</c> for unknown modules or when
+        /// <paramref name="taxType"/> is not in the module's alias set
+        /// (matching <see cref="AcceptsTaxType"/>'s contract). Returns the
+        /// already-canonical string when the operator already supplied it.
+        /// Case-insensitive match.
+        /// </para>
+        /// </summary>
+        public static string? CanonicalizeTaxType(char c, string? taxType)
+        {
+            if (string.IsNullOrEmpty(taxType)) return null;
+            var info = GetByChar(c);
+            if (info == null) return null;
+            foreach (var a in info.TaxTypeAliases)
+            {
+                if (string.Equals(a, taxType, StringComparison.OrdinalIgnoreCase)) return info.ReturnType;
+            }
+            return null;
+        }
     }
 }

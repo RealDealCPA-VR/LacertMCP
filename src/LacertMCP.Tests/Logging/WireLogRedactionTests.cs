@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -125,18 +126,51 @@ namespace LacertMCP.Tests.Logging
         }
 
         [Fact]
-        public void Redact_WriteFieldShape_DoesNotScrubValueWhenFieldIsNotPii()
+        public void Redact_WriteFieldShape_DenylistScrubsValueRegardlessOfFieldCode_P15_058()
         {
-            // Sanity check: non-PII field codes preserve the value untouched.
+            // P15-058 — denylist semantics: every {field, value} pair has
+            // its value scrubbed regardless of field code or module. Pre-P15-058
+            // this was an allowlist gated on _piiFieldCodes (DATA1-Individual
+            // only), which silently leaked entity-module PII through WriteField
+            // log records like {field:"C2_99", value:"officer-SSN"}.
+            //
+            // Rationale: the curated set covers only Individual; the entity
+            // modules (Corp officer SSN, Partnership K-1 SSN, Fiduciary
+            // beneficiary SSN, all bank columns) have no spec source yet.
+            // Over-redacting on a debug log is strictly safer.
             var raw = JsonSerializer.Serialize(new
             {
-                field = "C1_99", // not in PII set
+                field = "C1_99", // not in old _piiFieldCodes set
                 value = "some-routine-value",
             });
 
             var redacted = WireLog.Redact(raw);
 
-            Assert.Contains("some-routine-value", redacted);
+            // Value is now scrubbed (was preserved pre-P15-058).
+            Assert.DoesNotContain("some-routine-value", redacted);
+            Assert.Contains("\"value\":\"***\"", redacted);
+            // Field code stays visible so operator can still diagnose the call.
+            Assert.Contains("\"field\":\"C1_99\"", redacted);
+        }
+
+        [Fact]
+        public void Redact_WriteFieldShape_DenylistScrubsEntityModuleValues_P15_058()
+        {
+            // P15-058 — entity-module coverage that allowlist semantics missed.
+            // module="C" (Corp) + an unknown field code under the old allowlist
+            // would log the SSN verbatim. Under denylist semantics the value
+            // is scrubbed regardless.
+            var raw = JsonSerializer.Serialize(new
+            {
+                module = "C",
+                field = "C2_99",  // hypothetical Corp officer SSN slot
+                value = "111-22-3333",
+            });
+
+            var redacted = WireLog.Redact(raw);
+
+            Assert.DoesNotContain("111-22-3333", redacted);
+            Assert.Contains("\"value\":\"***\"", redacted);
         }
 
         [Fact]
@@ -201,6 +235,128 @@ namespace LacertMCP.Tests.Logging
             Assert.DoesNotContain("333-22-4444", redacted);
         }
 
+        // -----------------------------------------------------------------
+        // P15-018 — ODBC dict-row shape keyed by raw Lacerte field code.
+        // LacerteDsnReader.Query materializes rows as
+        // Dictionary<string, object?> keyed by OdbcDataReader.GetName(i),
+        // so a `select * from [DATA1-Client Info]` log line shows
+        // `{"C1_15":"111-22-3333"}`. Before P15-018 the key-name walker
+        // only checked PascalCase keys (SSN/TaxpayerSSN/etc.) and the
+        // field-code pair scrubber required a sibling `field`/`value`
+        // shape, so this shape leaked verbatim.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void Redact_ColumnNameKeyedPiiCode_RedactsValue()
+        {
+            var raw = "{\"C1_15\":\"111-22-3333\"}";
+            var redacted = WireLog.Redact(raw);
+            Assert.DoesNotContain("111-22-3333", redacted);
+            Assert.Contains("\"C1_15\":\"***\"", redacted);
+        }
+
+        [Fact]
+        public void Redact_OdbcRowShape_RedactsAllPiiColumns()
+        {
+            // Shape mirrors what LacerteDsnReader.Query logs as result:
+            // a list of dicts keyed by the raw ODBC column names which
+            // ARE Lacerte field codes.
+            var raw = JsonSerializer.Serialize(new
+            {
+                op = "Odbc.Query",
+                args = new { sql = "select * from [DATA1-Client Info]" },
+                result = new[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["C1_0"] = "1001",      // ClientNumber — not PII
+                        ["C1_15"] = "111-22-3333", // TaxpayerSSN
+                        ["C1_14"] = "222-33-4444", // SpouseSSN
+                        ["C1_19"] = "01/15/1985",  // DateOfBirth
+                        ["C1_21"] = "06/30/1986",  // SpouseDateOfBirth
+                        ["C1_27"] = "555-1111",    // HomePhone
+                        ["C1_29"] = "victim@example.com", // EmailID
+                        ["C1_71"] = "987654321",   // BankAccountNumber
+                        ["C1_72"] = "110000000",   // RoutingNumber
+                    },
+                },
+            });
+
+            var redacted = WireLog.Redact(raw);
+
+            Assert.DoesNotContain("111-22-3333", redacted);
+            Assert.DoesNotContain("222-33-4444", redacted);
+            Assert.DoesNotContain("01/15/1985", redacted);
+            Assert.DoesNotContain("06/30/1986", redacted);
+            Assert.DoesNotContain("555-1111", redacted);
+            Assert.DoesNotContain("victim@example.com", redacted);
+            Assert.DoesNotContain("987654321", redacted);
+            Assert.DoesNotContain("110000000", redacted);
+            // Non-PII column preserved.
+            Assert.Contains("\"C1_0\":\"1001\"", redacted);
+        }
+
+        [Fact]
+        public void Redact_OdbcRowShape_AppliesInWireScopeToo()
+        {
+            // The PII field codes are true-secret slots regardless of scope —
+            // the LLM consuming the wire envelope should never see them either.
+            var raw = "{\"C1_15\":\"111-22-3333\",\"C1_71\":\"987654321\"}";
+            var redacted = WireLog.Redact(raw, RedactionScope.Wire);
+            Assert.DoesNotContain("111-22-3333", redacted);
+            Assert.DoesNotContain("987654321", redacted);
+        }
+
+        [Fact]
+        public void Redact_MalformedJsonWithColumnKey_FallsBackAndScrubs()
+        {
+            // Forces the regex fallback (input is not parseable JSON).
+            var raw = "garbage \"C1_71\":\"987654321\" trailing";
+            var redacted = WireLog.Redact(raw);
+            Assert.DoesNotContain("987654321", redacted);
+            Assert.Contains("\"C1_71\":\"***\"", redacted);
+        }
+
+        // -----------------------------------------------------------------
+        // P15-019 — ODBC driver error text echoes the rejected value as a
+        // substring. Key-name redactor scrubs the value wholesale (no
+        // brittle substring regex needed).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void Redact_OdbcMessage_WipesEntireValue()
+        {
+            // OdbcErrorMapper.Map stuffs the raw driver text into context.odbcMessage.
+            var raw = "{\"odbcMessage\":\"Syntax error near 'TaxpayerSSN = 111-22-3333'\"}";
+            var redacted = WireLog.Redact(raw);
+            Assert.DoesNotContain("111-22-3333", redacted);
+            Assert.Contains("\"odbcMessage\":\"***\"", redacted);
+        }
+
+        [Fact]
+        public void Redact_OdbcMessage_WipedInWireScopeToo()
+        {
+            // Substring-leak vector is identical on the MCP wire — the SQLSTATE
+            // diagnostic (under "sqlState") survives, but the driver echo is
+            // scrubbed so the LLM never sees the rejected literal.
+            var raw = "{\"sqlState\":\"42000\",\"odbcMessage\":\"Field C1_15 value '123-45-6789' rejected\"}";
+            var redacted = WireLog.Redact(raw, RedactionScope.Wire);
+            Assert.DoesNotContain("123-45-6789", redacted);
+            Assert.Contains("\"sqlState\":\"42000\"", redacted);
+        }
+
+        [Fact]
+        public void Redact_InternalErrorMessage_WipedAtDiskScope()
+        {
+            // WireLog's own catch blocks wrap caught exceptions as
+            // {"error":{"type":..., "message": ex.Message}} — when ex.Message
+            // is an OdbcException text the PII substring rides in under
+            // "message". Wholesale-scrub at disk scope.
+            var raw = "{\"error\":{\"type\":\"System.Data.Odbc.OdbcException\",\"message\":\"SSN 111-22-3333 invalid\"}}";
+            var redacted = WireLog.Redact(raw);
+            Assert.DoesNotContain("111-22-3333", redacted);
+        }
+
         [Fact]
         public void WriteForTest_RedactsExpandedKeyset_BeforeDisk()
         {
@@ -215,9 +371,10 @@ namespace LacertMCP.Tests.Logging
                 };
                 WireLog.WriteForTest(dir, "CreateClient", args, new { ok = true }, durationMs: 1);
 
+                // P15-078: date-roll-agnostic enumeration.
                 var files = Directory.GetFiles(dir, "lacerte-*.log");
-                Assert.Single(files);
-                var line = File.ReadAllLines(files[0]).First();
+                Assert.NotEmpty(files);
+                var line = files.SelectMany(File.ReadAllLines).First();
 
                 Assert.DoesNotContain("111-22-3333", line);
                 Assert.DoesNotContain("victim@example.com", line);

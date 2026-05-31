@@ -40,7 +40,7 @@ namespace LacertMCP.Tests.Cli
         public void Status_Returns_Zero_Exit_Code()
         {
             var sw = new StringWriter();
-            var exit = StatusCommand.Run(showFull: false, sw);
+            var exit = StatusCommand.Run(showFull: false, asJson: true, sw);
             Assert.Equal(0, exit);
         }
 
@@ -48,7 +48,7 @@ namespace LacertMCP.Tests.Cli
         public void Status_Output_Is_Valid_Json_With_Expected_Keys()
         {
             var sw = new StringWriter();
-            StatusCommand.Run(showFull: false, sw);
+            StatusCommand.Run(showFull: false, asJson: true, sw);
             var json = sw.ToString();
 
             using var doc = JsonDocument.Parse(json);
@@ -77,7 +77,7 @@ namespace LacertMCP.Tests.Cli
             try
             {
                 var sw = new StringWriter();
-                StatusCommand.Run(showFull: false, sw);
+                StatusCommand.Run(showFull: false, asJson: true, sw);
                 using var doc = JsonDocument.Parse(sw.ToString());
                 var root = doc.RootElement;
 
@@ -103,7 +103,7 @@ namespace LacertMCP.Tests.Cli
             try
             {
                 var sw = new StringWriter();
-                StatusCommand.Run(showFull: true, sw);
+                StatusCommand.Run(showFull: true, asJson: true, sw);
                 using var doc = JsonDocument.Parse(sw.ToString());
                 var appId = doc.RootElement.GetProperty("appId").GetString();
                 Assert.Equal(id.ToString("D"), appId);
@@ -112,6 +112,53 @@ namespace LacertMCP.Tests.Cli
             {
                 AppIdStore.Reset();
             }
+        }
+
+        // P15-026: pins the new human-default + --json opt-in shape.
+
+        [Fact]
+        public void Status_Default_Output_Is_Human_Format()
+        {
+            var sw = new StringWriter();
+            StatusCommand.Run(showFull: false, asJson: false, sw);
+            var output = sw.ToString();
+
+            // Must NOT start with the JSON object brace.
+            Assert.False(output.TrimStart().StartsWith("{"),
+                "Default status output should be the human summary, not JSON. Got:\n" + output);
+            // Must include the human "Registered" label.
+            Assert.Contains("Registered", output);
+        }
+
+        [Fact]
+        public void Status_Default_Output_Masks_AppId_By_Default()
+        {
+            var id = Guid.NewGuid();
+            AppIdStore.Set(id);
+            try
+            {
+                var sw = new StringWriter();
+                StatusCommand.Run(showFull: false, asJson: false, sw);
+                var output = sw.ToString();
+
+                Assert.Contains("****", output);
+                Assert.DoesNotContain(id.ToString("D"), output);
+            }
+            finally
+            {
+                AppIdStore.Reset();
+            }
+        }
+
+        [Fact]
+        public void Status_Json_Flag_Emits_Valid_Json()
+        {
+            var sw = new StringWriter();
+            var exit = StatusCommand.Run(showFull: false, asJson: true, sw);
+            Assert.Equal(0, exit);
+
+            using var doc = JsonDocument.Parse(sw.ToString());
+            Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
         }
     }
 }

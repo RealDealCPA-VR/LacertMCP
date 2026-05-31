@@ -111,6 +111,73 @@ namespace LacertMCP.Cli.Storage
             return ReadFromFile();
         }
 
+        /// <summary>
+        /// P15-031: Tri-state diagnostic accessor that distinguishes "no AppID persisted"
+        /// from "AppID persisted but the stored value is not a valid GUID". The plain
+        /// <see cref="Get"/> collapses both into <c>null</c>, which hides the corruption
+        /// case from the doctor probe.
+        /// </summary>
+        public enum AppIdDiagnostic { Absent, ParseFailed, Ok }
+
+        /// <summary>
+        /// Reads the raw stored AppID and reports whether it's absent, present but
+        /// unparseable, or a valid GUID. Returns the parsed GUID via the out param
+        /// only when <see cref="AppIdDiagnostic.Ok"/>; <paramref name="rawValue"/>
+        /// carries the unparseable string when <see cref="AppIdDiagnostic.ParseFailed"/>.
+        /// </summary>
+        public static AppIdDiagnostic GetDiagnostic(out Guid value, out string? rawValue)
+        {
+            value = Guid.Empty;
+            rawValue = null;
+            string? raw;
+            if (UsesCredentialManager)
+            {
+                if (!TryCredRead(CredentialTarget, out var credRaw))
+                {
+                    return AppIdDiagnostic.Absent;
+                }
+                if (string.IsNullOrEmpty(credRaw))
+                {
+                    return AppIdDiagnostic.Absent;
+                }
+                raw = credRaw;
+            }
+            else
+            {
+                raw = ReadRawFromFile();
+                if (raw == null) return AppIdDiagnostic.Absent;
+            }
+
+            if (Guid.TryParse(raw, out var g))
+            {
+                value = g;
+                return AppIdDiagnostic.Ok;
+            }
+            rawValue = raw;
+            return AppIdDiagnostic.ParseFailed;
+        }
+
+        /// <summary>
+        /// Raw read from the file backend — returns the stored AppId string without
+        /// the <see cref="Guid.TryParse"/> collapse so the diagnostic accessor can
+        /// distinguish "file missing/no key" from "key present but malformed".
+        /// </summary>
+        private static string? ReadRawFromFile()
+        {
+            var path = FallbackConfigPath;
+            if (!File.Exists(path)) return null;
+            try
+            {
+                var json = File.ReadAllText(path, Encoding.UTF8);
+                var cfg = JsonSerializer.Deserialize<ConfigShape>(json);
+                return cfg?.AppId;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         /// <summary>Persist (or replace) the AppID.</summary>
         public static void Set(Guid id)
         {
@@ -222,6 +289,7 @@ namespace LacertMCP.Cli.Storage
         {
             value = string.Empty;
             IntPtr credPtr = IntPtr.Zero;
+            byte[]? bytes = null;
             try
             {
                 if (!CredRead(target, CRED_TYPE_GENERIC, 0, out credPtr))
@@ -235,13 +303,18 @@ namespace LacertMCP.Cli.Storage
                     return true;
                 }
                 // Stored as UTF-16 (Unicode) — matches the byte count we used on Write.
-                var bytes = new byte[cred.CredentialBlobSize];
+                bytes = new byte[cred.CredentialBlobSize];
                 Marshal.Copy(cred.CredentialBlob, bytes, 0, bytes.Length);
                 value = Encoding.Unicode.GetString(bytes);
                 return true;
             }
             finally
             {
+                // P15-076: zero the managed byte[] before letting GC reclaim it so the
+                // AppID plaintext doesn't linger on the heap until next compacting GC.
+                // (The managed `value` string still survives — accepted residual exposure
+                // per DECISIONS.md; AppID is re-mintable via `register --reset` / `unregister`.)
+                if (bytes != null) Array.Clear(bytes, 0, bytes.Length);
                 if (credPtr != IntPtr.Zero)
                 {
                     CredFree(credPtr);
@@ -279,6 +352,9 @@ namespace LacertMCP.Cli.Storage
             finally
             {
                 Marshal.FreeHGlobal(blobPtr);
+                // P15-076: zero the managed staging blob (the unmanaged HGlobal copy is
+                // already freed; the managed byte[] would otherwise linger on the heap).
+                Array.Clear(blob, 0, blob.Length);
             }
         }
 

@@ -208,7 +208,19 @@ namespace LacertMCP.Server.Bridge
             string clientID, string taxType,
             string? firstName, string? lastName, string? emailID)
         {
+            // P15-020 — bridge-boundary defense-in-depth. Validation runs
+            // BEFORE EnsureLive() + WireLog so a bad arg is rejected even on
+            // a cold (off-Windows / SDK-missing) box, matching the
+            // Writer.WriteToDBFDatabase pattern where validation precedes
+            // AcquireWriter. CreateClient is the only COM-mutation surface
+            // that bypassed BridgeInputValidation in Phase 14; it accepts
+            // operator-supplied firstName/lastName/emailID strings which the
+            // SDK marshaller silently truncates on the first NUL
+            // ("Smith\0; DROP" → "Smith" in DBF).
+            BridgeInputValidation.ValidateCreateClientArgs(
+                appId, dataPath, clientID, taxType, firstName, lastName, emailID);
             EnsureLive();
+
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<BridgeCreateClientResult>("Bridge.CreateClient",
                 new { clientID, taxType, firstName, lastName, emailID },

@@ -23,6 +23,8 @@ namespace LacertMCP.Tests.Tools
         private static (LacerteSessionManager mgr, UpdateReturnTools tool) NewToolWithContext(bool readOnly = false)
         {
             var mgr = new LacerteSessionManager(new Dictionary<string, string?>());
+            // P15-050 — auto-Register so RequireRegistered gate passes.
+            mgr.Register().GetAwaiter().GetResult();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I', readOnly);
             return (mgr, new UpdateReturnTools(mgr));
         }
@@ -120,14 +122,27 @@ namespace LacertMCP.Tests.Tools
         }
 
         // (5) Dry-run — Success status but no persisted change.
+        //     P15-064: pre-seed a sentinel via a real write so the post-dry-run
+        //     read asserts against a known value rather than null==null (the
+        //     unwritten C1_15 default). Catches silent-persist, row-loss, and
+        //     field/row mis-routing — none of which would fail the old
+        //     null==null assertion.
         [Fact]
         public async Task UpdateReturn_DryRun_DoesNotPersist()
         {
             using var fixture = new AccessMapTestFixture();
             var (mgr, tool) = NewToolWithContext();
 
+            var seedJson = await tool.LacerteUpdateReturn(
+                table: AccessMapTestFixture.Table,
+                clientNumber: "1001",
+                field: AccessMapTestFixture.WritableField,
+                value: "seed-value-before-dryrun");
+            Assert.True(Parse(seedJson).GetProperty("success").GetBoolean());
+
             var rowBefore = await mgr.ReadClient("1001");
             rowBefore!.TryGetValue(AccessMapTestFixture.WritableField, out var origValue);
+            Assert.Equal("seed-value-before-dryrun", origValue);
 
             var json = await tool.LacerteUpdateReturn(
                 table: AccessMapTestFixture.Table,
@@ -143,7 +158,7 @@ namespace LacertMCP.Tests.Tools
 
             var rowAfter = await mgr.ReadClient("1001");
             rowAfter!.TryGetValue(AccessMapTestFixture.WritableField, out var afterValue);
-            Assert.Equal(origValue, afterValue);
+            Assert.Equal("seed-value-before-dryrun", afterValue);
         }
 
         // (6) Idempotency conflict — same key + different payload → 9102.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -106,8 +107,12 @@ namespace LacertMCP.Server.Bridge
             }
             if (appId!.Length > AppIdMaxLength)
             {
+                // P15-007: misclassified as AppNotRegistered (9006) until now.
+                // The operator DID register; the persisted/env-supplied AppID
+                // just has bad shape, so the 9006 "Run lacerte_register"
+                // remediation sent LLM clients into infinite loops.
                 throw new LacerteSDKError(
-                    SyntheticStatusCodes.AppNotRegistered,
+                    SyntheticStatusCodes.InvalidAppId,
                     new Dictionary<string, object?>
                     {
                         ["op"] = op,
@@ -125,8 +130,9 @@ namespace LacertMCP.Server.Bridge
                     || c == '"' || c == '\'';
                 if (isUnsafe)
                 {
+                    // P15-007: see length-cap branch above.
                     throw new LacerteSDKError(
-                        SyntheticStatusCodes.AppNotRegistered,
+                        SyntheticStatusCodes.InvalidAppId,
                         new Dictionary<string, object?>
                         {
                             ["op"] = op,
@@ -280,15 +286,87 @@ namespace LacertMCP.Server.Bridge
         /// Validates a value argument bound for a COM write. Caller-controlled
         /// strings are checked for control characters (NUL especially — many
         /// SDK string handlers C-string-truncate on the first NUL) and bounded
-        /// to <see cref="StringValueMaxLength"/>. Non-string values are
-        /// accepted as-is at the bridge boundary — type whitelisting is the
-        /// session-manager's job (see audit refinedRecommendation step 2).
+        /// to <see cref="StringValueMaxLength"/>. Numeric NaN / Infinity are
+        /// rejected because the SDK marshaller silently corrupts the DBF cell
+        /// otherwise (mirrors the row.Amount guard in
+        /// <see cref="ValidateWriteDetailArgs"/>). JsonElement arrays/objects
+        /// are rejected — bridge expects scalar values only (P15-061).
         /// </summary>
         public static void ValidateValue(object? value, string op, int maxLength = StringValueMaxLength)
         {
             if (value is string s)
             {
                 EnsureSafeText(s, op, fieldName: "value", maxLength: maxLength);
+                return;
+            }
+            // P15-061: numeric NaN/Infinity guard for the generic WriteField /
+            // UpdateTaxReturn paths. ValidateWriteDetailArgs already rejects
+            // these on row.Amount; mirroring the check here closes the
+            // asymmetry so a caller can't silently corrupt a C{t}_n Amount
+            // field via the WriteField/UpdateTaxReturn surface.
+            if (value is double d && (double.IsNaN(d) || double.IsInfinity(d)))
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["field"] = "value",
+                        ["value"] = d,
+                        ["reason"] = "value must be a finite real number (no NaN / Infinity).",
+                    });
+            }
+            if (value is float f && (float.IsNaN(f) || float.IsInfinity(f)))
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["field"] = "value",
+                        ["value"] = (double)f,
+                        ["reason"] = "value must be a finite real number (no NaN / Infinity).",
+                    });
+            }
+            // P15-061: JsonElement gating. P14-050 step 2 was supposed to add
+            // a CLR type whitelist in LacerteSessionManager.WriteField via
+            // JsonElement.ValueKind inspection but never landed. Bridge-side
+            // we at minimum reject array/object shapes so a complex JSON
+            // payload doesn't reach the COM marshaller as a stringified mess.
+            if (value is JsonElement je)
+            {
+                if (je.ValueKind == JsonValueKind.Array || je.ValueKind == JsonValueKind.Object)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.DetailWriteInvalid,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = op,
+                            ["field"] = "value",
+                            ["valueKind"] = je.ValueKind.ToString(),
+                            ["reason"] = "value must be a scalar (string, number, bool, or null) — array/object payloads are not supported by the bridge.",
+                        });
+                }
+                // Recurse for string/number scalars to apply the same checks.
+                if (je.ValueKind == JsonValueKind.String)
+                {
+                    EnsureSafeText(je.GetString(), op, fieldName: "value", maxLength: maxLength);
+                }
+                else if (je.ValueKind == JsonValueKind.Number)
+                {
+                    if (je.TryGetDouble(out var jd) && (double.IsNaN(jd) || double.IsInfinity(jd)))
+                    {
+                        throw new LacerteSDKError(
+                            SyntheticStatusCodes.DetailWriteInvalid,
+                            new Dictionary<string, object?>
+                            {
+                                ["op"] = op,
+                                ["field"] = "value",
+                                ["value"] = jd,
+                                ["reason"] = "value must be a finite real number (no NaN / Infinity).",
+                            });
+                    }
+                }
             }
         }
 
@@ -489,6 +567,35 @@ namespace LacertMCP.Server.Bridge
             ValidateAppId(appId, op);
             ValidateDataPath(dataPath, op);
             ValidateDbfName(dbf, op);
+        }
+
+        // RFC 5321 email address local-part + domain max length cap. CreateClient
+        // emailID frequently mirrors a Lacerte preparer email and we want to
+        // bound what reaches the COM marshaller without rejecting legacy
+        // non-RFC IDs operators may have in DATA1.
+        internal const int EmailMaxLength = 254;
+
+        /// <summary>
+        /// Pre-flight for <see cref="LacerteAccessClient.CreateClient"/>:
+        /// appId, dataPath, clientID, taxType, firstName, lastName, emailID.
+        /// P15-020 — CreateClient is the only COM mutation path that bypassed
+        /// BridgeInputValidation in Phase 14. firstName/lastName/emailID are
+        /// operator-supplied free-form strings that the SDK marshaller will
+        /// silently truncate on the first NUL; bridge-side EnsureSafeText
+        /// rejects them BEFORE the dynamic dispatch.
+        /// </summary>
+        public static void ValidateCreateClientArgs(
+            string appId, string dataPath, string clientID, string taxType,
+            string? firstName, string? lastName, string? emailID)
+        {
+            const string op = "CreateClient";
+            ValidateAppId(appId, op);
+            ValidateDataPath(dataPath, op);
+            ValidateClientNumber(clientID, op);
+            EnsureSafeText(taxType, op, "taxType", ShortStringMaxLength);
+            EnsureSafeText(firstName, op, "firstName", ShortStringMaxLength);
+            EnsureSafeText(lastName, op, "lastName", ShortStringMaxLength);
+            EnsureSafeText(emailID, op, "emailID", EmailMaxLength);
         }
     }
 }

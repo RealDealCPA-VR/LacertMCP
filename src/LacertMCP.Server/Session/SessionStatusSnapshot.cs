@@ -31,5 +31,17 @@ namespace LacertMCP.Server.Session
         // Windows operator box (live) are necessarily different machines and the
         // operator will hand-copy binaries between them. The version comes from
         // Directory.Build.props -> AssemblyInformationalVersion via BuildInfo.
-        string? BuildVersion = null);
+        string? BuildVersion = null,
+        // P15-030: when mode resolution overrode an operator's env preference
+        // (both LACERTE_LIVE=1 and LACERTE_SIMULATION=1, OR LACERTE_LIVE=1 off-
+        // Windows), this carries the human-readable reason. Null when the
+        // resolution was unambiguous so the snapshot stays compact in the
+        // common case. Surfaced via `lacerte_session_status` so the operator
+        // who expected Live can immediately see WHY Sim engaged.
+        string? ModeResolutionReason = null,
+        // P15-004: surfaces the parsed LACERTE_DEFAULT_TAX_YEAR (validated
+        // >= 2018 in the ctor; null when unset). Operator-facing confirmation
+        // that the documented env var was actually picked up — before P15-004
+        // the var was advertised in README/.env.example but never read.
+        int? DefaultTaxYear = null);
 }

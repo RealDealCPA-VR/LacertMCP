@@ -24,9 +24,16 @@ namespace LacertMCP.Tests.Errors
             new object[] { 9007 },
             new object[] { 9008 },
             new object[] { 9009 },
-            new object[] { 9010 },
-            new object[] { 9011 },
+            // P15-022 — 9010/9011 (BridgeUnavailableLegacy/SimulationOnlyLegacy)
+            // removed; canonical codes are 9201/9202 in the bridge range.
             new object[] { 9012 },
+            // P15-007 — InvalidAppId. Distinct from AppNotRegistered (9006) so
+            // bad-shape appIds don't send LLM clients into "rerun register"
+            // loops that don't fix the actual problem.
+            new object[] { 9103 },
+            // P15-035 — InternalServerError. Distinct from StatusCodes.Error (0)
+            // so the wrapper doesn't misattribute in-server faults as SDK traces.
+            new object[] { 9203 },
         };
 
         [Theory]
@@ -110,6 +117,43 @@ namespace LacertMCP.Tests.Errors
 
             Assert.Equal("RegVersionBlocked", reg.Name);
             Assert.Equal("VersionBlocked", tapi.Name);
+        }
+
+        public static IEnumerable<object[]> AllDBxErrorCodes => new[]
+        {
+            new object[] { StatusCodes.DB1Error },
+            new object[] { StatusCodes.DB2Error },
+            new object[] { StatusCodes.DB3Error },
+            new object[] { StatusCodes.DB4Error },
+            new object[] { StatusCodes.DB5Error },
+            new object[] { StatusCodes.DB6Error },
+            new object[] { StatusCodes.DB7Error },
+            new object[] { StatusCodes.DB8Error },
+        };
+
+        [Theory]
+        [MemberData(nameof(AllDBxErrorCodes))]
+        public void DBxError_Remediation_MentionsExpectedDbfContextKey_P15_036(int code)
+        {
+            // P15-036: DBxError remediations must name the offending file via the
+            // context.expectedDbf + context.dataPath keys the live bridge populates,
+            // not the old generic "check the file on disk" string that named no file.
+            var info = StatusCodes.GetStatusInfo(code);
+            Assert.NotNull(info.Remediation);
+            Assert.Contains("expectedDbf", info.Remediation!);
+            Assert.Contains("dataPath", info.Remediation);
+        }
+
+        [Theory]
+        [MemberData(nameof(AllDBxErrorCodes))]
+        public void DBxError_Remediation_DoesNotUseOldGenericStringWithNoFilename_P15_036(int code)
+        {
+            // Regression guard for P15-036: the pre-fix string was identical across all 8
+            // entries and named no file. If anyone reverts to that wording, this fails.
+            var info = StatusCodes.GetStatusInfo(code);
+            Assert.NotEqual(
+                "Check the table file on disk; run Lacerte's index-repair on the affected module/year.",
+                info.Remediation);
         }
     }
 }

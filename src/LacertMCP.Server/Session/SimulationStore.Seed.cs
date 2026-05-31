@@ -113,6 +113,16 @@ namespace LacertMCP.Server.Session
             store.Details[c.ClientNumber] = details;
 
             // EF tables — TY19+ only; both seeded years (2020, 2024) qualify.
+            //
+            // P15-056 — three fixture shapes are required so the LEFT-OUTER-JOIN
+            // parity contract (sim ↔ live ReadEFStatus) can be enforced:
+            //   (a) EFStatus == "<non-null status string>" → EFiling + EFStatus rows
+            //   (b) EFStatus == "<EFiling-no-status>" sentinel → EFiling only,
+            //       no EFStatus row (mimics the live edge case where a return
+            //       was transmitted but the status hasn't ticked back yet)
+            //   (c) EFStatus == null → neither EFiling nor EFStatus row (client
+            //       hasn't been transmitted; the sim's old INNER JOIN dropped
+            //       these silently)
             if (c.EFStatus != null)
             {
                 var efilingId = store.NextEFilingId++;
@@ -121,10 +131,13 @@ namespace LacertMCP.Server.Session
                     ClientId: c.ClientNumber,
                     EFId: $"EF-{c.ClientID}-{efilingId:D4}",
                     InstanceId: $"INST-{efilingId:D6}"));
-                store.EFStatuses.Add(new EFStatus(
-                    EFilingId: efilingId,
-                    Status: c.EFStatus,
-                    StatusDate: "2024-04-15"));
+                if (c.EFStatus != "<EFiling-no-status>")
+                {
+                    store.EFStatuses.Add(new EFStatus(
+                        EFilingId: efilingId,
+                        Status: c.EFStatus,
+                        StatusDate: "2024-04-15"));
+                }
             }
         }
 

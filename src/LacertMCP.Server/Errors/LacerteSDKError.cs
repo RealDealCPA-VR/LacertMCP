@@ -12,12 +12,36 @@ namespace LacertMCP.Server.Errors
     /// </summary>
     public class LacerteSDKError : Exception
     {
+        /// <summary>
+        /// Numeric threshold separating SDK-origin codes (TAPIStatus 0-28 + TPSDKStatus
+        /// 200-204) from MCP-minted synthetic codes (9001-9299). Codes &gt;= this value
+        /// are synthetic, &lt; this are SDK. See DECISIONS.md 2026-05-30 "Synthetic
+        /// statusCode range" + 2026-05-30 "Error envelope carries origin discriminator"
+        /// (P15-037).
+        /// </summary>
+        public const int SyntheticCodeThreshold = 9000;
+
         public int StatusCode { get; }
         public string StatusName { get; }
         public Severity Severity { get; }
         public string UserMessage { get; }
         public string? Remediation { get; }
         public IReadOnlyDictionary<string, object?> Context { get; }
+
+        /// <summary>
+        /// P15-037: surface whether this error came from the SDK or was MCP-minted, so
+        /// wire-envelope consumers (LLMs, operators) don't have to memorize the 9000+
+        /// range to know where the remediation lives. Derived from <see cref="StatusCode"/>
+        /// at construction.
+        /// <list type="bullet">
+        ///   <item><description><c>"sdk"</c> — real Lacerte TAPIStatus/TPSDKStatus state;
+        ///   look up the code in Intuit's SDK documentation; remediation is operator-side.</description></item>
+        ///   <item><description><c>"synthetic"</c> — minted by this MCP before any SDK call;
+        ///   pre-flight validation, auth gate, or bridge runtime; remediation is usually
+        ///   MCP-side config.</description></item>
+        /// </list>
+        /// </summary>
+        public string Origin => StatusCode >= SyntheticCodeThreshold ? "synthetic" : "sdk";
 
         public LacerteSDKError(int code)
             : this(code, EmptyContext)

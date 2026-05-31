@@ -1,13 +1,10 @@
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Logging;
-using LacertMCP.Server.Schema;
 using LacertMCP.Server.Session;
 using LacertMCP.Server.Session.Fixtures;
 using Xunit;
@@ -29,37 +26,18 @@ namespace LacertMCP.Tests.Logging
         // -----------------------------------------------------------------
         // Access-map seed: WriteField runs AssertWritable BEFORE WireLog
         // records, so we need at least one ReadWrite entry to reach the
-        // recorded sim write. Mirrors the seed in
-        // SessionManagerBridgeWireupTests.
+        // recorded sim write. Uses the shared in-memory helper —
+        // additive-only, race-safe with the on-disk Tools/* tests via
+        // [Collection(AccessMapMutationCollection.Name)].
         // -----------------------------------------------------------------
 
         private const char WritableModule = 'I';
         private const int WritableTable = 1;
         private const string WritableField = "C1_15";
 
-        private static readonly object _seedLock = new object();
-
         private static void EnsureWritableFieldSeeded()
-        {
-            lock (_seedLock)
-            {
-                var t = typeof(FieldAccessMapLoader);
-                var cacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-                var cache = cacheField?.GetValue(null) as ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>;
-                if (cache == null) return;
-
-                var key = $"{WritableModule}|{WritableTable}|{WritableField}";
-                if (cache.TryGetValue(WritableModule, out var existing) && existing.ContainsKey(key)) return;
-
-                var seed = new Dictionary<string, FieldEntry>();
-                if (existing != null)
-                {
-                    foreach (var kv in existing) seed[kv.Key] = kv.Value;
-                }
-                seed[key] = new FieldEntry(FieldAccess.ReadWrite, Source: "wirelog-integration-seed");
-                cache[WritableModule] = seed;
-            }
-        }
+            => LacertMCP.Tests.AccessMapInMemorySeed.EnsureWritableFieldSeeded(
+                WritableModule, WritableTable, WritableField, source: "wirelog-integration-seed");
 
         [Fact]
         public async Task FullSequence_WritesOpsToLogfile_WithRedactedArgs()
@@ -108,16 +86,20 @@ namespace LacertMCP.Tests.Logging
                     EmailID: "wirelog@example.com"));
                 Assert.Equal(StatusCodes.Success, createResult.Status);
 
-                // Assert: the logfile exists and contains one line per op.
-                // P14-012: WireLog now caches the StreamWriter per logfile
-                // path across records (perf — avoids per-call open/close).
-                // FlushForTests closes the cached handle so File.ReadAllLines
-                // can open the file with its default FileShare.Read mode.
+                // Assert: the logfile(s) exist and contain one line per op.
+                // P14-012: WireLog caches the StreamWriter per logfile path
+                // across records. FlushForTests closes the cached handle so
+                // File.ReadAllLines can open with FileShare.Read.
+                //
+                // P15-078: date-roll-agnostic enumeration. A test that spans
+                // UTC midnight produces two files; concatenating all matching
+                // files preserves the semantic assertion ("at least one file
+                // exists with these ops") without the date-boundary flake.
                 WireLog.FlushForTests(dir);
                 var files = Directory.GetFiles(dir, "lacerte-*.log");
-                Assert.Single(files);
+                Assert.NotEmpty(files);
 
-                var lines = File.ReadAllLines(files[0]);
+                var lines = files.SelectMany(File.ReadAllLines).ToArray();
                 var ops = lines.Select(line =>
                 {
                     using var doc = JsonDocument.Parse(line);
@@ -137,9 +119,11 @@ namespace LacertMCP.Tests.Logging
 
                 // WriteForTest flushes its own writer on exit, but the
                 // earlier Record/RecordSync calls may have left a cached
-                // writer open. Flush again before the second ReadAllLines.
+                // writer open. Flush again before re-reading. The probe may
+                // land in either day's file when we span midnight, so re-glob.
                 WireLog.FlushForTests(dir);
-                var afterLines = File.ReadAllLines(files[0]);
+                var afterFiles = Directory.GetFiles(dir, "lacerte-*.log");
+                var afterLines = afterFiles.SelectMany(File.ReadAllLines).ToArray();
                 var probeLine = afterLines.Last(l => l.Contains("Redaction.Probe"));
                 Assert.DoesNotContain("111-22-3333", probeLine);
                 Assert.DoesNotContain("9999", probeLine);

@@ -87,5 +87,95 @@ namespace LacertMCP.Tests.Cli
             // Edge: empty / null guards.
             Assert.Equal("", ToolsCommand.ToSnakeCase(""));
         }
+
+        // ----- P15-066: filtering surface -----
+
+        [Fact]
+        public void Tools_Filter_LimitsOutputToMatches()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            // "client" should match lacerte_client_list + others; assert no e-file
+            // tools leak in (those don't contain the substring "client").
+            var exit = ToolsCommand.Run(asJson: false, filter: "client",
+                nameExact: null, namesOnly: false, stdout, stderr);
+
+            Assert.Equal(0, exit);
+            var output = stdout.ToString();
+            Assert.Contains("lacerte_client_list", output);
+            // A real e-file tool name like lacerte_ef_status should not appear since
+            // it doesn't contain "client".
+            foreach (var line in output.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = line.TrimStart();
+                if (trimmed.StartsWith("lacerte_"))
+                {
+                    Assert.Contains("client", trimmed, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+        }
+
+        [Fact]
+        public void Tools_NamesOnly_OneToolPerLine_NoMetadata()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = ToolsCommand.Run(asJson: false, filter: null,
+                nameExact: null, namesOnly: true, stdout, stderr);
+
+            Assert.Equal(0, exit);
+            var lines = stdout.ToString()
+                .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => l.TrimEnd('\r'))
+                .ToList();
+            Assert.NotEmpty(lines);
+            // No description/parameter lines: each line is just a tool name, no ':'.
+            foreach (var line in lines)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(line));
+                Assert.False(line.Contains(":"), $"--names-only line should be just a tool name; got: {line}");
+                Assert.False(line.StartsWith(" "), $"--names-only line should not be indented; got: {line}");
+            }
+        }
+
+        [Fact]
+        public void Tools_NameExact_ReturnsSingleToolBlock()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = ToolsCommand.Run(asJson: false, filter: null,
+                nameExact: "lacerte_health", namesOnly: false, stdout, stderr);
+
+            Assert.Equal(0, exit);
+            var output = stdout.ToString();
+            Assert.Contains("lacerte_health", output);
+            // Only one tool: should not contain another known tool name.
+            Assert.DoesNotContain("lacerte_field_write", output);
+        }
+
+        [Fact]
+        public void Tools_NameExact_MissingTool_ReturnsExit1()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = ToolsCommand.Run(asJson: false, filter: null,
+                nameExact: "no_such_tool_lol", namesOnly: false, stdout, stderr);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("No tool matched", stderr.ToString());
+        }
+
+        [Fact]
+        public void Tools_InvalidFilterRegex_ReturnsExit2()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            // "(" is an invalid regex (unclosed group) — should be caught and reported.
+            var exit = ToolsCommand.Run(asJson: false, filter: "(",
+                nameExact: null, namesOnly: false, stdout, stderr);
+
+            Assert.Equal(2, exit);
+            Assert.Contains("Invalid --filter regex", stderr.ToString());
+        }
     }
 }

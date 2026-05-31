@@ -212,6 +212,7 @@ namespace LacertMCP.Server.Bridge
         {
             value = string.Empty;
             IntPtr credPtr = IntPtr.Zero;
+            byte[]? bytes = null;
             try
             {
                 if (!CredRead(target, CRED_TYPE_GENERIC, 0, out credPtr))
@@ -224,7 +225,7 @@ namespace LacertMCP.Server.Bridge
                     value = string.Empty;
                     return true;
                 }
-                var bytes = new byte[cred.CredentialBlobSize];
+                bytes = new byte[cred.CredentialBlobSize];
                 System.Runtime.InteropServices.Marshal.Copy(cred.CredentialBlob, bytes, 0, bytes.Length);
                 value = Encoding.Unicode.GetString(bytes);
                 return true;
@@ -235,6 +236,12 @@ namespace LacertMCP.Server.Bridge
             }
             finally
             {
+                // P15-076: zero the managed byte[] before letting GC reclaim it so the
+                // AppID plaintext doesn't linger on the heap until next compacting GC.
+                // Mirrors the same fix in LacertMCP.Cli.Storage.AppIdStore.TryCredRead.
+                // (The managed `value` string still survives — accepted residual exposure
+                // per DECISIONS.md; AppID is re-mintable via `register --reset` / `unregister`.)
+                if (bytes != null) Array.Clear(bytes, 0, bytes.Length);
                 if (credPtr != IntPtr.Zero)
                 {
                     CredFree(credPtr);

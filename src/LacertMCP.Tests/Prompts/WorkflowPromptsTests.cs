@@ -74,5 +74,58 @@ namespace LacertMCP.Tests.Prompts
             Assert.Contains("C1_5", text);
             Assert.Contains("7", text);
         }
+
+        [Fact]
+        public void ClientIntake_Step4_DocumentsCanonicalCsvColumnMapping()
+        {
+            // P15-038 part 3 — Step 4 must spell out the canonical CSV column →
+            // Lacerte field mapping so the LLM doesn't reinvent it per session.
+            // Confirmed fields (firstName=C1_1 / lastName=C1_2 / emailID=C1_3)
+            // are spec-sourced; TBD-F5 markers must be present so the LLM
+            // doesn't invent codes for fields the schema doesn't yet expose.
+            var text = ((TextContentBlock)WorkflowPrompts.ClientIntake().Messages[0].Content).Text;
+            Assert.Contains("CSV column", text);
+            Assert.Contains("firstName", text);
+            Assert.Contains("C1_1", text);
+            Assert.Contains("emailID", text);
+            Assert.Contains("C1_3", text);
+            Assert.Contains("TBD-F5", text);
+            Assert.Contains("addressLine1", text);
+            Assert.Contains("dateOfBirth", text);
+        }
+
+        [Fact]
+        public void CsvIntake_DefaultArgs_ReturnsBulkOnboardingPlan()
+        {
+            var result = WorkflowPrompts.CsvIntake();
+            Assert.NotNull(result);
+            Assert.NotEmpty(result.Messages);
+            var msg = result.Messages[0];
+            Assert.Equal(Role.User, msg.Role);
+            var text = ((TextContentBlock)msg.Content).Text;
+            // Touchstones: declared mapping, idempotency key shape, stop-on-first-error,
+            // and reference to the real tool names the LLM will call.
+            Assert.Contains("lacerte_session_status", text);
+            Assert.Contains("lacerte_set_context", text);
+            Assert.Contains("lacerte_field_access_map", text);
+            Assert.Contains("lacerte_client_create", text);
+            Assert.Contains("lacerte_field_write", text);
+            Assert.Contains("idempotencyKey", text);
+            Assert.Contains("intake.csv", text);
+        }
+
+        [Fact]
+        public void CsvIntake_WithSourceLabelAndRowCount_AppearsInBody()
+        {
+            var result = WorkflowPrompts.CsvIntake(sourceLabel: "2024-organizer.csv", rowCount: 87);
+            var text = ((TextContentBlock)result.Messages[0].Content).Text;
+            Assert.Contains("2024-organizer.csv", text);
+            Assert.Contains("87", text);
+            // Row count > 50 should trigger the explicit-confirmation gate;
+            // the prompt body wires the literal "> 50" check, which we assert
+            // tolerantly (collapsing whitespace) so future copy-edits don't
+            // false-fail.
+            Assert.Contains(">50", text.Replace(" ", string.Empty));
+        }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
+using LacertMCP.Server.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace LacertMCP.Server.Resilience
@@ -68,6 +69,15 @@ namespace LacertMCP.Server.Resilience
                     last = ex;
                     if (attempt >= MaxRetries) break;
                     var delay = BackoffMs[attempt];
+                    // P15-014 — unconditional WireLog emission so retries are
+                    // visible in the same lacerte-YYYYMMDD.log stream as the
+                    // wrapped op. Without this, a 2nd-attempt success is
+                    // OBSERVATIONALLY INVISIBLE: the wrapped op produces ONE
+                    // record showing elevated durationMs and the operator has
+                    // no way to know the wire just retried. The ILogger seam
+                    // stays for future DI plumbing but every existing call
+                    // site passes null.
+                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex);
                     log?.LogWarning(
                         ex,
                         "Transient COM/RPC failure on attempt {Attempt}/{Max}; retrying in {DelayMs}ms.",
@@ -82,6 +92,10 @@ namespace LacertMCP.Server.Resilience
             {
                 last.Data["AutoReconnect.Attempts"] = MaxRetries + 1;
                 last.Data["AutoReconnect.Exhausted"] = true;
+                // P15-014 — exhausted-retries log. Pairs with the per-retry
+                // lines so a forensic grep ("AutoReconnect.exhausted") finds
+                // every wire that hit the cliff.
+                EmitExhaustedLog(MaxRetries + 1, last);
                 throw last;
             }
             // Unreachable — IsTransient was always true, so one of the catches
@@ -108,6 +122,7 @@ namespace LacertMCP.Server.Resilience
                     last = ex;
                     if (attempt >= MaxRetries) break;
                     var delay = BackoffMs[attempt];
+                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex);
                     log?.LogWarning(
                         ex,
                         "Transient COM/RPC failure on attempt {Attempt}/{Max}; retrying in {DelayMs}ms.",
@@ -120,9 +135,50 @@ namespace LacertMCP.Server.Resilience
             {
                 last.Data["AutoReconnect.Attempts"] = MaxRetries + 1;
                 last.Data["AutoReconnect.Exhausted"] = true;
+                EmitExhaustedLog(MaxRetries + 1, last);
                 throw last;
             }
             throw new InvalidOperationException("AutoReconnect.WithRetrySync exhausted with no captured exception.");
+        }
+
+        // P15-014 — shared WireLog emitters for the retry + exhausted events.
+        // Wrapped in try/catch so a logging failure (closed writer, transient
+        // disk hiccup) never poisons the wire path itself; WireLog.RecordSync
+        // is already null-safe on the disabled-log fast path.
+        private static void EmitRetryLog(int attempt, int max, int delayMs, Exception ex)
+        {
+            try
+            {
+                WireLog.RecordSync<bool>(
+                    "AutoReconnect.retry",
+                    new
+                    {
+                        attempt,
+                        max,
+                        hresult = ex.HResult.ToString("X8"),
+                        exType = ex.GetType().Name,
+                        delayMs,
+                    },
+                    () => true);
+            }
+            catch { /* logging is best-effort */ }
+        }
+
+        private static void EmitExhaustedLog(int attempts, Exception last)
+        {
+            try
+            {
+                WireLog.RecordSync<bool>(
+                    "AutoReconnect.exhausted",
+                    new
+                    {
+                        attempts,
+                        hresult = last.HResult.ToString("X8"),
+                        exType = last.GetType().Name,
+                    },
+                    () => true);
+            }
+            catch { /* logging is best-effort */ }
         }
 
         /// <summary>

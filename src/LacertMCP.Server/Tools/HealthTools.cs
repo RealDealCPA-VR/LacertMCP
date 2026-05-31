@@ -1,5 +1,7 @@
+using System;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using LacertMCP.Server.Diagnostics;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
 using ModelContextProtocol.Server;
@@ -16,6 +18,12 @@ namespace LacertMCP.Server.Tools
     /// shape commitment is locked in now so live and sim stay observationally
     /// identical (Boundary Invariant #2) and the response always rides the
     /// canonical WrapToolHandler envelope (Invariant #9).
+    ///
+    /// P15-054: when the periodic heartbeat writer is enabled (default 30s;
+    /// disable by setting <c>LACERTE_HEARTBEAT_SECONDS=0</c>), the envelope
+    /// also surfaces <c>heartbeatPath</c> so an operator can point a Task
+    /// Scheduler / NSSM / PowerShell watcher at the file without grepping the
+    /// docs for the canonical path.
     /// </summary>
     [McpServerToolType]
     public class HealthTools
@@ -28,15 +36,30 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Health probe. Returns a structured { mode, status } envelope reporting the active session mode (simulation/live) and reachability. Used to confirm the MCP stdio plumbing + the Lacerte SDK runtime shim are both functional.")]
+        [Description("Health probe. Returns a structured { mode, status, heartbeatPath? } envelope reporting the active session mode (simulation/live) and reachability. Used to confirm the MCP stdio plumbing + the Lacerte SDK runtime shim are both functional.")]
         public Task<string> LacerteHealth()
-            // TODO (Phase 9): surface live SDK HRESULT via _session.HealthProbe()
-            // — keep the { mode, status } shape so sim/live stay observationally
-            // identical at the seam.
-            => WrapToolHandler.Run(() => Task.FromResult<object>(new
+            // Live SDK HRESULT surfacing via _session.HealthProbe() is Windows-gated —
+            // tracked as a follow-up in Todo.md. The { mode, status } shape is the
+            // observational contract so sim/live stay identical at the seam.
+            => WrapToolHandler.Run(() =>
             {
-                mode = _session.Mode.ToString().ToLowerInvariant(),
-                status = "reachable",
-            }));
+                var heartbeatSeconds = HeartbeatWriter.IntervalSeconds(
+                    Environment.GetEnvironmentVariable(HeartbeatWriter.IntervalEnvName));
+                if (heartbeatSeconds > 0)
+                {
+                    return Task.FromResult<object>(new
+                    {
+                        mode = _session.Mode.ToString().ToLowerInvariant(),
+                        status = "reachable",
+                        heartbeatPath = HeartbeatWriter.DefaultPath(),
+                        heartbeatSeconds,
+                    });
+                }
+                return Task.FromResult<object>(new
+                {
+                    mode = _session.Mode.ToString().ToLowerInvariant(),
+                    status = "reachable",
+                });
+            });
     }
 }

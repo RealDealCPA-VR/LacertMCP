@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -61,18 +62,37 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Read all detail rows for a client from the per-client {CLIENT}.{Mod}{YY} file. No filtering — returns the full ordered list.")]
+        [Description("Read detail rows for a client from the per-client {CLIENT}.{Mod}{YY} file in original row order. Supports limit/offset pagination (audit P15-040/P15-047): detail files are unbounded by design (every W-2/1099/dependent/partner row), so paging is the canonical defense against MCP message-size limits. Optional `series` push-down (audit P15-009) narrows to one Lacerte Series ID (11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners) — live mode dispatches SqlTemplates.DetailBySeries, sim mode filters the in-memory list. Returns the paginated envelope {rows, total, limit, offset, hasMore, nextOffset} plus legacy {count} for v0.1 back-compat.")]
         public Task<string> LacerteDetailRead(
-            [Description("Lacerte ClientNumber (the C{t}_0 identifier).")] string clientNumber)
+            [Description("Lacerte ClientNumber (the C{t}_0 identifier).")] string clientNumber,
+            [Description("Maximum rows to return. Default 100, clamped to Pagination.MaxLimit (1000).")] int limit = 100,
+            [Description("Zero-based row offset into the result set. Default 0.")] int offset = 0,
+            [Description("Optional Series push-down (audit P15-009). Pass a numeric Lacerte Series identifier — e.g. 11 (W-2), 12 (Interest), 13 (Dividends), 14 (Dependents), 20 (Income), 30 (State), 40 (Partners) — to narrow to just that screen's rows. Null = no filter (full detail file).")] int? series = null,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
-                var rows = await _session.ReadDetail(clientNumber);
+                var allRows = await _session.ReadDetail(clientNumber, series, cancellationToken);
+                var page = Pagination.Pagination.Page(allRows, limit, offset);
+
+                // NOTE: `count` and the legacy `rows`-as-full-set semantic are
+                // preserved additively for v0.1 — `rows` now holds the paged
+                // slice (same key, narrower view) and `count` reflects the
+                // slice size, matching the TablesTools.cs:30-52 pattern. New
+                // consumers should read `total` for the unpaged size and
+                // `hasMore`/`nextOffset` to drive paging. v0.2 will drop the
+                // legacy `count` field per DECISIONS.md pagination contract.
                 return (object)new
                 {
                     clientNumber,
-                    count = rows.Count,
-                    rows,
+                    rows = page.Rows,
+                    total = page.Total,
+                    limit = page.Limit,
+                    offset = page.Offset,
+                    hasMore = page.HasMore,
+                    nextOffset = page.NextOffset,
+                    // legacy (v0.1) — remove in v0.2:
+                    count = page.Rows.Count,
                 };
             });
         }
@@ -94,7 +114,7 @@ namespace LacertMCP.Server.Tools
             [Description("Free-form description for the row.")] string description,
             [Description("Optional zero-based index to overwrite an existing row instead of appending.")] int? replaceIndex = null,
             [Description("If true, validate + simulate the write but roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call (audit P15-060); replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null)
         {
             return WrapToolHandler.Run(async () =>
             {

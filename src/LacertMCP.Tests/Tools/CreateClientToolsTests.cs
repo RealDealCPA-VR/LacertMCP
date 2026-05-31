@@ -65,12 +65,11 @@ namespace LacertMCP.Tests.Tools
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(SyntheticStatusCodes.ClientIDTooLong,
                 root.GetProperty("statusCode").GetInt32());
-            // P14-019: context.reason is redacted on the wire (it commonly
-            // echoes COM-returned taxpayer data in the generic-exception
-            // path). The semantic invariant — the request was rejected with
-            // the ClientIDTooLong synthetic code — is asserted above; the
-            // human-readable reason now appears as the *** sentinel.
-            Assert.Equal("***",
+            // P15-001: wire-scope redaction preserves the actionable
+            // reason key (only true secrets get scrubbed) so the LLM
+            // consumer sees the validation phrase that tells it WHY the
+            // request was rejected, not just the status code.
+            Assert.Contains("LengthExceeded",
                 root.GetProperty("context").GetProperty("reason").GetString()!);
         }
 
@@ -301,6 +300,115 @@ namespace LacertMCP.Tests.Tools
                 root.GetProperty("statusCode").GetInt32());
             Assert.Equal("emailID",
                 root.GetProperty("context").GetProperty("field").GetString());
+        }
+
+        // -----------------------------------------------------------------
+        // P15-059 — colloquial form-number aliases canonicalize before
+        // they reach the live SDK / sim store. The accepted alphabet for
+        // IClient(TaxType, ...) is the 9 spec ReturnType strings; aliases
+        // like "1040" / "1120S" / "S-Corporation" must succeed observation-
+        // ally identically to the canonical "Individual" / "SCorporate".
+        // -----------------------------------------------------------------
+
+        [Theory]
+        [InlineData('I', "1040")]
+        [InlineData('I', "Individual")]
+        [InlineData('I', "INDIVIDUAL")]
+        public async Task ClientCreate_AcceptsAlias_OnModuleI(char module, string taxType)
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: module);
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "ALIAS1",
+                taxType: taxType,
+                firstName: "Al",
+                lastName: "Ias",
+                emailID: "a@example.com");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            Assert.Equal(StatusCodes.Success,
+                root.GetProperty("result").GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task ClientCreate_FormNumberAlias_AndCanonical_YieldSameSuccessShape()
+        {
+            // Two independent managers — same context, same payload modulo
+            // the TaxType alias. Both must end at statusCode=Success with a
+            // freshly minted ClientNumber. This is the divergence the
+            // recommendation called out: today live would reject "1040"
+            // and accept "Individual", so the shapes would differ on the
+            // happy path.
+            var (mgrA, toolA) = await NewRegisteredToolWithContextAsync();
+            var (mgrB, toolB) = await NewRegisteredToolWithContextAsync();
+
+            var jsonAlias = await toolA.LacerteClientCreate(
+                clientID: "C1040", taxType: "1040",
+                firstName: "Form", lastName: "Number", emailID: "f@example.com");
+            var jsonCanon = await toolB.LacerteClientCreate(
+                clientID: "C1040", taxType: "Individual",
+                firstName: "Form", lastName: "Number", emailID: "f@example.com");
+
+            var rootAlias = Parse(jsonAlias);
+            var rootCanon = Parse(jsonCanon);
+            Assert.True(rootAlias.GetProperty("success").GetBoolean(), jsonAlias);
+            Assert.True(rootCanon.GetProperty("success").GetBoolean(), jsonCanon);
+            Assert.Equal(
+                rootAlias.GetProperty("result").GetProperty("statusCode").GetInt32(),
+                rootCanon.GetProperty("result").GetProperty("statusCode").GetInt32());
+            Assert.Equal(
+                rootAlias.GetProperty("result").GetProperty("statusName").GetString(),
+                rootCanon.GetProperty("result").GetProperty("statusName").GetString());
+        }
+
+        [Theory]
+        [InlineData('S', "1120S")]
+        [InlineData('S', "S-Corporation")]
+        [InlineData('S', "SCorp")]
+        [InlineData('S', "SCorporate")]
+        public async Task ClientCreate_AcceptsAlias_OnModuleS(char module, string taxType)
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: module);
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "ALIASS",
+                taxType: taxType,
+                firstName: "S",
+                lastName: "Corp",
+                emailID: "s@example.com");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            Assert.Equal(StatusCodes.Success,
+                root.GetProperty("result").GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task ClientCreate_UnknownAlias_StillReturnsTaxModuleMismatch()
+        {
+            // Canonicalization MUST NOT short-circuit the existing
+            // TaxModuleMismatch flow for unknown aliases. The accept-gate
+            // fires first, the operator sees the exact same 14 they did
+            // before P15-059 with the acceptedTaxTypes list in context.
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: 'I');
+
+            var json = await tool.LacerteClientCreate(
+                clientID: "BOGUS",
+                taxType: "Bogus", // not an alias for module I
+                firstName: "Bo",
+                lastName: "Gus",
+                emailID: "b@example.com");
+
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean(), json);
+            Assert.Equal(StatusCodes.TaxModuleMismatch,
+                root.GetProperty("statusCode").GetInt32());
+            // Accept-gate also includes the acceptedTaxTypes list — confirm
+            // canonicalization didn't strip that context.
+            var accepted = root.GetProperty("context").GetProperty("acceptedTaxTypes");
+            Assert.Equal(System.Text.Json.JsonValueKind.Array, accepted.ValueKind);
+            Assert.True(accepted.GetArrayLength() >= 2); // at least "Individual" + "1040"
         }
     }
 }

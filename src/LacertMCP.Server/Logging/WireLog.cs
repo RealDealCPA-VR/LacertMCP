@@ -14,6 +14,34 @@ using System.Threading.Tasks;
 namespace LacertMCP.Server.Logging
 {
     /// <summary>
+    /// P15-001 — selects which keyset <see cref="WireLog.Redact(string, RedactionScope)"/>
+    /// applies to the input.
+    ///
+    /// <para>
+    /// <see cref="Disk"/> uses the broad keyset (true secrets PLUS
+    /// Description / City / Zip / identity names / rawError / reason) and
+    /// matches the historical pre-P15-001 behavior — appropriate for
+    /// archived debug logs that may leave the host.
+    /// </para>
+    ///
+    /// <para>
+    /// <see cref="Wire"/> uses a narrow keyset (true secrets only — bank
+    /// numbers, every SSN/TIN/EIN variant, DOB, email, phone). Operator-
+    /// facing diagnostics (reason / rawError / Description / City / Zip)
+    /// survive so the LLM consumer sees actionable error messages and
+    /// detail-row Descriptions on read paths.
+    /// </para>
+    /// </summary>
+    public enum RedactionScope
+    {
+        /// <summary>Broad keyset — used for the on-disk debug log.</summary>
+        Disk = 0,
+
+        /// <summary>Narrow keyset — used for the MCP wire envelope.</summary>
+        Wire = 1,
+    }
+
+    /// <summary>
     /// Debug wire log. Activates only when <c>LACERTE_DEBUG_WIRE=1</c>. Writes
     /// one JSON record per line to <c>logs/lacerte-YYYYMMDD.log</c> (path
     /// overrideable via <c>LACERTE_DEBUG_LOG_PATH</c>). Mirrors the QB MCP
@@ -33,15 +61,33 @@ namespace LacertMCP.Server.Logging
     /// </para>
     ///
     /// <para>
-    /// Redaction: covers SSN/EIN/BankAccountNumber/RoutingNumber and a
-    /// broader PII keyset (TaxpayerSSN, SpouseSSN, DependentSSN, TIN, ITIN,
-    /// PTIN, EmployerEIN, FederalID, FedEIN, DateOfBirth/DOB/BirthDate,
-    /// EmailID/Email, HomePhone/WorkPhone/CellPhone/PhoneNumber,
-    /// FirstName/LastName/MiddleName, Address1/Address2/StreetAddress, City,
-    /// ZipCode/Zip, Description, rawError, reason). Values are replaced with
-    /// the literal <c>"***"</c> BEFORE the line hits disk. JsonNode-walking
-    /// redactor covers scalars, arrays, and nested objects; falls back to a
-    /// regex for malformed-JSON inputs.
+    /// Redaction has two scopes (P15-001) — disk vs wire:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description><b>Disk scope</b> (default — used by
+    ///   <see cref="WriteRecord"/>): broad PII keyset suitable for an
+    ///   archived debug log the operator may share. Covers true secrets
+    ///   plus Description / City / Zip / FirstName / LastName /
+    ///   Address1+Address2 / rawError / reason — anything that could
+    ///   transitively expose taxpayer identity in a log dump.</description></item>
+    ///   <item><description><b>Wire scope</b> (used by
+    ///   <c>WrapToolHandler</c> via
+    ///   <see cref="Redact(string, RedactionScope)"/> with
+    ///   <see cref="RedactionScope.Wire"/>): NARROW keyset of true secrets
+    ///   only — BankAccountNumber / RoutingNumber, every SSN/TIN/EIN
+    ///   variant, DateOfBirth / DOB / BirthDate, Email + phone numbers.
+    ///   Description / City / Zip / reason / rawError pass through so the
+    ///   LLM consuming an error envelope sees the actionable diagnostic
+    ///   prefix and operator-facing detail rows surface their
+    ///   Description.</description></item>
+    /// </list>
+    /// <para>
+    /// Values are replaced with the literal <c>"***"</c> before the line
+    /// hits its destination. JsonNode-walking redactor covers scalars,
+    /// arrays, and nested objects; falls back to a regex for malformed-JSON
+    /// inputs. The fallback regex covers the disk-scope keyset (broader
+    /// alternation) because the regex pass only fires on inputs that failed
+    /// JsonNode.Parse, which is the conservative path.
     /// </para>
     ///
     /// <para>
@@ -83,10 +129,51 @@ namespace LacertMCP.Server.Logging
             WriteIndented = false,
         };
 
-        // The set of JSON property names whose values are PII or otherwise
-        // sensitive and must be replaced wholesale (scalar, array, or
-        // nested-object subtree).
-        private static readonly HashSet<string> _sensitiveKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        // P15-052 — per-request correlation ID. Set by WrapToolHandler.Run at
+        // tool entry and inherited by nested WireLog.Record/RecordSync calls
+        // through async/await ExecutionContext flow. When non-null/non-empty,
+        // WriteRecord stamps it on the JSON line as `"cid":"..."` so multi-
+        // line forensics ("what wire calls did request abc12345 make?") can
+        // grep one ID across the interleaved record stream of concurrent
+        // tools. AsyncLocal vs ThreadLocal because tool handlers cross
+        // await boundaries onto threadpool workers.
+        //
+        // No behavioral cost when callers don't set it: the value is null
+        // for any thread that hasn't passed through WrapToolHandler, and
+        // WriteRecord just omits the cid field in that case.
+        public static AsyncLocal<string?> CurrentCorrelationId { get; } = new AsyncLocal<string?>();
+
+        // P15-015 — log rotation observability seam. WrapToolHandler.Run does
+        // not see rotation events, so the host (Program.cs) is the natural
+        // place to wire this to its stderr ILogger. The callback fires once
+        // per rotation OR prune cycle with a single human-readable line.
+        // Never throws — callbacks are invoked under try/catch.
+        public static Action<string>? OnRotation { get; set; }
+
+        // P15-071 — sentinel to gate once-per-day retention pruning. Stored
+        // as DateTime.UtcNow.DayOfYear so pruning piggybacks on the first
+        // write of each calendar day rather than spinning up a background
+        // timer. -1 = never pruned in this process lifetime. Guarded by
+        // _writeLock.
+        private static int _lastPrunedDayOfYear = -1;
+
+        // P15-001 — split keysets.
+        //
+        // _diskRedactionKeys is the BROAD keyset used for disk-log records
+        // (WireLog.WriteRecord). It includes Description/City/Zip/identity
+        // names/rawError/reason on top of true secrets because an archived
+        // debug log may be attached to a bug report or shared off-host, and
+        // any taxpayer-identifying prose should be scrubbed from that path.
+        //
+        // _wireRedactionKeys is the NARROW keyset used for the MCP wire
+        // envelope (WrapToolHandler). It covers ONLY true secrets — bank
+        // numbers, every SSN/TIN/EIN variant, DOB, email, and phone. Free
+        // text (Description, reason, rawError) and address columns
+        // (City/Zip) pass through so the LLM consumer sees actionable
+        // diagnostics and operator-facing detail rows surface their
+        // Description. This closes the P15-001 regression introduced when
+        // P14-018/P14-019 widened a single keyset.
+        private static readonly HashSet<string> _diskRedactionKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             // Bank
             "BankAccountNumber", "RoutingNumber",
@@ -107,12 +194,70 @@ namespace LacertMCP.Server.Logging
             "Description",
             // Exception/error contexts that may carry SDK-echoed taxpayer data
             "rawError", "reason",
+            // P15-019 — ODBC driver echo + internal-catch raw messages. The
+            // Lacerte/FoxPro ODBC driver historically inlines the failing
+            // value into its error text (e.g. "Field C1_15 value '123-45-6789'
+            // rejected"); OdbcErrorMapper.Map stuffs that text under
+            // "odbcMessage", and WireLog's own catch blocks (lines ~246, ~278)
+            // put ex.Message under "message". Both are scrubbed wholesale at
+            // disk scope.
+            "odbcMessage", "message",
         };
 
-        // Lacerte DATA1-Individual field codes that hold PII. When a record
-        // logs `{"field":"C1_15","value":"111-22-3333"}` the key-name-based
-        // redactor cannot catch it (the secret is keyed by literal "value"),
-        // so we explicitly scrub the sibling value when `field` ∈ this set.
+        // P15-001 — narrow on-wire keyset. Anything not in this set
+        // survives the MCP envelope unchanged so the LLM still sees
+        // operator-facing diagnostics (reason / rawError / Description /
+        // City / Zip).
+        //
+        // P15-017 follow-up — "message" was REMOVED from this set. P15-019
+        // had added it on the same "ODBC driver echo" pretext as odbcMessage,
+        // but "message" is a generic key that every legitimate tool result
+        // uses (health probes, schema lookups, info-table responses, status
+        // payloads). Keeping it here destroyed those values wholesale. The
+        // narrow ODBC echo concern is still covered by "odbcMessage" (only
+        // emitted by OdbcErrorMapper) and by RawError redaction on the disk
+        // log. For SDK-echoed taxpayer data inside a generic Exception's
+        // Message string, the InternalServerError context puts it under
+        // "rawError" which is still narrow-keyset-scrubbed on disk.
+        private static readonly HashSet<string> _wireRedactionKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            // Bank
+            "BankAccountNumber", "RoutingNumber",
+            // SSN/TIN/EIN variants
+            "SSN", "TaxpayerSSN", "SpouseSSN", "DependentSSN",
+            "TIN", "ITIN", "PTIN",
+            "EIN", "EmployerEIN", "FederalID", "FedEIN",
+            // DOB
+            "DateOfBirth", "DOB", "BirthDate",
+            // Contact
+            "EmailID", "Email",
+            "HomePhone", "WorkPhone", "CellPhone", "PhoneNumber",
+            // P15-019 — substring leak via ODBC driver echo. The driver text
+            // can carry the rejected value as a substring (e.g. "SSN 111-22-3333
+            // invalid"); since the key-name redactor only matches whole values,
+            // we wipe odbcMessage wholesale on the wire too. SQLSTATE remains
+            // visible under the "sqlState" key so the LLM keeps its diagnostic
+            // anchor.
+            "odbcMessage",
+        };
+
+        // Lacerte DATA1-Individual field codes that hold PII. Consulted in
+        // BOTH redaction passes:
+        //
+        // 1) As a KEY name in <see cref="RedactNode"/> — catches the ODBC dict-
+        //    row shape `{"C1_15":"111-22-3333"}` where the row is keyed by
+        //    raw column name (i.e. the Lacerte field code itself). LacerteDsnReader.Query
+        //    materializes rows this way (Dictionary<string, object?> keyed by
+        //    OdbcDataReader.GetName(i)), so without this branch a debug wire log
+        //    of a `select * from [DATA1-Client Info]` lands SSN/DOB/bank values
+        //    verbatim in the log. Per P15-018.
+        //
+        // 2) As the VALUE of a sibling `field` key in
+        //    <see cref="ScrubFieldValuePairs"/> — catches the WriteField payload
+        //    shape `{"field":"C1_15","value":"111-22-3333"}` where the secret
+        //    is keyed by literal "value" and the field-code carries no
+        //    semantic info to the redactor. Per P14-018.
+        //
         // Sourced from the Lacerte SDK Structure Spec §DATA1-Individual.
         private static readonly HashSet<string> _piiFieldCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -132,9 +277,13 @@ namespace LacertMCP.Server.Logging
         // Fallback regex: used only when the input is not parseable JSON.
         // Matches "Key":"value"|number|true|false|null for the scalar-only
         // shapes that legitimate JSON serializers emit; the JsonNode walker
-        // handles arrays + nested objects above.
+        // handles arrays + nested objects above. Mirrors the broad disk-scope
+        // keyset PLUS the PII field codes (P15-018) and the ODBC driver-echo
+        // message keys (P15-019). The regex pass only fires on malformed input,
+        // which is the conservative path — covering the broader alternation
+        // here is intentional.
         private static readonly Regex _redactRegex = new Regex(
-            "\"(?<key>SSN|TaxpayerSSN|SpouseSSN|DependentSSN|TIN|ITIN|PTIN|EIN|EmployerEIN|FederalID|FedEIN|BankAccountNumber|RoutingNumber|DateOfBirth|DOB|BirthDate|EmailID|Email|HomePhone|WorkPhone|CellPhone|PhoneNumber|FirstName|LastName|MiddleName|Address1|Address2|StreetAddress|City|ZipCode|Zip|Description|rawError|reason)\"\\s*:\\s*(?:\"[^\"]*\"|-?\\d+(?:\\.\\d+)?|true|false|null)",
+            "\"(?<key>SSN|TaxpayerSSN|SpouseSSN|DependentSSN|TIN|ITIN|PTIN|EIN|EmployerEIN|FederalID|FedEIN|BankAccountNumber|RoutingNumber|DateOfBirth|DOB|BirthDate|EmailID|Email|HomePhone|WorkPhone|CellPhone|PhoneNumber|FirstName|LastName|MiddleName|Address1|Address2|StreetAddress|City|ZipCode|Zip|Description|rawError|reason|odbcMessage|message|C1_14|C1_15|C1_19|C1_21|C1_27|C1_28|C1_29|C1_32|C1_71|C1_72)\"\\s*:\\s*(?:\"[^\"]*\"|-?\\d+(?:\\.\\d+)?|true|false|null)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>
@@ -162,12 +311,7 @@ namespace LacertMCP.Server.Logging
             catch (Exception ex)
             {
                 sw.Stop();
-                var err = new Dictionary<string, object?>
-                {
-                    ["type"] = ex.GetType().FullName,
-                    ["message"] = ex.Message,
-                };
-                WriteRecord(cfg, op, args, result: null, error: err, sw.ElapsedMilliseconds);
+                WriteRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
                 throw;
             }
         }
@@ -194,14 +338,41 @@ namespace LacertMCP.Server.Logging
             catch (Exception ex)
             {
                 sw.Stop();
-                var err = new Dictionary<string, object?>
-                {
-                    ["type"] = ex.GetType().FullName,
-                    ["message"] = ex.Message,
-                };
-                WriteRecord(cfg, op, args, result: null, error: err, sw.ElapsedMilliseconds);
+                WriteRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
                 throw;
             }
+        }
+
+        // P15-014 — capture ex.Data alongside type + message so the
+        // AutoReconnect attempt-count stamps (Attempts / Exhausted) and any
+        // other diagnostic data the catch chain accreted survive on the same
+        // log line as the failed op. Without this, an exhausted-retry failure
+        // was observationally indistinguishable from a first-attempt failure
+        // in the wire log stream. The downstream Redact pass scrubs PII from
+        // the data dict via the existing keyset walker.
+        private static Dictionary<string, object?> BuildErrorRecord(Exception ex)
+        {
+            var err = new Dictionary<string, object?>
+            {
+                ["type"] = ex.GetType().FullName,
+                ["message"] = ex.Message,
+            };
+            if (ex.Data.Count > 0)
+            {
+                var data = new Dictionary<string, object?>();
+                foreach (System.Collections.DictionaryEntry de in ex.Data)
+                {
+                    if (de.Key is string k)
+                    {
+                        data[k] = de.Value;
+                    }
+                }
+                if (data.Count > 0)
+                {
+                    err["data"] = data;
+                }
+            }
+            return err;
         }
 
         /// <summary>True iff <c>LACERTE_DEBUG_WIRE=1</c> at process start.</summary>
@@ -222,11 +393,32 @@ namespace LacertMCP.Server.Logging
         /// Record/RecordSync paths write to disk without depending on the lazy
         /// env-resolved config. Pair every call with <see cref="DisableForTests"/>
         /// in a finally block.
+        ///
+        /// <para>
+        /// Optional rotation/retention overrides (P15-015 / P15-071): when a
+        /// test wants to exercise the size cap or per-day prune branch it can
+        /// pass small values (e.g. 1 KB / 4 KB / 1 day) without producing
+        /// megabytes of test data. Null defaults to the production caps.
+        /// </para>
         /// </summary>
-        public static void EnableForTests(string logDir)
+        public static void EnableForTests(
+            string logDir,
+            long? maxBytes = null,
+            long? maxDirBytes = null,
+            int? retentionDays = null,
+            int? resultSampleLimit = null,
+            bool fullResults = false)
         {
             if (string.IsNullOrEmpty(logDir)) throw new ArgumentNullException(nameof(logDir));
-            _testForceConfig = new WireLogConfig(logDir);
+            _testForceConfig = new WireLogConfig(
+                logDir, maxBytes, maxDirBytes, retentionDays, resultSampleLimit, fullResults);
+            // Reset the prune sentinel so tests can exercise the prune branch
+            // deterministically without depending on the process-lifetime
+            // memo from a previous test.
+            lock (_writeLock)
+            {
+                _lastPrunedDayOfYear = -1;
+            }
         }
 
         /// <summary>
@@ -264,10 +456,21 @@ namespace LacertMCP.Server.Logging
         /// Parses the input as JSON and recursively replaces sensitive
         /// values (scalar, array, or nested object) with <c>"***"</c>.
         /// Falls back to a regex pass when the input is not valid JSON.
+        ///
+        /// <para>
+        /// Uses the <b>disk-scope</b> keyset by default for backwards
+        /// compatibility with pre-P15-001 callers. The MCP wire path
+        /// (<c>WrapToolHandler</c>) must opt into
+        /// <see cref="RedactionScope.Wire"/> explicitly so operator-facing
+        /// diagnostics (reason / rawError / Description / City / Zip)
+        /// survive the envelope.
+        /// </para>
         /// </summary>
-        public static string Redact(string json)
+        public static string Redact(string json, RedactionScope scope = RedactionScope.Disk)
         {
             if (string.IsNullOrEmpty(json)) return json;
+
+            var keys = scope == RedactionScope.Wire ? _wireRedactionKeys : _diskRedactionKeys;
 
             // First try the JsonNode walker — covers arrays, nested objects,
             // and whitespace-padded shapes that the regex can't reach.
@@ -276,7 +479,13 @@ namespace LacertMCP.Server.Logging
                 var node = JsonNode.Parse(json);
                 if (node != null)
                 {
-                    RedactNode(node);
+                    RedactNode(node, keys);
+                    // The field/value sibling-pair pass targets WriteField
+                    // payloads carrying PII field-codes; the relevant codes
+                    // are true secrets (SSN/DOB/email/bank) so the pass
+                    // applies to BOTH scopes — wire-scope error envelopes
+                    // for a WriteField rejection would otherwise echo the
+                    // raw SSN back at the LLM.
                     ScrubFieldValuePairs(node);
                     return node.ToJsonString(_jsonOptions);
                 }
@@ -292,15 +501,86 @@ namespace LacertMCP.Server.Logging
 
             // Fallback: regex pass on the raw text. Only catches scalar
             // values; this is intentionally limited because the structured
-            // walker is the primary control path.
+            // walker is the primary control path. The regex covers the
+            // broader disk-scope alternation regardless of caller scope —
+            // it only fires when JsonNode.Parse failed (malformed input),
+            // where the conservative path is preferred.
             return _redactRegex.Replace(json, m => "\"" + m.Groups["key"].Value + "\":\"***\"");
+        }
+
+        // -----------------------------------------------------------------
+        // P15-072 — large-result summarization
+        // -----------------------------------------------------------------
+
+        /// <summary>
+        /// P15-072 — when the serialized record's <c>result</c> is a JSON
+        /// array longer than <paramref name="sampleLimit"/>, replace it with
+        /// <c>{"kind":"collection","count":N,"sample":[first sampleLimit items]}</c>.
+        /// Operationally useful fields (op, args, durationMs, count, sample) survive
+        /// while the bulk-payload write is suppressed. Returns the input
+        /// unchanged when the result isn't a JSON array OR when length is
+        /// at or below the threshold.
+        ///
+        /// <para>Exposed at internal scope for direct unit-test coverage —
+        /// the summarization happens in the JSON-string layer (after the
+        /// JsonSerializer pass), so a unit test can feed a record line in
+        /// and assert the resulting JSON without driving the full WriteRecord
+        /// pipeline.</para>
+        /// </summary>
+        internal static string SummarizeLargeResultArray(string line, int sampleLimit)
+        {
+            if (string.IsNullOrEmpty(line) || sampleLimit < 0) return line;
+            try
+            {
+                var node = JsonNode.Parse(line);
+                if (node is not JsonObject obj) return line;
+                if (!obj.TryGetPropertyValue("result", out var resultNode)
+                    || resultNode is not JsonArray arr)
+                {
+                    return line;
+                }
+                int count = arr.Count;
+                if (count <= sampleLimit) return line;
+
+                // Move sampleLimit items into a fresh array (detach from
+                // original so reassignment doesn't fight the parent slot).
+                var sample = new JsonArray();
+                for (int i = 0; i < sampleLimit; i++)
+                {
+                    var child = arr[i];
+                    if (child == null)
+                    {
+                        sample.Add(null);
+                    }
+                    else
+                    {
+                        // Re-parse the child via its JSON text so the
+                        // node is freshly rooted under `sample` without
+                        // disturbing the original's tree.
+                        sample.Add(JsonNode.Parse(child.ToJsonString()));
+                    }
+                }
+                var summary = new JsonObject
+                {
+                    ["kind"] = "collection",
+                    ["count"] = count,
+                    ["sample"] = sample,
+                };
+                obj["result"] = summary;
+                return obj.ToJsonString(_jsonOptions);
+            }
+            catch
+            {
+                // Defensive — summarization must never poison the log line.
+                return line;
+            }
         }
 
         // -----------------------------------------------------------------
         // Redaction helpers
         // -----------------------------------------------------------------
 
-        private static void RedactNode(JsonNode node)
+        private static void RedactNode(JsonNode node, HashSet<string> keys)
         {
             switch (node)
             {
@@ -311,10 +591,20 @@ namespace LacertMCP.Server.Logging
                     var names = obj.Select(kv => kv.Key).ToList();
                     foreach (var name in names)
                     {
-                        if (_sensitiveKeys.Contains(name))
+                        if (keys.Contains(name))
                         {
                             // Replace the slot with the *** sentinel. JsonObject
                             // detaches the prior child automatically on slot reassignment.
+                            obj[name] = JsonValue.Create("***");
+                            continue;
+                        }
+                        // P15-018 — ODBC dict-row shape `{"C1_15":"111-22-3333"}`
+                        // is keyed by raw Lacerte column name (which IS the PII
+                        // field code). Apply to BOTH scopes — these are true-secret
+                        // slots (SpouseSSN/TaxpayerSSN/DOB/Bank/Email/Phone) so
+                        // the wire-scope LLM consumer should never see them either.
+                        if (_piiFieldCodes.Contains(name))
+                        {
                             obj[name] = JsonValue.Create("***");
                             continue;
                         }
@@ -322,7 +612,7 @@ namespace LacertMCP.Server.Logging
                         if (child is JsonObject || child is JsonArray)
                         {
                             // Recurse in-place — no detach/reattach needed.
-                            RedactNode(child!);
+                            RedactNode(child!, keys);
                         }
                     }
                     return;
@@ -334,7 +624,7 @@ namespace LacertMCP.Server.Logging
                         var child = arr[i];
                         if (child is JsonObject || child is JsonArray)
                         {
-                            RedactNode(child);
+                            RedactNode(child, keys);
                         }
                     }
                     return;
@@ -344,10 +634,25 @@ namespace LacertMCP.Server.Logging
             }
         }
 
-        // Second pass: when we see a sibling pair {"field":"<known-PII-code>", "value": <anything>}
-        // within the same object, redact the sibling "value". Handles the
-        // WriteField shape where the PII is keyed by the literal "value"
-        // and the field-code carries no semantic info to the regex.
+        // Second pass: when we see a sibling pair {"field":"<code>", "value": <anything>}
+        // within the same object, redact the sibling "value" regardless of
+        // the field code or module (P15-058 — denylist semantics).
+        //
+        // Rationale: the curated _piiFieldCodes set only covers DATA1-Individual
+        // (C1_14/15/19/etc.). Entity-module equivalents (Corp officer SSNs,
+        // Partnership K-1 recipient SSNs, Fiduciary beneficiary SSNs, bank-
+        // account columns across all modules) have no spec source yet — the
+        // Schema/FieldAccessMap/base/*.json shards are unpopulated stubs and
+        // Lacerte_MCP_Structure_Spec.md explicitly defers the per-module
+        // catalog. For a debug log, over-redacting WriteField values is
+        // strictly safer than guessing per module: the field code + module +
+        // dryRun + result remain visible for diagnosis, and the operator can
+        // re-derive the original value from their input payload.
+        //
+        // Production cost is zero (LACERTE_DEBUG_WIRE is off by default).
+        //
+        // Applies to BOTH disk and wire scopes — value-shape PII slipping
+        // through a WriteField envelope is the same leak in either path.
         private static void ScrubFieldValuePairs(JsonNode node)
         {
             switch (node)
@@ -358,9 +663,13 @@ namespace LacertMCP.Server.Logging
                         && fieldNode is JsonValue fieldVal
                         && fieldVal.TryGetValue<string>(out var fieldCode)
                         && !string.IsNullOrEmpty(fieldCode)
-                        && _piiFieldCodes.Contains(fieldCode!)
                         && obj.ContainsKey("value"))
                     {
+                        // P15-058 — denylist semantics: every WriteField {field, value}
+                        // pair has its `value` slot scrubbed regardless of which Lacerte
+                        // module/field code is involved. Pre-P15-058 this was gated on
+                        // _piiFieldCodes.Contains(fieldCode), which only knew about
+                        // DATA1-Individual codes and silently leaked entity-module PII.
                         obj["value"] = JsonValue.Create("***");
                     }
                     var names = obj.Select(kv => kv.Key).ToList();
@@ -406,6 +715,16 @@ namespace LacertMCP.Server.Logging
                 ["args"] = args,
                 ["durationMs"] = durationMs,
             };
+            // P15-052 — stamp the per-request correlation ID when set so
+            // nested log lines (CanUseNewApis, AutoReconnect, bridge sub-ops)
+            // are recoverable as one causal chain by `grep "cid":"abc12345"`.
+            // Field is omitted entirely when there's no active scope to keep
+            // the disabled-path JSON shape unchanged.
+            var cid = CurrentCorrelationId.Value;
+            if (!string.IsNullOrEmpty(cid))
+            {
+                record["cid"] = cid;
+            }
             if (error != null) record["error"] = error;
             else record["result"] = result;
 
@@ -413,6 +732,19 @@ namespace LacertMCP.Server.Logging
             try
             {
                 line = JsonSerializer.Serialize(record, _jsonOptions);
+                // P15-072 — large-result summarization. Read paths like
+                // ReadTable / ReadEFStatus / ListClients ship the FULL
+                // payload back through WireLog by default; on a 5000-row
+                // table this writes ~2 MB per log line, balloons the log
+                // file, and gives the operator no quick "this returned N
+                // rows in M ms" summary. Post-process the parsed line to
+                // replace any top-level result JSON array longer than
+                // cfg.ResultSampleLimit with a {kind, count, sample} object.
+                // Opt out with LACERTE_DEBUG_LOG_FULL_RESULTS=1.
+                if (!cfg.FullResults && error == null)
+                {
+                    line = SummarizeLargeResultArray(line, cfg.ResultSampleLimit);
+                }
             }
             catch
             {
@@ -426,8 +758,11 @@ namespace LacertMCP.Server.Logging
                 });
             }
 
-            // CRITICAL: redact BEFORE write.
-            line = Redact(line);
+            // CRITICAL: redact BEFORE write. Disk scope = broad keyset
+            // (includes Description / City / Zip / identity names /
+            // rawError / reason) because an archived debug log may leave
+            // the host.
+            line = Redact(line, RedactionScope.Disk);
 
             lock (_writeLock)
             {
@@ -435,6 +770,27 @@ namespace LacertMCP.Server.Logging
                 {
                     Directory.CreateDirectory(cfg.LogDir);
                     var path = Path.Combine(cfg.LogDir, FilenameForToday());
+
+                    // P15-071 — once-per-UTC-day retention prune piggybacks
+                    // on a write. Cheap (single Directory.GetFiles + parse),
+                    // gated by _lastPrunedDayOfYear so we don't run it for
+                    // every record.
+                    var today = DateTime.UtcNow.DayOfYear;
+                    if (_lastPrunedDayOfYear != today)
+                    {
+                        PruneOldLogsLocked(cfg.LogDir, cfg.RetentionDays);
+                        _lastPrunedDayOfYear = today;
+                    }
+
+                    // P15-015 — check size cap BEFORE acquiring the writer
+                    // so a freshly-rolled-over file is the one we write to.
+                    // Approximate the post-write size with line.Length + 2
+                    // (CRLF terminator); over-rotating once per gigabyte is
+                    // fine, and the alternative (querying FileInfo on every
+                    // write) is much more expensive in the hot path.
+                    var writeLen = Encoding.UTF8.GetByteCount(line) + Environment.NewLine.Length;
+                    RotateIfNeededLocked(cfg, path, writeLen);
+
                     var writer = GetOrOpenWriterLocked(path);
                     writer.WriteLine(line);
                     // AutoFlush=true on the writer guarantees the line is
@@ -458,6 +814,215 @@ namespace LacertMCP.Server.Logging
                     }
                     catch { /* swallow */ }
                 }
+            }
+        }
+
+        // P15-015 — size-cap-driven rotation. Must be called under _writeLock.
+        // If the existing file at `path` would exceed cfg.MaxBytes after
+        // writing `pendingLen` more bytes, close the cached writer, rename
+        // the file to lacerte-YYYYMMDD-HHmmss.log, and let the next
+        // GetOrOpenWriterLocked() call reopen a fresh path. Then run the
+        // dir-size prune so retention stays honest after a rotation event.
+        private static void RotateIfNeededLocked(WireLogConfig cfg, string path, int pendingLen)
+        {
+            long existingLen = 0;
+            try
+            {
+                var fi = new FileInfo(path);
+                if (fi.Exists) existingLen = fi.Length;
+            }
+            catch
+            {
+                // If we can't stat the file, skip rotation — the WriteLine below
+                // will surface the failure (or not) via the outer swallow.
+                return;
+            }
+
+            if (existingLen + pendingLen <= cfg.MaxBytes) return;
+
+            // Close the cached writer so the file is unlocked for the rename.
+            if (_openWriters.TryGetValue(path, out var existing))
+            {
+                try { existing.Dispose(); } catch { /* swallow */ }
+                _openWriters.Remove(path);
+            }
+
+            // New target name: lacerte-YYYYMMDD-HHmmss.log (UTC). The hyphen
+            // separator distinguishes a rotated file from the canonical
+            // per-day file, which is lacerte-YYYYMMDD.log (no time suffix).
+            var rotated = "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + ".log";
+            var rotatedPath = Path.Combine(cfg.LogDir, rotated);
+
+            try
+            {
+                if (File.Exists(path))
+                {
+                    // Defensive against collisions if the test/harness rotates
+                    // twice in the same second (improbable but cheap to handle).
+                    int salt = 0;
+                    var attemptPath = rotatedPath;
+                    while (File.Exists(attemptPath) && salt < 64)
+                    {
+                        salt++;
+                        attemptPath = Path.Combine(cfg.LogDir,
+                            "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + salt + ".log");
+                    }
+                    File.Move(path, attemptPath);
+                    rotatedPath = attemptPath;
+                }
+            }
+            catch
+            {
+                // Swallow — rotation must never poison the caller. If the move
+                // failed (file held open by AV/tail viewer), the next write
+                // will just append to the original file.
+                return;
+            }
+
+            // Dir-size prune always runs after a rotation so MaxDirBytes
+            // is honored even when retention-days alone wouldn't catch.
+            long pruned = PruneToMaxDirBytesLocked(cfg.LogDir, cfg.MaxDirBytes, exclude: path);
+
+            // Observability — single line per rotation event. Swallow any
+            // callback failure to honor the never-throw policy.
+            try
+            {
+                var cb = OnRotation;
+                if (cb != null)
+                {
+                    var msg = string.Format(
+                        "WireLog rotated {0} → {1} (size cap {2} bytes){3}",
+                        path, rotatedPath, cfg.MaxBytes,
+                        pruned > 0 ? string.Format(", pruned {0} bytes from dir to fit MaxDirBytes={1}", pruned, cfg.MaxDirBytes) : "");
+                    cb(msg);
+                }
+            }
+            catch { /* swallow */ }
+        }
+
+        // P15-071 — delete lacerte-YYYYMMDD*.log files whose embedded date is
+        // older than UtcNow.Date - retentionDays. Must be called under
+        // _writeLock. Tolerates and skips files with unrecognized names.
+        private static void PruneOldLogsLocked(string logDir, int retentionDays)
+        {
+            string[] files;
+            try
+            {
+                files = Directory.Exists(logDir)
+                    ? Directory.GetFiles(logDir, "lacerte-*.log")
+                    : Array.Empty<string>();
+            }
+            catch { return; }
+
+            var cutoff = DateTime.UtcNow.Date.AddDays(-retentionDays);
+            int deleted = 0;
+            foreach (var f in files)
+            {
+                if (!TryParseLogFileDate(f, out var fileDate)) continue;
+                if (fileDate >= cutoff) continue;
+                try
+                {
+                    File.Delete(f);
+                    deleted++;
+                }
+                catch { /* swallow — file may be held open by a tail viewer */ }
+            }
+
+            if (deleted > 0)
+            {
+                try
+                {
+                    var cb = OnRotation;
+                    if (cb != null)
+                    {
+                        cb(string.Format(
+                            "WireLog pruned {0} stale files (older than {1} days) from {2}",
+                            deleted, retentionDays, logDir));
+                    }
+                }
+                catch { /* swallow */ }
+            }
+        }
+
+        // P15-015 — delete oldest files until total dir size fits under
+        // maxDirBytes. Returns bytes freed. The `exclude` path (typically the
+        // file we just rotated INTO, which is brand-new and empty) is never
+        // pruned even if it would otherwise be selected. Must be called under
+        // _writeLock.
+        private static long PruneToMaxDirBytesLocked(string logDir, long maxDirBytes, string? exclude = null)
+        {
+            string[] files;
+            try
+            {
+                files = Directory.Exists(logDir)
+                    ? Directory.GetFiles(logDir, "lacerte-*.log")
+                    : Array.Empty<string>();
+            }
+            catch { return 0; }
+
+            var infos = new List<FileInfo>(files.Length);
+            long totalBytes = 0;
+            foreach (var f in files)
+            {
+                try
+                {
+                    var fi = new FileInfo(f);
+                    if (!fi.Exists) continue;
+                    infos.Add(fi);
+                    totalBytes += fi.Length;
+                }
+                catch { /* skip */ }
+            }
+
+            if (totalBytes <= maxDirBytes) return 0;
+
+            // Sort oldest first so we delete the least-useful entries.
+            infos.Sort((a, b) => a.LastWriteTimeUtc.CompareTo(b.LastWriteTimeUtc));
+
+            long freed = 0;
+            foreach (var fi in infos)
+            {
+                if (totalBytes <= maxDirBytes) break;
+                if (exclude != null && string.Equals(fi.FullName, exclude, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    var len = fi.Length;
+                    File.Delete(fi.FullName);
+                    totalBytes -= len;
+                    freed += len;
+                }
+                catch { /* swallow */ }
+            }
+            return freed;
+        }
+
+        // P15-071 — parse the YYYYMMDD or YYYYMMDD-HHmmss segment out of a
+        // lacerte-YYYYMMDD*.log filename. Returns true and the parsed date
+        // when the filename matches; false otherwise (caller should skip).
+        private static bool TryParseLogFileDate(string fullPath, out DateTime date)
+        {
+            date = default;
+            try
+            {
+                var name = Path.GetFileNameWithoutExtension(fullPath); // strips ".log"
+                if (string.IsNullOrEmpty(name) || !name.StartsWith("lacerte-", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                var tail = name.Substring("lacerte-".Length);
+                // tail is "YYYYMMDD" or "YYYYMMDD-HHmmss" or "YYYYMMDD-HHmmss-<salt>"
+                if (tail.Length < 8) return false;
+                var datePart = tail.Substring(0, 8);
+                return DateTime.TryParseExact(
+                    datePart,
+                    "yyyyMMdd",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out date);
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -564,10 +1129,22 @@ namespace LacertMCP.Server.Logging
             // Default location — ./logs. Always considered safe.
             var defaultDir = Path.Combine(Directory.GetCurrentDirectory(), "logs");
 
+            // P15-015 + P15-071 — read optional rotation/retention env vars.
+            // Invalid values silently fall back to defaults (matches the
+            // never-throw-from-debug-logging policy below).
+            long? maxBytes = TryParseLong(Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_MAX_BYTES"));
+            long? maxDirBytes = TryParseLong(Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_MAX_DIR_BYTES"));
+            int? retentionDays = TryParseInt(Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_RETENTION_DAYS"));
+            // P15-072 — result-shape summarization env vars. Default
+            // sample limit = 5 keeps log lines bounded on multi-thousand-
+            // row reads while preserving operationally useful signal.
+            int? resultSampleLimit = TryParseInt(Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_RESULT_SAMPLE"));
+            bool fullResults = Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_FULL_RESULTS") == "1";
+
             var dirOverride = Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_PATH");
             if (string.IsNullOrEmpty(dirOverride))
             {
-                return new WireLogConfig(defaultDir);
+                return new WireLogConfig(defaultDir, maxBytes, maxDirBytes, retentionDays, resultSampleLimit, fullResults);
             }
 
             // P14-049 — defensive validation of LACERTE_DEBUG_LOG_PATH. Same
@@ -581,17 +1158,53 @@ namespace LacertMCP.Server.Logging
             // debug logging must never break the operator path, so a throw
             // here is forbidden.
             var validated = LacertMCP.Server.Session.PathValidation.ValidateLogDir(dirOverride);
-            return new WireLogConfig(validated ?? defaultDir);
+            return new WireLogConfig(validated ?? defaultDir, maxBytes, maxDirBytes, retentionDays, resultSampleLimit, fullResults);
+        }
+
+        private static long? TryParseLong(string? raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return null;
+            return long.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v)
+                ? v : (long?)null;
+        }
+
+        private static int? TryParseInt(string? raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return null;
+            return int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v)
+                ? v : (int?)null;
         }
 
         /// <summary>
         /// Test-only: force a one-shot write that bypasses the lazy
         /// enabled-flag — used in unit tests that point LACERTE_DEBUG_LOG_PATH
         /// at a temp dir.
+        ///
+        /// <para>
+        /// P15-015 — if an active <see cref="EnableForTests"/> config exists
+        /// AND its LogDir matches <paramref name="logDir"/>, reuse the test
+        /// config so size-cap/retention overrides drive the rotation branch
+        /// for the probe write. Otherwise (legacy callers + cross-dir tests)
+        /// build a fresh default-cap config.
+        /// </para>
         /// </summary>
         internal static void WriteForTest(string logDir, string op, object? args, object? result, long durationMs)
         {
-            var cfg = new WireLogConfig(logDir);
+            WireLogConfig cfg;
+            var existing = _testForceConfig;
+            if (existing != null && string.Equals(
+                Path.GetFullPath(existing.LogDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(logDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+            {
+                cfg = existing;
+            }
+            else
+            {
+                cfg = new WireLogConfig(logDir);
+            }
             WriteRecord(cfg, op, args, result, error: null, durationMs);
             // Ensure the file handle isn't held open past the call boundary
             // for one-shot probe writes — keeps WriteForTest semantics
@@ -603,7 +1216,82 @@ namespace LacertMCP.Server.Logging
         private sealed class WireLogConfig
         {
             public string LogDir { get; }
-            public WireLogConfig(string logDir) => LogDir = logDir;
+
+            /// <summary>
+            /// P15-015 — per-file size cap in bytes. When the next WriteLine
+            /// would push the file past this, the writer is closed, the file
+            /// is renamed to lacerte-YYYYMMDD-HHmmss.log, and a fresh file is
+            /// opened. Default 100 MB. Configurable via
+            /// LACERTE_DEBUG_LOG_MAX_BYTES (positive integer; non-numeric /
+            /// non-positive falls back to default).
+            /// </summary>
+            public long MaxBytes { get; }
+
+            /// <summary>
+            /// P15-015 — total directory size cap in bytes. After each
+            /// rotation event, oldest lacerte-*.log files are deleted until
+            /// total dir size sits below this. Default 500 MB. Configurable
+            /// via LACERTE_DEBUG_LOG_MAX_DIR_BYTES with the same parse
+            /// fallback rule.
+            /// </summary>
+            public long MaxDirBytes { get; }
+
+            /// <summary>
+            /// P15-071 — retention window in days. On the first write of each
+            /// UTC day (gated by <see cref="_lastPrunedDayOfYear"/>), files
+            /// named lacerte-YYYYMMDD*.log whose embedded date is older than
+            /// UtcNow.Date - RetentionDays are deleted. Default 14.
+            /// Configurable via LACERTE_DEBUG_LOG_RETENTION_DAYS (1..365;
+            /// invalid values fall back to default).
+            /// </summary>
+            public int RetentionDays { get; }
+
+            /// <summary>
+            /// P15-072 — sample size used when summarizing large result
+            /// arrays. Records whose <c>result</c> is a JSON array longer
+            /// than this threshold are rewritten to
+            /// <c>{kind:"collection", count:N, sample:[…]}</c>. Default 5.
+            /// Configurable via <c>LACERTE_DEBUG_LOG_RESULT_SAMPLE</c>
+            /// (positive integer; non-positive falls back to default).
+            /// </summary>
+            public int ResultSampleLimit { get; }
+
+            /// <summary>
+            /// P15-072 — opt-out for the large-result summarizer. When
+            /// <see cref="FullResults"/> is true, the legacy verbose-payload
+            /// behavior is restored — every read-path result is dumped to
+            /// disk in full. Enabled via
+            /// <c>LACERTE_DEBUG_LOG_FULL_RESULTS=1</c> for the rare
+            /// deep-debugging session that needs the full payload.
+            /// </summary>
+            public bool FullResults { get; }
+
+            public WireLogConfig(
+                string logDir,
+                long? maxBytes = null,
+                long? maxDirBytes = null,
+                int? retentionDays = null,
+                int? resultSampleLimit = null,
+                bool fullResults = false)
+            {
+                LogDir = logDir;
+                MaxBytes = maxBytes.HasValue && maxBytes.Value > 0 ? maxBytes.Value : DefaultMaxBytes;
+                MaxDirBytes = maxDirBytes.HasValue && maxDirBytes.Value > 0 ? maxDirBytes.Value : DefaultMaxDirBytes;
+                RetentionDays = retentionDays.HasValue && retentionDays.Value >= 1 && retentionDays.Value <= 365
+                    ? retentionDays.Value
+                    : DefaultRetentionDays;
+                ResultSampleLimit = resultSampleLimit.HasValue && resultSampleLimit.Value > 0
+                    ? resultSampleLimit.Value
+                    : DefaultResultSampleLimit;
+                FullResults = fullResults;
+            }
+
+            public const long DefaultMaxBytes = 100L * 1024L * 1024L;       // 100 MB
+            public const long DefaultMaxDirBytes = 500L * 1024L * 1024L;    // 500 MB
+            public const int DefaultRetentionDays = 14;
+
+            /// <summary>P15-072 — default for <see cref="ResultSampleLimit"/>.</summary>
+            public const int DefaultResultSampleLimit = 5;
         }
     }
 }

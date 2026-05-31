@@ -16,6 +16,12 @@ namespace LacertMCP.Tests.Resilience
     ///   <item><description>Exhausted retries: rethrows the last exception with metadata.</description></item>
     /// </list>
     /// </summary>
+    // P15-014 — added to the AccessMapMutationCollection so concurrent
+    // AutoReconnect.WithRetry calls in this suite don't bleed retry/exhausted
+    // WireLog records into the AutoReconnectLoggingTests log file (which sets
+    // the global WireLog._testForceConfig). The collection serializes both
+    // suites so the global logging flag is owned by exactly one test at a time.
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class AutoReconnectTests
     {
         [Fact]

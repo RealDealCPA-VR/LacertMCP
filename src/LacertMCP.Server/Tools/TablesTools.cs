@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -25,10 +26,11 @@ namespace LacertMCP.Server.Tools
             [Description("Optional ClientNumber filter (case-insensitive equality).")] string? clientNumber = null,
             [Description("Optional 2-letter state abbreviation filter (case-insensitive equality). Required for DATA3/DATA4 in some live SQL templates; the session manager handles the SQL shape.")] string? stateAbbrev = null,
             [Description("Maximum rows to return. Default 100, clamped to Pagination.MaxLimit (1000).")] int limit = 100,
-            [Description("Zero-based row offset into the filtered result set. Default 0.")] int offset = 0)
+            [Description("Zero-based row offset into the filtered result set. Default 0.")] int offset = 0,
+            CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
-                var rows = await _session.ReadTable(table, clientNumber, stateAbbrev).ConfigureAwait(false);
+                var rows = await _session.ReadTable(table, clientNumber, stateAbbrev, cancellationToken).ConfigureAwait(false);
                 var page = Pagination.Pagination.Page(rows, limit, offset);
 
                 // NOTE: `count` and `rows` are kept; `rows` previously held the full

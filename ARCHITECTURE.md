@@ -75,7 +75,7 @@ Non-negotiable unless explicitly changed via `DECISIONS.md`.
 4. **Tool registration is centralized.** Every tool class is discovered via assembly scan in `Program.cs`; adding a new tool means dropping a class with `[McpServerToolType]` into `Tools/`.
 5. **TY21+ branching is the session manager's job, not the tool's.** Tools call `session.ReadTable(...)` and the session picks the right SQL template / COM call based on cached `CanUseNewApis(year, module)`. Tools should not see the branch.
 6. **ODBC is reads-only.** All mutations go through the COM bridge. `Odbc/` exposes no `ExecuteNonQuery` surface. (See `DECISIONS.md` 2026-05-30 "ODBC is reads-only.")
-7. **The access map is consulted before every write.** `assertWritable(module, table, field, year)` runs in the tool layer (or session manager — pick one and be consistent) before any COM call. Default-refuse on `Unknown` with `force:true` escape hatch.
+7. **The access map is consulted before every per-field write.** `assertWritable(module, table, field, year)` runs inside `LacerteSessionManager.WriteField` before any COM call. Default-refuse on `Unknown` with `force:true` escape hatch. Detail-row writes (`WriteDetail`) and whole-row `CreateClient` are deliberately outside this gate — see `DECISIONS.md` "Detail-row + whole-row writes are outside the access-map gate".
 8. **The 24h Intuit auth ticket is never refreshed inside a tool call.** Re-auth ceremonies happen only via the CLI in an interactive shell. The MCP detects expiry reactively (`NotSignedIn`) and surfaces synthetic statusCode 9101 with remediation.
 9. **Status codes are always structured.** No tool returns a raw integer; every error is `{ success: false, statusCode, statusName, severity, userMessage, remediation, context }`.
 
@@ -179,8 +179,11 @@ Environment-variable driven, resolved once in `Program.cs`. The full list lives 
 | `LACERTE_DEBUG_WIRE` | `1` → log COM calls + SQL to `logs/`. |
 | `LACERTE_DEBUG_LOG_PATH` | Override log directory. |
 | `LACERTE_SIM_EXPIRED` | `1` → simulate an expired 24h session (testing only). |
+| `LACERTE_DATA_ROOT` | Root scanned by `lacerte_list_datapaths` when discovering `{YY}Tax\{Module}Data` folders (default `C:\Lacerte`). |
+| `LACERTE_MCP_FORCE_FILE_STORE` | `1` → forces the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json`; auto-on off-Windows. |
+| `LACERTE_PARITY_RECORDING` | Testing only — path to recorded parity JSON consumed by the `BothModesData` test harness. |
 
-New env vars must be documented in both `README.md` and `.env.example`.
+New env vars must be documented in `README.md`, `.env.example`, AND this table — keep the trio in lock-step.
 
 > ODBC connections are DSN-less — `ConnectionStringBuilder` composes them from driver + datapath + module + year. No `LACERTE_DSN` env var is honored; the `LacerteDSII` DSN name is only probed by `lacerte-mcp doctor` as an install-sanity check.
 

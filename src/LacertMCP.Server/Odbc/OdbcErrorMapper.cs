@@ -60,6 +60,27 @@ namespace LacertMCP.Server.Odbc
         }
 
         /// <summary>
+        /// Returns true when <paramref name="sqlState"/> indicates a connection-
+        /// level failure that should cause the caller to dispose+null the
+        /// cached <see cref="System.Data.Odbc.OdbcConnection"/> so the next
+        /// query re-opens fresh. Covers the same families
+        /// <see cref="MapSqlState"/> routes to <see cref="StatusCodes.DBFNotAccessable"/>
+        /// or <see cref="StatusCodes.CodeBaseError"/>: 08* (connection failure),
+        /// IM002 (DSN/driver not found), HY* (driver-side error), S1* (legacy
+        /// driver-side error). Per P15-045 — exposed as a predicate so
+        /// <see cref="LacerteDsnReader"/> doesn't duplicate the classification.
+        /// </summary>
+        public static bool IsConnectionFatal(string? sqlState)
+        {
+            if (string.IsNullOrEmpty(sqlState)) return false;
+            if (sqlState!.StartsWith("08", StringComparison.OrdinalIgnoreCase)) return true;
+            if (sqlState.Equals("IM002", StringComparison.OrdinalIgnoreCase)) return true;
+            if (sqlState.StartsWith("HY", StringComparison.OrdinalIgnoreCase)) return true;
+            if (sqlState.StartsWith("S1", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>
         /// Pure SQLSTATE → TAPIStatus mapping. Public so tests can fabricate
         /// SQLSTATEs without constructing an <see cref="OdbcException"/> (the ctor is internal).
         /// </summary>

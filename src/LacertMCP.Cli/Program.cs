@@ -27,6 +27,14 @@ namespace LacertMCP.Cli
     {
         public static async Task<int> Main(string[] args)
         {
+            // P15-065: Default Windows consoles (cmd.exe, legacy PowerShell) run with
+            // OEM code pages 437/850 which mojibake the doctor's Unicode check/warn/cross
+            // glyphs. Force UTF-8 stdout once at boot — this is a no-op on already-UTF-8
+            // terminals (Windows Terminal, PowerShell 7) and supported on net48 since Vista.
+            // Wrap in try/catch in case the stream is redirected and rejects encoding change.
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; }
+            catch { /* redirected stream — leave alone */ }
+
             var root = new RootCommand(
                 "lacerte-mcp — operator CLI for one-time setup, recovery, and ops.\n" +
                 "Use this in an interactive PowerShell for registration / login (Intuit dialogs).\n" +

@@ -197,35 +197,44 @@ namespace LacertMCP.Server.Schema
                 { "taxYear", taxYear },
             };
 
+            // P15-069: replace the duplicated prose "reason" string with
+            // structured, machine-readable keys. The StatusInfo for each code
+            // already carries the canonical remediation; the throw-site only
+            // needs to surface typed handles the LLM can use to either retry
+            // the same call with force:true or run the suggested CLI. After
+            // the round-1 WireLog.Redact pass turns any "reason" string into
+            // "***" anyway, so the standalone remediation is the only useful
+            // text path — duplicating it inside context just created a
+            // maintenance trap. Keep the structured keys lean.
             switch (access)
             {
                 case FieldAccess.ReadWrite:
                     return;
 
                 case FieldAccess.ReadOnly:
-                    context["reason"] = $"Field {field} on {module}/DATA{table} is read-only (e.g. computed or client number).";
+                    context["access"] = "ReadOnly";
                     throw new LacerteSDKError(StatusCodes.ExposedForRead, context);
 
                 case FieldAccess.Hidden:
                 case FieldAccess.NotExposed:
-                    context["reason"] = $"Field {field} is not exposed for write on {module}/DATA{table}.";
+                    context["access"] = access.ToString();
                     throw new LacerteSDKError(StatusCodes.NotExposed, context);
 
                 case FieldAccess.NotSupported:
-                    context["reason"] = $"Field {field} is not supported in TY{taxYear} (overlay).";
+                    context["access"] = "NotSupported";
+                    context["overlayYear"] = taxYear;
                     throw new LacerteSDKError(StatusCodes.FieldNotSupported, context);
 
                 case FieldAccess.Unknown:
                     if (force) return;
-                    context["reason"] =
-                        $"Field {field} on {module}/DATA{table} is not in the access map. " +
-                        "Refusing to write. Pass force:true to override, or run " +
-                        "'lacerte-mcp field-access discover' to populate the map.";
+                    context["access"] = "Unknown";
+                    context["suggestedRetryArgs"] = new Dictionary<string, object?> { ["force"] = true };
+                    context["suggestedCli"] = "lacerte-mcp field-access discover";
                     throw new LacerteSDKError(SyntheticStatusCodes.UnknownFieldAccess, context);
 
                 default:
                     // Defensive — every enum member is handled above.
-                    context["reason"] = $"Field {field} on {module}/DATA{table} returned an unrecognized access value: {access}.";
+                    context["access"] = access.ToString();
                     throw new LacerteSDKError(StatusCodes.Error, context);
             }
         }
@@ -334,12 +343,77 @@ namespace LacertMCP.Server.Schema
             return Path.Combine(asmDir, "Schema", "FieldAccessMap");
         }
 
+        /// <summary>
+        /// P15-044 — Forget all cached module + overlay JSON. Returns the
+        /// counts evicted so callers (e.g. the <c>lacerte_reload_schema</c>
+        /// MCP tool) can report what they cleared.
+        ///
+        /// <para>
+        /// Intended use: an operator runs <c>LacertMCP.FieldAccessDumper.exe</c>
+        /// against a long-lived MCP server, writes a fresh shard to disk,
+        /// then calls a reload tool that delegates here so the next
+        /// <c>AssertWritable</c> picks up the new map without restarting the
+        /// server (a restart would invalidate the 24h Intuit auth ticket).
+        /// </para>
+        ///
+        /// <para>
+        /// Single-load semantics remain the default — this is an EXPLICIT
+        /// reload, not a watcher. No surprise reloads mid-tool.
+        /// </para>
+        /// </summary>
+        public static (int modulesEvicted, int overlaysEvicted) ReloadCaches()
+        {
+            var modules = _moduleCache.Count;
+            var overlays = _overlayCache.Count;
+            _moduleCache.Clear();
+            _overlayCache.Clear();
+            return (modules, overlays);
+        }
+
         /// <summary>Test-only: forget all cached module + overlay JSON.</summary>
         internal static void ResetCacheForTests()
         {
-            _moduleCache.Clear();
-            _overlayCache.Clear();
+            ReloadCaches();
         }
+
+        /// <summary>
+        /// P15-034 — Count shards present on disk under <see cref="SchemaRoot"/>
+        /// WITHOUT loading or parsing them. Pure file enumeration; safe to
+        /// call from the hot path / startup / a doctor probe.
+        ///
+        /// <para>
+        /// Returns <c>(0, 0)</c> when the schema root does not exist (the
+        /// most common diagnostic gap: an operator running from a partially
+        /// published bin/ where the <c>Schema/FieldAccessMap/**/*.json</c>
+        /// CopyToOutputDirectory failed). Surface this via a doctor probe or
+        /// <c>lacerte_session_status</c> so the symptom "every write returns
+        /// 9012 UnknownFieldAccess" can be traced to "the access-map
+        /// directory is empty" without spelunking through the source.
+        /// </para>
+        /// </summary>
+        public static (int modules, int overlays) GetShardCounts()
+        {
+            var root = SchemaRoot();
+            var baseDir = Path.Combine(root, "base");
+            var overlayDir = Path.Combine(root, "overlays");
+
+            var modules = Directory.Exists(baseDir)
+                ? Directory.GetFiles(baseDir, "*.json", SearchOption.TopDirectoryOnly).Length
+                : 0;
+
+            var overlays = Directory.Exists(overlayDir)
+                ? Directory.GetFiles(overlayDir, "ty*-not-supported.json", SearchOption.TopDirectoryOnly).Length
+                : 0;
+
+            return (modules, overlays);
+        }
+
+        /// <summary>
+        /// P15-034 — Return the schema root directory (absolute, next to the
+        /// running assembly). Exposed so doctor / session-status surfaces can
+        /// report where the loader is looking when shard counts are zero.
+        /// </summary>
+        public static string GetSchemaRoot() => SchemaRoot();
 
         // JSON-shape mirror for overlay files: { "taxYear": int, "overrides": {...} }
         private sealed class OverlayFile

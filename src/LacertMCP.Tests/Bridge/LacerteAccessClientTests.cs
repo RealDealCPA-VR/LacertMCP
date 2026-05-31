@@ -141,6 +141,34 @@ namespace LacertMCP.Tests.Bridge
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
 
+        [Fact]
+        public void CreateClient_NulInFirstName_RejectedBeforeBridgeUnavailable()
+        {
+            // P15-020 — bridge-boundary defense-in-depth for CreateClient. The
+            // validation throw must fire BEFORE EnsureLive(), so even off-
+            // Windows (where the COM bridge is cold and would otherwise
+            // throw BridgeUnavailable) the validator catches bad input.
+            using var client = new LacerteAccessClient();
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                client.CreateClient("appid", @"C:\Lacerte\24data", 2024, 'I',
+                    "NEW01", "Individual", firstName: "bob\0", lastName: "Doe",
+                    emailID: "jane@example.com"));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("firstName", ex.Context["field"]);
+        }
+
+        [Fact]
+        public void CreateClient_MalformedClientID_RejectedBeforeBridgeUnavailable()
+        {
+            using var client = new LacerteAccessClient();
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                client.CreateClient("appid", @"C:\Lacerte\24data", 2024, 'I',
+                    "BAD;CLIENT", "Individual", "Jane", "Doe", "jane@example.com"));
+            Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
+        }
+
         // -----------------------------------------------------------------
         // Disposal
         // -----------------------------------------------------------------

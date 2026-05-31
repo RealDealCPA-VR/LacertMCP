@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -23,7 +24,8 @@ namespace LacertMCP.Server.Tools
         public Task<string> LacerteClientList(
             [Description("Optional case-insensitive prefix to match against the conventional name field (C1_2 for individual modules, C1_1 for entity modules).")] string? nameFilter = null,
             [Description("Maximum rows to return. Default 100, clamped to Pagination.MaxLimit (1000).")] int limit = 100,
-            [Description("Zero-based row offset into the filtered result set. Default 0.")] int offset = 0)
+            [Description("Zero-based row offset into the filtered result set. Default 0.")] int offset = 0,
+            CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
                 // Pull the full filtered set from the session, then page in-tool via
@@ -39,7 +41,7 @@ namespace LacertMCP.Server.Tools
                 // int.MaxValue and slices here. Sim is in-memory so the overfetch is
                 // free; live mode will eat the full-table scan cost per paged request
                 // — slated for a session-level fix in a future phase.
-                var rows = await _session.ListClients(nameFilter, int.MaxValue).ConfigureAwait(false);
+                var rows = await _session.ListClients(nameFilter, int.MaxValue, cancellationToken).ConfigureAwait(false);
                 var page = Pagination.Pagination.Page(rows, limit, offset);
 
                 // NOTE: `count` and `clients` are legacy fields kept for additive
@@ -62,10 +64,11 @@ namespace LacertMCP.Server.Tools
         [McpServerTool]
         [Description("Read one client by ClientNumber from DATA1 in the active context. Returns null if no such client exists.")]
         public Task<string> LacerteClientRead(
-            [Description("The ClientNumber (sim-assigned monotonic identifier; e.g. \"1001\").")] string clientNumber)
+            [Description("The ClientNumber (sim-assigned monotonic identifier; e.g. \"1001\").")] string clientNumber,
+            CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
-                var row = await _session.ReadClient(clientNumber).ConfigureAwait(false);
+                var row = await _session.ReadClient(clientNumber, cancellationToken).ConfigureAwait(false);
                 return new { clientNumber, found = row != null, client = row };
             });
     }

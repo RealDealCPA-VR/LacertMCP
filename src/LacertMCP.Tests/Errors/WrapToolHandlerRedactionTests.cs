@@ -39,20 +39,22 @@ namespace LacertMCP.Tests.Errors
         }
 
         [Fact]
-        public async Task Run_GenericException_RedactsRawErrorMessage()
+        public async Task Run_GenericException_PreservesRawErrorPrefix()
         {
-            // The generic-exception fallback puts ex.Message in
-            // context.rawError. If the COM layer echoed taxpayer data, the
-            // unredacted envelope would expose it. WrapToolHandler must scrub.
+            // P15-001 — wire-scope redaction no longer blanks the rawError
+            // key wholesale; the actionable diagnostic prefix survives and
+            // the LLM can react to it. (Disk-scope still scrubs the key on
+            // the archived log because rawError CAN echo taxpayer data —
+            // that path is exercised in WireLogTests.)
             var json = await WrapToolHandler.Run(async () =>
             {
                 await Task.Yield();
-                throw new InvalidOperationException("SDK rejected: SSN 123-45-6789 invalid");
+                throw new InvalidOperationException("SDK rejected the field");
             });
 
-            Assert.DoesNotContain("123-45-6789", json);
-            // rawError value replaced with the *** sentinel.
-            Assert.Contains("\"rawError\":\"***\"", json);
+            // The actionable prefix is preserved on the wire so the LLM can react.
+            Assert.Contains("SDK rejected the field", json);
+            Assert.DoesNotContain("\"rawError\":\"***\"", json);
         }
 
         [Fact]
@@ -79,14 +81,17 @@ namespace LacertMCP.Tests.Errors
         }
 
         [Fact]
-        public async Task Run_ErrorContext_RedactsReasonKey()
+        public async Task Run_ErrorContext_PreservesReasonDiagnostic()
         {
-            // Bridge/Registration puts COM ex.Message in context.reason. Verify
-            // the new 'reason' alternation hits.
+            // P15-001 — Bridge/validation throws put the actionable
+            // diagnostic in context.reason ("Series is required", "dbf
+            // must match the DATA{n}{module}{YY}.DBF shape...", etc.).
+            // Wire-scope redaction no longer blanks the key, so the LLM
+            // remediation flow sees the actual validation phrase.
             var context = new Dictionary<string, object?>
             {
                 ["op"] = "Bridge.Register",
-                ["reason"] = "Late-bound COM call failed: SSN 555-66-7777",
+                ["reason"] = "dbf must match the DATA{n}{module}{YY}.DBF shape (uppercase ASCII alphanumerics + single dot).",
             };
 
             var json = await WrapToolHandler.Run(async () =>
@@ -95,7 +100,8 @@ namespace LacertMCP.Tests.Errors
                 throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable, context);
             });
 
-            Assert.DoesNotContain("555-66-7777", json);
+            // The diagnostic substring the LLM needs to fix the call survives.
+            Assert.Contains("DATA{n}{module}{YY}.DBF", json);
         }
 
         [Fact]

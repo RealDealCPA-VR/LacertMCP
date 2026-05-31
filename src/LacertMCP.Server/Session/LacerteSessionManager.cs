@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -76,6 +77,34 @@ namespace LacertMCP.Server.Session
 
         private readonly string? _appName;
 
+        // P15-004 — LACERTE_DEFAULT_TAX_YEAR parsed once at construction.
+        // Preferred over DateTimeOffset.UtcNow.Year at every fallback site so
+        // a Lacerte install pinned to TY24 doesn't silently file 2026 returns
+        // once the calendar rolls. Validated >= 2018 + <= year ceiling in
+        // the ctor (fail-loud on bad config).
+        private readonly int? _defaultTaxYear;
+
+        /// <summary>
+        /// P15-004 — exposed for SessionStatus + the SessionTools layer so
+        /// `lacerte_set_context` can use it as the fallback when `taxYear`
+        /// is omitted. Null when LACERTE_DEFAULT_TAX_YEAR is unset.
+        /// </summary>
+        public int? DefaultTaxYear => _defaultTaxYear;
+
+        // P15-030 — populated when mode resolution suppressed an operator's
+        // preference (both LACERTE_LIVE=1 + LACERTE_SIMULATION=1, OR
+        // LACERTE_LIVE=1 off-Windows). Null when the resolution was
+        // unambiguous. Surfaced via SessionStatus + the doctor mode probe.
+        private readonly string? _modeResolutionReason;
+
+        /// <summary>P15-030 — see <see cref="_modeResolutionReason"/>.</summary>
+        public string? ModeResolutionReason => _modeResolutionReason;
+
+        // P15-077 — testable injection point for the current-calendar-year
+        // ceiling so unit tests can pin the upper bound without flapping in
+        // future calendar years. Production uses DateTime.Today.Year.
+        internal Func<int> TodayYearProvider { get; set; } = () => DateTime.Today.Year;
+
         // ----- Context + per-(year,module) caches --------------------------
 
         public SessionContext? Context { get; private set; }
@@ -111,8 +140,21 @@ namespace LacertMCP.Server.Session
         // Eviction is opportunistic — checked on TryReplay (expired entries
         // treated as miss + removed) and StoreIdempotent (over-cap → prune
         // expired entries + drop oldest by CreatedAt).
-        private const int IdempotencyCacheMaxEntries = 10_000;
-        private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromHours(24);
+        // P15-062 — internal const so tests can pin the cap via the same
+        // symbol production uses, no reflection needed.
+        internal const int IdempotencyCacheMaxEntries = 10_000;
+        internal static readonly TimeSpan IdempotencyTtl = TimeSpan.FromHours(24);
+
+        // P15-041 — batch-evict roughly 10% of the cap once we cross the
+        // line, so the O(n log n) OrderBy sort cost is paid once every
+        // ~1024 writes instead of on every write at steady-state-at-cap.
+        private const int IdempotencyEvictionBatchSize = 1024;
+
+        // P15-041 — single-flight gate so concurrent writers at the cap
+        // don't each independently sort + evict. 0 = idle, 1 = an eviction
+        // pass is in progress. Losers of the CompareExchange race simply
+        // skip the eviction; if still over cap next time they get a turn.
+        private int _evictingIdempotency;
 
         // ===================================================================
         // Construction
@@ -133,7 +175,68 @@ namespace LacertMCP.Server.Session
             var onWindows = Environment.OSVersion.Platform == PlatformID.Win32NT;
 
             Mode = (!sim && live && onWindows) ? SessionMode.Live : SessionMode.Simulation;
+
+            // P15-030 — capture a human-readable reason if the operator's
+            // env preferred Live but mode resolution overrode it. Surfaces
+            // through SessionStatus and the doctor "Mode resolution" probe
+            // so a silent fallback to Sim no longer hides behind canned
+            // "ListClients returned seed data".
+            if (live && sim)
+            {
+                _modeResolutionReason =
+                    "both LACERTE_LIVE=1 and LACERTE_SIMULATION=1 set — LACERTE_SIMULATION won";
+            }
+            else if (live && !onWindows)
+            {
+                _modeResolutionReason =
+                    "LACERTE_LIVE=1 requested but not on Windows — fell back to Simulation";
+            }
+            else
+            {
+                _modeResolutionReason = null;
+            }
+
+            // P15-030 — emit ONE WireLog line at construction for the
+            // operator-friendly forensic trail. WireLog.RecordSync is a
+            // near-zero-cost passthrough when LACERTE_DEBUG_WIRE is unset.
+            if (_modeResolutionReason != null)
+            {
+                try
+                {
+                    WireLog.RecordSync<bool>("ModeResolution",
+                        new
+                        {
+                            resolved = Mode.ToString(),
+                            liveRequested = live,
+                            simRequested = sim,
+                            onWindows,
+                            reason = _modeResolutionReason,
+                        },
+                        () => true);
+                }
+                catch { /* logging is best-effort; never poison construction */ }
+            }
+
             _appName = TryGet(resolved, "LACERTE_APP_NAME");
+
+            // P15-004 — parse LACERTE_DEFAULT_TAX_YEAR once at startup.
+            // Fail-loud on bad input (per Boundary Invariant: config errors
+            // surface at construction, not at first tool call). Floor 2018
+            // matches the SDK floor at TaxYearTooOld. Unset → null →
+            // calendar-year fallback at every site that needed UtcNow.Year
+            // before. The README + .env.example have advertised this env var
+            // since Phase-1 docs; before P15-004 the code never read it.
+            var rawYear = TryGet(resolved, "LACERTE_DEFAULT_TAX_YEAR");
+            if (!string.IsNullOrEmpty(rawYear))
+            {
+                if (!int.TryParse(rawYear, NumberStyles.Integer, CultureInfo.InvariantCulture, out var y)
+                    || y < 2018)
+                {
+                    throw new InvalidOperationException(
+                        $"LACERTE_DEFAULT_TAX_YEAR='{rawYear}' invalid — must be an integer >= 2018.");
+                }
+                _defaultTaxYear = y;
+            }
 
             if (Mode == SessionMode.Simulation)
             {
@@ -183,16 +286,31 @@ namespace LacertMCP.Server.Session
         /// success. Live: throws <see cref="SyntheticStatusCodes.BridgeUnavailable"/>
         /// until Phase 9 wires <c>ITPRegistration.Register</c>.
         /// </summary>
-        public async Task<int> Register()
+        /// <remarks>
+        /// P15-042 / P15-070 — a successful Register() (AccessGranted)
+        /// invalidates the per-process derived caches (<see cref="_edition"/>
+        /// and <see cref="_newApisCache"/>) so that re-authenticating after
+        /// the 24h ticket expiry — or after the operator's Lacerte service
+        /// hiccups mid-session — naturally refreshes the SessionStatus
+        /// edition triple and the TY21+ branch decisions. Without this,
+        /// re-Register was a no-op for those caches and the operator's only
+        /// path to refresh edition state was process restart.
+        /// </remarks>
+        public async Task<int> Register(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // F11 — wrap whole Register in WireLog so both sim + live paths
             // produce one log line. Args carry the app name + taxYear only
             // (no secrets — appId is the AppIdStore GUID, redacted-by-policy).
-            int taxYearArg = Context?.Year ?? DateTimeOffset.UtcNow.Year;
+            // P15-004 — taxYear fallback prefers LACERTE_DEFAULT_TAX_YEAR
+            // over the calendar year (which would silently file a 2026
+            // return on a TY24 install).
+            int taxYearArg = Context?.Year ?? _defaultTaxYear ?? DateTimeOffset.UtcNow.Year;
             return await WireLog.Record<int>("Register",
                 new { appName = _appName ?? "Lacerte MCP", taxYear = taxYearArg },
                 async () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (Mode == SessionMode.Live)
                 {
                     // Phase 9 task #67 — bridge wire-up. Boundary Invariant #8:
@@ -214,10 +332,10 @@ namespace LacertMCP.Server.Session
                             });
                     }
                     // Spec wants a tax year for Register; reuse Context.Year if
-                    // available, otherwise fall back to the env-default-year
-                    // (Phase 11 task), otherwise current calendar year as a
+                    // available, otherwise fall back to LACERTE_DEFAULT_TAX_YEAR
+                    // (P15-004), otherwise the current calendar year as a
                     // last-resort lower bound.
-                    int taxYear = Context?.Year ?? DateTimeOffset.UtcNow.Year;
+                    int taxYear = Context?.Year ?? _defaultTaxYear ?? DateTimeOffset.UtcNow.Year;
                     var appName = _appName ?? "Lacerte MCP";
                     // F12 — wrap in AutoReconnect for transient COM retries.
                     int liveStatus = await AutoReconnect.WithRetry<int>(() =>
@@ -228,6 +346,7 @@ namespace LacertMCP.Server.Session
                         IsRegistered = true;
                         RegisteredAt = DateTimeOffset.UtcNow;
                         ExpiresAt = RegisteredAt.Value.AddHours(24);
+                        InvalidateDerivedCachesOnRegister();
                     }
                     else
                     {
@@ -244,6 +363,7 @@ namespace LacertMCP.Server.Session
                     IsRegistered = true;
                     RegisteredAt = DateTimeOffset.UtcNow;
                     ExpiresAt = RegisteredAt.Value.AddHours(24);
+                    InvalidateDerivedCachesOnRegister();
                     return StatusCodes.AccessGranted;
                 }
 
@@ -253,6 +373,26 @@ namespace LacertMCP.Server.Session
                 ExpiresAt = null;
                 return StatusCodes.NotSignedIn;
             }).ConfigureAwait(false);
+        }
+
+        // P15-042 / P15-070 — clear the per-process probe caches on a
+        // successful Register so re-auth refreshes the EditionInfo triple
+        // and the (year, module) → useNewApis table. Without this, a probe
+        // that failed on a transient COM hiccup or a Lacerte version-bump
+        // mid-session would lie forever in SessionStatus.
+        //
+        // _edition: REQUIRED. P14-061 caches a failed probe as the
+        // "Unavailable" sentinel for process lifetime; clearing here gives
+        // re-Register meaning beyond auth-ticket refresh.
+        //
+        // _newApisCache: defensive — the (year, module) → bool answer is a
+        // property of the installed Lacerte build, not the auth ticket.
+        // Clearing it costs at most ~9 entries (one per module) and protects
+        // against a Lacerte upgrade mid-process changing TY21+ support.
+        private void InvalidateDerivedCachesOnRegister()
+        {
+            lock (_editionLock) { _edition = null; }
+            _newApisCache.Clear();
         }
 
         /// <summary>
@@ -297,7 +437,14 @@ namespace LacertMCP.Server.Session
                 Edition: edition,
                 // P14-040: echo the assembly InformationalVersion so operators get
                 // a copy-pasteable build stamp via lacerte_session_status.
-                BuildVersion: Diagnostics.BuildInfo.Version);
+                BuildVersion: Diagnostics.BuildInfo.Version,
+                // P15-030: surface the mode-resolution reason when an operator
+                // env preference was overridden (both flags set OR live-off-Windows).
+                // Null when resolution was unambiguous — the snapshot stays compact.
+                ModeResolutionReason: _modeResolutionReason,
+                // P15-004: surface the parsed LACERTE_DEFAULT_TAX_YEAR so the
+                // operator can confirm the env var was actually picked up.
+                DefaultTaxYear: _defaultTaxYear);
         }
 
         /// <summary>
@@ -385,6 +532,23 @@ namespace LacertMCP.Server.Session
                 throw new LacerteSDKError(SyntheticStatusCodes.TaxYearTooOld, ctx);
             }
 
+            // P15-077 — symmetric upper-bound. The SDK has no data for a
+            // year not yet released; a typo passing year=2098 would
+            // otherwise create a phantom in-memory cell in sim or surface
+            // as a confusing live error after a wire roundtrip. +1 buffer
+            // tolerates early-year planning for next TY (the operator may
+            // legitimately set context for TY25 in Dec-2024).
+            int ceiling = TodayYearProvider() + 1;
+            if (taxYear > ceiling)
+            {
+                var ctx = new Dictionary<string, object?>
+                {
+                    ["taxYear"] = taxYear,
+                    ["ceiling"] = ceiling,
+                };
+                throw new LacerteSDKError(SyntheticStatusCodes.TaxYearTooNew, ctx);
+            }
+
             if (Modules.GetByChar(module) == null)
             {
                 var ctx = new Dictionary<string, object?>
@@ -449,14 +613,18 @@ namespace LacertMCP.Server.Session
         /// for non-I modules it filters on C1_1 (entity name).
         /// </summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListClients(
-            string? lastNameFilter = null, int limit = 100)
+            string? lastNameFilter = null, int limit = 100,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // F11 — wrap with WireLog.Record. Args carry the filter + limit
             // (no PII — last-name filter is a search prefix, not a stored secret).
             return WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
                 "ListClients", new { lastNameFilter, limit }, () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
+                RequireRegistered();
                 ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
                 IEnumerable<DbfRow> rows = module.Clients.Values;
@@ -479,13 +647,17 @@ namespace LacertMCP.Server.Session
         }
 
         /// <summary>Reads one client by ClientNumber from DATA1. Returns null if absent.</summary>
-        public Task<IReadOnlyDictionary<string, object?>?> ReadClient(string clientNumber)
+        public Task<IReadOnlyDictionary<string, object?>?> ReadClient(
+            string clientNumber, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // F11 — wrap with WireLog.Record.
             return WireLog.Record<IReadOnlyDictionary<string, object?>?>(
                 "ReadClient", new { clientNumber }, () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
+                RequireRegistered();
                 ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
                 IReadOnlyDictionary<string, object?>? result = null;
@@ -503,20 +675,25 @@ namespace LacertMCP.Server.Session
         /// pending Phase 4 ODBC wiring.
         /// </summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTable(
-            int table, string? clientNumber = null, string? stateAbbrev = null)
+            int table, string? clientNumber = null, string? stateAbbrev = null,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // F11 — wrap with WireLog.Record. Forwarders below call
             // ReadTableCore directly so we don't double-log when ReadSubclients
             // etc. fan out through ReadTable.
             return WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
                 "ReadTable", new { table, clientNumber, stateAbbrev },
-                () => ReadTableCore(table, clientNumber, stateAbbrev));
+                () => ReadTableCore(table, clientNumber, stateAbbrev, cancellationToken));
         }
 
         private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTableCore(
-            int table, string? clientNumber, string? stateAbbrev)
+            int table, string? clientNumber, string? stateAbbrev,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireRegistered();
             ThrowIfLiveUnwired();
             var module = RequireSimModule(ctx);
 
@@ -551,68 +728,185 @@ namespace LacertMCP.Server.Session
         }
 
         /// <summary>DATA2 subclient rows for a given client.</summary>
-        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadSubclients(string clientNumber)
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadSubclients(
+            string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadSubclients", new { clientNumber }, () => ReadTableCore(2, clientNumber, null));
+                "ReadSubclients", new { clientNumber }, () => ReadTableCore(2, clientNumber, null, cancellationToken));
 
         /// <summary>DATA3 state rows for a given client.</summary>
-        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStates(string clientNumber)
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStates(
+            string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadStates", new { clientNumber }, () => ReadTableCore(3, clientNumber, null));
+                "ReadStates", new { clientNumber }, () => ReadTableCore(3, clientNumber, null, cancellationToken));
 
         /// <summary>DATA5 F4-status rows for a given client.</summary>
-        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStatuses(string clientNumber)
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStatuses(
+            string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadStatuses", new { clientNumber }, () => ReadTableCore(5, clientNumber, null));
+                "ReadStatuses", new { clientNumber }, () => ReadTableCore(5, clientNumber, null, cancellationToken));
 
         /// <summary>DATA7 forms rows for a given client.</summary>
-        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadForms(string clientNumber)
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadForms(
+            string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadForms", new { clientNumber }, () => ReadTableCore(7, clientNumber, null));
+                "ReadForms", new { clientNumber }, () => ReadTableCore(7, clientNumber, null, cancellationToken));
 
-        /// <summary>Per-client detail rows from the simulated <c>[CLIENT-Detail]</c> file.</summary>
-        public Task<IReadOnlyList<DetailRow>> ReadDetail(string clientNumber)
+        /// <summary>
+        /// Per-client detail rows from the simulated <c>[CLIENT-Detail]</c> file.
+        /// </summary>
+        /// <remarks>
+        /// Legacy single-arg overload — unfiltered, kept for back-compat.
+        /// Forwards to <see cref="ReadDetail(string, int?, CancellationToken)"/>.
+        /// </remarks>
+        public Task<IReadOnlyList<DetailRow>> ReadDetail(
+            string clientNumber, CancellationToken cancellationToken = default)
+            => ReadDetail(clientNumber, seriesFilter: null, cancellationToken);
+
+        /// <summary>
+        /// P15-009 — per-client detail rows with optional Series push-down.
+        /// When <paramref name="seriesFilter"/> is non-null, in live mode the
+        /// session manager will dispatch <see cref="SqlTemplates.DetailBySeries"/>
+        /// (which emits an unquoted integer literal — safe by P14-055 numeric-
+        /// string invariant). In sim mode the in-memory <c>List&lt;DetailRow&gt;</c>
+        /// is filtered by <c>int.Parse(r.Series) == seriesFilter</c>; int.Parse
+        /// is safe because <c>DetailsTools.ValidateDetailWrite</c> enforces
+        /// <c>^\\d+$</c> on every detail-row write AND the seed fixture uses
+        /// numeric Series strings ("11" = W-2, "12" = Interest, "13" =
+        /// Dividends, "14" = Dependents, "20" = Income, "30" = State,
+        /// "40" = Partners). Closes the dead-push-down gap the prior code
+        /// only exercised in <see cref="LacertMCP.Server.Odbc.SqlTemplates"/>
+        /// unit tests.
+        /// </summary>
+        public Task<IReadOnlyList<DetailRow>> ReadDetail(
+            string clientNumber,
+            int? seriesFilter,
+            CancellationToken cancellationToken = default)
         {
-            // F11 — wrap with WireLog.Record.
-            return WireLog.Record<IReadOnlyList<DetailRow>>("ReadDetail", new { clientNumber }, () =>
+            cancellationToken.ThrowIfCancellationRequested();
+            // F11 — wrap with WireLog.Record. Args carry seriesFilter so the
+            // operator can grep the log for "Series=11" pulls.
+            return WireLog.Record<IReadOnlyList<DetailRow>>(
+                "ReadDetail", new { clientNumber, seriesFilter }, () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
+                RequireRegistered();
                 ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
-                IReadOnlyList<DetailRow> result = module.Details.TryGetValue(clientNumber, out var list)
-                    ? (IReadOnlyList<DetailRow>)list.ToList()
-                    : Array.Empty<DetailRow>();
+                if (!module.Details.TryGetValue(clientNumber, out var list))
+                {
+                    return Task.FromResult<IReadOnlyList<DetailRow>>(Array.Empty<DetailRow>());
+                }
+                IEnumerable<DetailRow> rows = list;
+                if (seriesFilter.HasValue)
+                {
+                    int wanted = seriesFilter.Value;
+                    // Safe int.Parse per the numeric-string invariant enforced
+                    // by DetailsTools.ValidateDetailWrite (P14-055). A row whose
+                    // Series somehow violates the invariant (e.g. seeded by a
+                    // test that bypassed the validator) is excluded rather than
+                    // throwing — the filter is a "rows that match" semantic.
+                    rows = rows.Where(r => int.TryParse(r.Series, NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out var s) && s == wanted);
+                }
+                IReadOnlyList<DetailRow> result = rows.ToList();
                 return Task.FromResult(result);
             });
         }
 
         /// <summary>
-        /// TY19+ EFilings JOIN EFStatuses for the active module/year. Returns
-        /// flat row dicts so the shape matches what an ODBC join would yield
-        /// in live mode.
+        /// DATA1 LEFT OUTER JOIN EFilings LEFT OUTER JOIN EFStatuses for the
+        /// active module/year. Returns flat row dicts so the shape matches
+        /// what an ODBC LEFT-OUTER-JOIN would yield in live mode.
+        ///
+        /// <para>
+        /// P15-056 — the previous sim implementation used a LINQ INNER join
+        /// from EFilings, dropping (a) clients with no eFiling and
+        /// (b) eFilings with no status. <see cref="SqlTemplates.EfStatusJoin"/>
+        /// has been LEFT OUTER from Clients since P14-053; matching the sim
+        /// path here closes the parity divergence the moment Phase 9 wires
+        /// live reads (otherwise sim returns N rows, live returns N+K).
+        /// </para>
         /// </summary>
-        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatus()
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatus(
+            CancellationToken cancellationToken = default)
+            => ReadEFStatus(sinceUtc: null, cancellationToken);
+
+        /// <summary>
+        /// P15-010 — EF status join with optional since-date filter for the
+        /// "watch e-file status across the firm" poll workflow
+        /// (REQUIREMENTS §1.4). When <paramref name="sinceUtc"/> is non-null
+        /// the join excludes rows whose <c>StatusDate</c> is strictly older
+        /// than the threshold; client-without-eFiling rows are also dropped
+        /// in this branch (they have null StatusDate and the workflow only
+        /// wants rows that changed since the threshold). When null the
+        /// classic full LEFT OUTER JOIN runs and client-without-eFiling rows
+        /// surface with null EFiling/Status columns per P15-056.
+        ///
+        /// <para>
+        /// Live mode dispatches <see cref="SqlTemplates.EfStatusJoinSince"/>
+        /// (filtered) or <see cref="SqlTemplates.EfStatusJoin"/> (unfiltered).
+        /// </para>
+        /// </summary>
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatus(
+            DateTime? sinceUtc,
+            CancellationToken cancellationToken = default)
         {
-            // F11 — wrap with WireLog.Record. No args (uses active context).
+            cancellationToken.ThrowIfCancellationRequested();
+            // F11 — wrap with WireLog.Record. sinceUtc carried in args so the
+            // operator's poll cadence is visible in the log.
             return WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadEFStatus", args: null, () =>
+                "ReadEFStatus",
+                new { sinceUtc = sinceUtc?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) },
+                () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
+                RequireRegistered();
                 ThrowIfLiveUnwired();
                 var module = RequireSimModule(ctx);
 
-                var joined = from f in module.EFilings
-                             join s in module.EFStatuses on f.Id equals s.EFilingId
-                             select (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+                // LEFT OUTER from Clients so clients without EFilings still
+                // appear (with null EFiling/Status columns); LEFT OUTER from
+                // EFilings so an EFiling with no EFStatus row also appears
+                // (with null Status/StatusDate). Mirrors SqlTemplates.EfStatusJoin.
+                var joined = from c in module.Clients.Values
+                             from f in module.EFilings
+                                 .Where(x => string.Equals(x.ClientId, c.ClientNumber, StringComparison.OrdinalIgnoreCase))
+                                 .DefaultIfEmpty()
+                             from s in module.EFStatuses
+                                 .Where(x => f != null && x.EFilingId == f.Id)
+                                 .DefaultIfEmpty()
+                             select new
                              {
-                                 ["EFilingId"] = f.Id,
-                                 ["ClientId"] = f.ClientId,
-                                 ["EFId"] = f.EFId,
-                                 ["InstanceId"] = f.InstanceId,
-                                 ["Status"] = s.Status,
-                                 ["StatusDate"] = s.StatusDate,
+                                 Row = (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+                                 {
+                                     ["ClientId"] = c.Fields.TryGetValue("C1_0", out var c10) ? c10 : c.ClientNumber,
+                                     ["EFilingId"] = f?.Id,
+                                     ["EFId"] = f?.EFId,
+                                     ["InstanceId"] = f?.InstanceId,
+                                     ["Status"] = s?.Status,
+                                     ["StatusDate"] = s?.StatusDate,
+                                 },
+                                 StatusDate = s?.StatusDate,
                              };
-                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(joined.ToList());
+                IEnumerable<IReadOnlyDictionary<string, object?>> result;
+                if (sinceUtc.HasValue)
+                {
+                    var since = sinceUtc.Value.Date;
+                    result = joined
+                        .Where(x => x.StatusDate != null
+                                    && DateTime.TryParse(x.StatusDate, CultureInfo.InvariantCulture,
+                                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                                        out var dt)
+                                    && dt.Date >= since)
+                        .Select(x => x.Row);
+                }
+                else
+                {
+                    result = joined.Select(x => x.Row);
+                }
+                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result.ToList());
             });
         }
 
@@ -640,9 +934,12 @@ namespace LacertMCP.Server.Session
         public async Task<int> WriteField(
             int table, string clientNumber, string field, object? value,
             int? subClientID = null, string? stateAbbrev = null,
-            bool dryRun = false, string? idempotencyKey = null)
+            bool dryRun = false, string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireRegistered();
             RejectIfReadOnly("WriteField", table: table, fieldName: field);
 
             // Spec §2 table-access invariant: DATA6 (Display) and DATA7
@@ -662,11 +959,20 @@ namespace LacertMCP.Server.Session
                     });
             }
 
+            // P15-051 — type-whitelist the value BEFORE BuildPayload so the
+            // normalized form is what gets fingerprinted (otherwise int 42 vs
+            // JsonElement(42) hash differently and silently break replay).
+            // Rejects non-scalar shapes (Array / Object JsonElement, arbitrary
+            // CLR objects) with FieldWriteInvalid (9015) before any wire
+            // marshalling could silently corrupt a numeric DBF cell.
+            value = NormalizeFieldWriteValue(value, field);
+
             // P14-005 — per-key serialization. Concurrent same-key calls wait
             // here so TryReplay → execute → StoreIdempotent runs atomically.
             // Null/empty key: skip locking (no idempotency contract to honor).
             return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute the payload fingerprint when there's
                 // an idempotency key. JSON serialize + SHA-256 + base64 is
                 // wasted work on the common no-key write path.
@@ -783,9 +1089,12 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public async Task<int> WriteDetail(
             string clientNumber, DetailRow row, int? replaceIndex = null,
-            bool dryRun = false, string? idempotencyKey = null)
+            bool dryRun = false, string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireRegistered();
             // Detail-row writes target a whole row (Series/Code/Amount) — no
             // single "field" to name, so we surface just the operation +
             // active module/year via RejectIfReadOnly's context payload.
@@ -798,6 +1107,7 @@ namespace LacertMCP.Server.Session
 
             return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
@@ -872,8 +1182,10 @@ namespace LacertMCP.Server.Session
         /// the assigned ClientNumber on success.
         /// </summary>
         public async Task<CreateClientResult> CreateClient(
-            CreateClientArgs args, bool dryRun = false, string? idempotencyKey = null)
+            CreateClientArgs args, bool dryRun = false, string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
             // CreateClient writes a whole DATA1 row (5-field ctor on the SDK
             // side); there is no single field to surface, so the read-only
@@ -888,6 +1200,7 @@ namespace LacertMCP.Server.Session
 
             return await ExecuteWithIdempotencyLock<CreateClientResult>(idempotencyKey, async () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
@@ -908,6 +1221,27 @@ namespace LacertMCP.Server.Session
                 {
                     throw new LacerteSDKError(SyntheticStatusCodes.TaxYearTooOld,
                         new Dictionary<string, object?> { ["taxYear"] = ctx.Year });
+                }
+
+                // P15-059 — defense-in-depth canonicalization. The tool layer
+                // (CreateClientTools) already canonicalizes operator-supplied
+                // aliases ("1040" → "Individual", "1120S" → "SCorporate", ...)
+                // before constructing CreateClientArgs, but a direct caller of
+                // _session.CreateClient that bypassed the tool would otherwise
+                // re-introduce sim/live divergence. The live SDK's
+                // IClient(TaxType, ...) ctor rejects form-number variants with
+                // TaxModuleMismatch (14); sim accepts them via AcceptsTaxType.
+                // Canonicalize here so the value that flows into both
+                // ApplySimCreateClient and _bridge.CreateClient is always the
+                // spec-mandated ReturnType. When CanonicalizeTaxType returns
+                // null (unknown module OR alias not in the module's set), we
+                // leave args.TaxType unchanged so the downstream sim
+                // TaxModuleMismatch gate fires with the same payload it does
+                // today (preserves existing test expectations).
+                var canonicalTaxType = Modules.CanonicalizeTaxType(ctx.Module, args.TaxType);
+                if (canonicalTaxType != null && !string.Equals(canonicalTaxType, args.TaxType, StringComparison.Ordinal))
+                {
+                    args = args with { TaxType = canonicalTaxType };
                 }
 
                 // F11 — log AFTER client-side validation gates (read-only +
@@ -984,7 +1318,61 @@ namespace LacertMCP.Server.Session
             {
                 throw new LacerteSDKError(SyntheticStatusCodes.ContextNotSet);
             }
+            // P15-043 — proactive 24h auth expiry probe. Without this gate
+            // a tool call after the +24h ticket window hits the SDK and
+            // gets back the raw integer 203 NotSignedIn with no remediation
+            // hint. LoginExpired (9007) carries the operator-friendly
+            // "Run lacerte_register to re-authenticate" string. The check
+            // is free (one DateTimeOffset comparison) and turns the
+            // cliff-edge 24h failure into a clean structured error.
+            ThrowIfAuthExpired();
             return ctx;
+        }
+
+        // P15-050 — manager-side IsRegistered gate. CLAUDE.md "Simulation
+        // and live must be observationally identical for the happy path"
+        // requires this: without it, sim accepts WriteField/ReadClient/etc
+        // before any Register() call (the SDK would reject with NotSignedIn
+        // 203). Sim's IsRegistered latch is set by Register() AccessGranted
+        // (lines 244, 228), so a fresh manager that never called Register
+        // surfaces the same NotSignedIn the SDK would emit.
+        //
+        // Call this AFTER RequireContext at every read/write chokepoint
+        // (except SessionStatus — which is the operator's escape hatch
+        // and must NOT gate on registration).
+        private void RequireRegistered()
+        {
+            if (!IsRegistered)
+            {
+                throw new LacerteSDKError(StatusCodes.NotSignedIn,
+                    new Dictionary<string, object?>
+                    {
+                        ["reason"] = "Register() must succeed (AccessGranted) before this operation. " +
+                                     "In live mode the SDK would reject with NotSignedIn 203; the sim path " +
+                                     "matches that behavior so flows are observationally identical (CLAUDE.md " +
+                                     "two-mode discipline).",
+                    });
+            }
+        }
+
+        // P15-043 — synchronous probe. Throws LoginExpired (9007) when
+        // ExpiresAt has lapsed; never fires before Register() (ExpiresAt
+        // is null until AccessGranted, and those pre-register failures
+        // surface via RequireContext / RequireRegistered separately).
+        // Side-effect: flips IsRegistered to false so SessionStatus is
+        // honest about the now-expired state.
+        private void ThrowIfAuthExpired()
+        {
+            if (ExpiresAt.HasValue && DateTimeOffset.UtcNow >= ExpiresAt.Value)
+            {
+                IsRegistered = false;
+                throw new LacerteSDKError(SyntheticStatusCodes.LoginExpired,
+                    new Dictionary<string, object?>
+                    {
+                        ["expiredAt"] = ExpiresAt.Value.ToString("O"),
+                        ["minutesPastExpiry"] = (DateTimeOffset.UtcNow - ExpiresAt.Value).TotalMinutes,
+                    });
+            }
         }
 
         // Synchronous read-only gate — fires before ANY await on writes.
@@ -1279,14 +1667,11 @@ namespace LacertMCP.Server.Session
         // ===================================================================
         // Internals — row-shape clone for read paths
         //
-        // P14-043/P14-070 — The old whole-module SimSnapshot/SimRestore pair
-        // is gone. Dry-run write chokepoints use per-operation undo closures
-        // returned by ApplySim*WithUndo helpers above. The change drops dry-run
-        // cost from O(active-module) to O(1) and resolves the stale "TODO
-        // Stream A" pointing at SimulationStore.Snapshot/Restore (task #23
-        // completed; the broader Snapshot/Restore primitive is intentionally
-        // not used here because it clones every module, not just the active
-        // one, and the dry-run contract only needs single-op rollback).
+        // Per-call deep clone of only the active module — cheaper than
+        // SimulationStore.Snapshot/Restore (which clones every module) and
+        // sufficient because dry-run writes only touch the active context's
+        // module. See P14-043/P14-070 for the prior whole-module snapshot
+        // removal.
         // ===================================================================
 
         private static Dictionary<string, object?> CloneRow(DbfRow src)
@@ -1311,9 +1696,16 @@ namespace LacertMCP.Server.Session
         // P14-005 — wraps the (TryReplay → execute body → StoreIdempotent)
         // triple in a per-key SemaphoreSlim so concurrent same-key writes are
         // serialized. Null/empty key bypasses locking entirely (no idempotency
-        // contract). The semaphore stays in _idempotencyLocks for the life of
-        // the session — cheap to leak (one SemaphoreSlim per unique key) and
-        // removing introduces a separate race.
+        // contract).
+        //
+        // P15-012 / P15-055 — lock entries are opportunistically evicted
+        // alongside cache entries by EvictIdempotencyEntry, so the lock map
+        // is bounded by IdempotencyCacheMaxEntries (10k) — same invariant
+        // as the cache. A concurrent waiter may briefly hold a since-evicted
+        // semaphore — worst case is one extra execution of the body
+        // (observationally equivalent to a cache miss); the atomic-pair
+        // TryRemove in EvictIdempotencyEntry keeps a new GetOrAdd from
+        // having its semaphore destroyed.
         private async Task<T> ExecuteWithIdempotencyLock<T>(string? key, Func<Task<T>> body)
         {
             if (body == null) throw new ArgumentNullException(nameof(body));
@@ -1333,6 +1725,32 @@ namespace LacertMCP.Server.Session
             }
         }
 
+        // P15-012 / P15-055 — atomic remove + dispose of the lock entry
+        // alongside the cache entry, so the lock map stays a strict subset
+        // of the cache map. Uses the ConcurrentDictionary KeyValuePair
+        // overload of TryRemove (atomic compare-and-remove) so a concurrent
+        // GetOrAdd that swapped in a new semaphore between TryGetValue and
+        // TryRemove does NOT get its semaphore destroyed.
+        //
+        // Skip dispose if CurrentCount != 1 (held or waiters present): the
+        // next eviction cycle will catch it once the holder releases. This
+        // bounds the worst-case lock-map size at IdempotencyCacheMaxEntries +
+        // (currently held entries) — practically the same as the cache cap.
+        private void EvictIdempotencyEntry(string key)
+        {
+            _idempotencyCache.TryRemove(key, out _);
+            if (_idempotencyLocks.TryGetValue(key, out var sem) && sem.CurrentCount == 1)
+            {
+                var pair = new KeyValuePair<string, SemaphoreSlim>(key, sem);
+                // ConcurrentDictionary's KeyValuePair overload is atomic:
+                // removes only if the current value still equals the snapshot.
+                if (((ICollection<KeyValuePair<string, SemaphoreSlim>>)_idempotencyLocks).Remove(pair))
+                {
+                    sem.Dispose();
+                }
+            }
+        }
+
         private bool TryReplayIdempotent<T>(string? key, string payload, out T cached)
         {
             cached = default!;
@@ -1343,18 +1761,77 @@ namespace LacertMCP.Server.Session
                 // P14-013/P14-064 — expired entries: treat as miss + evict.
                 if (DateTimeOffset.UtcNow - entry.CreatedAt > IdempotencyTtl)
                 {
-                    _idempotencyCache.TryRemove(key!, out _);
+                    // P15-016 — log the expiry so an operator can attribute
+                    // a silent re-execute to TTL expiry rather than first
+                    // time. PII-safe: the key is operator-supplied.
+                    try
+                    {
+                        var ageMs = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds;
+                        WireLog.RecordSync<bool>("Idempotency.expired",
+                            new { key, ageMs },
+                            () => true);
+                    }
+                    catch { /* logging is best-effort */ }
+                    EvictIdempotencyEntry(key!);
                     return false;
                 }
                 if (entry.PayloadFingerprint == payload)
                 {
-                    if (entry.Result is T match) { cached = match; return true; }
-                    // Cached result type mismatch — treat as conflict.
+                    if (entry.Result is T match)
+                    {
+                        // P15-016 — log the cache hit so the operator can
+                        // tell a successful tool call apart from one that
+                        // actually hit the wire. Without this, a cached
+                        // replay produces NO log line at all (the outer
+                        // WireLog.Record wrapper sits BELOW the cache check),
+                        // which is the opposite of what an audit log needs.
+                        try
+                        {
+                            var ageMs = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds;
+                            WireLog.RecordSync<bool>("Idempotency.hit",
+                                new { key, ageMs },
+                                () => true);
+                        }
+                        catch { /* logging is best-effort */ }
+                        cached = match;
+                        return true;
+                    }
+                    // P15-074 — fingerprint MATCHES but cached return type
+                    // does not (e.g., key reused across operations where the
+                    // first cached a CreateClientResult and the second
+                    // requests int). The legacy throw used the "different
+                    // payload fingerprint" reason, which was factually wrong
+                    // for this branch and sent diagnosticians chasing a
+                    // canonicalization bug that wasn't there. Split into a
+                    // dedicated branch with the correct reason + the
+                    // cached + requested type names in the context dict.
+                    var typeData = new Dictionary<string, object?>
+                    {
+                        ["idempotencyKey"] = key,
+                        ["reason"] = "Idempotency key reused across operations with different return types.",
+                        ["cachedType"] = entry.Result?.GetType().FullName ?? "null",
+                        ["requestedType"] = typeof(T).FullName,
+                        ["existingEntryCreatedAt"] = entry.CreatedAt.ToString("O"),
+                        ["existingEntryAgeMs"] = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds,
+                    };
+                    throw new LacerteSDKError(SyntheticStatusCodes.IdempotencyConflict, typeData);
                 }
+                // P15-016 — attach the existing entry's CreatedAt to the
+                // 9102 context dict so the operator sees BOTH timestamps
+                // when triaging a key collision; P15-074 — fingerprint-
+                // mismatch branch carries cachedFingerprintPrefix +
+                // requestedFingerprintPrefix (first 8 chars only, full
+                // base64 is noise).
+                var cachedFp = entry.PayloadFingerprint ?? string.Empty;
+                var requestedFp = payload ?? string.Empty;
                 var data = new Dictionary<string, object?>
                 {
                     ["idempotencyKey"] = key,
                     ["reason"] = "Idempotency key reused with a different payload fingerprint.",
+                    ["existingEntryCreatedAt"] = entry.CreatedAt.ToString("O"),
+                    ["existingEntryAgeMs"] = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds,
+                    ["cachedFingerprintPrefix"] = cachedFp.Substring(0, Math.Min(8, cachedFp.Length)),
+                    ["requestedFingerprintPrefix"] = requestedFp.Substring(0, Math.Min(8, requestedFp.Length)),
                 };
                 throw new LacerteSDKError(SyntheticStatusCodes.IdempotencyConflict, data);
             }
@@ -1368,30 +1845,197 @@ namespace LacertMCP.Server.Session
                 payload, result, DateTimeOffset.UtcNow);
 
             // P14-013/P14-064 — opportunistic eviction when over cap. Drop
-            // expired entries first; if still over cap, drop the single
-            // oldest entry by CreatedAt. Single LINQ scan over ~10k entries
-            // is fine for the cold path.
-            if (_idempotencyCache.Count > IdempotencyCacheMaxEntries)
+            // expired entries first; if still over cap, batch-drop the
+            // oldest ~10% so the OrderBy sort cost is paid once every
+            // IdempotencyEvictionBatchSize writes instead of every write
+            // at steady-state-at-cap.
+            //
+            // P15-041 — gate the eviction work behind a single-flight
+            // Interlocked.CompareExchange so concurrent writers crossing
+            // the cap don't each independently sort the whole dictionary.
+            // Losers just skip eviction; if still over cap on the next
+            // write they get another turn.
+            //
+            // P15-012/P15-055 — every cache removal here goes through
+            // EvictIdempotencyEntry, which also disposes the matching
+            // _idempotencyLocks entry. Keeps the lock map bounded by
+            // the same cap.
+            if (_idempotencyCache.Count > IdempotencyCacheMaxEntries
+                && Interlocked.CompareExchange(ref _evictingIdempotency, 1, 0) == 0)
             {
-                var cutoff = DateTimeOffset.UtcNow - IdempotencyTtl;
-                foreach (var kv in _idempotencyCache)
+                try
                 {
-                    if (kv.Value.CreatedAt < cutoff)
+                    var cutoff = DateTimeOffset.UtcNow - IdempotencyTtl;
+                    int expiredDropped = 0;
+                    foreach (var kv in _idempotencyCache)
                     {
-                        _idempotencyCache.TryRemove(kv.Key, out _);
+                        if (kv.Value.CreatedAt < cutoff)
+                        {
+                            EvictIdempotencyEntry(kv.Key);
+                            expiredDropped++;
+                        }
                     }
+                    string? oldestDroppedKey = null;
+                    string? oldestDroppedCreatedAt = null;
+                    if (_idempotencyCache.Count > IdempotencyCacheMaxEntries)
+                    {
+                        var toDrop = _idempotencyCache
+                            .OrderBy(kv => kv.Value.CreatedAt)
+                            .Take(IdempotencyEvictionBatchSize)
+                            .Select(kv => new { kv.Key, kv.Value.CreatedAt })
+                            .ToArray();
+                        if (toDrop.Length > 0)
+                        {
+                            oldestDroppedKey = toDrop[0].Key;
+                            oldestDroppedCreatedAt = toDrop[0].CreatedAt.ToString("O");
+                            foreach (var item in toDrop)
+                            {
+                                EvictIdempotencyEntry(item.Key);
+                            }
+                        }
+                    }
+                    // P15-016 — emit one summary line per eviction pass so
+                    // an evicted-then-replayed key that silently becomes a
+                    // double-write is post-hoc traceable.
+                    try
+                    {
+                        WireLog.RecordSync<bool>("Idempotency.evicted",
+                            new
+                            {
+                                cacheSize = _idempotencyCache.Count,
+                                expiredDropped,
+                                oldestDroppedKey,
+                                oldestDroppedCreatedAt,
+                            },
+                            () => true);
+                    }
+                    catch { /* logging is best-effort */ }
                 }
-                if (_idempotencyCache.Count > IdempotencyCacheMaxEntries)
+                finally
                 {
-                    var oldestKey = _idempotencyCache
-                        .OrderBy(kv => kv.Value.CreatedAt)
-                        .Select(kv => kv.Key)
-                        .FirstOrDefault();
-                    if (oldestKey != null)
-                    {
-                        _idempotencyCache.TryRemove(oldestKey, out _);
-                    }
+                    Volatile.Write(ref _evictingIdempotency, 0);
                 }
+            }
+        }
+
+        // P15-050 / P15-043 — internal test seam. Some bridge-fake tests
+        // (live-mode + a recording / fake ILacerteBridge) bypass the real
+        // Register() path because it would call Bridge.Registration.
+        // GetStoredAppId() and throw AppNotRegistered on a CI box with no
+        // credential store entry. The seam pretends Register() AccessGranted
+        // happened so the new RequireRegistered + ThrowIfAuthExpired gates
+        // pass without round-tripping the COM call. Also lets the P15-043
+        // expiry test pin ExpiresAt in the past without re-running Register.
+        internal void SetRegisteredForTest(bool value)
+        {
+            IsRegistered = value;
+            RegisteredAt = value ? DateTimeOffset.UtcNow : (DateTimeOffset?)null;
+            ExpiresAt = value ? DateTimeOffset.UtcNow.AddHours(24) : (DateTimeOffset?)null;
+        }
+        internal void SetExpiresAtForTest(DateTimeOffset? expiresAt) => ExpiresAt = expiresAt;
+
+        // P15-062 — internal test seam. Lets tests pin the eviction +
+        // expiry behavior via a real entry without round-tripping every
+        // write through the chokepoint (which would make the cap test
+        // O(10k+) actual write operations). Production never calls this.
+        internal int IdempotencyCacheCount => _idempotencyCache.Count;
+        internal int IdempotencyLockCount => _idempotencyLocks.Count;
+        internal bool TryGetIdempotencyEntryForTest(string key, out IdempotencyCacheEntry entry)
+            => _idempotencyCache.TryGetValue(key, out entry!);
+        internal void ForceExpireIdempotencyEntryForTest(string key)
+        {
+            if (_idempotencyCache.TryGetValue(key, out var e))
+            {
+                _idempotencyCache[key] = new IdempotencyCacheEntry(
+                    e.PayloadFingerprint, e.Result,
+                    DateTimeOffset.UtcNow - IdempotencyTtl - TimeSpan.FromSeconds(1));
+            }
+        }
+        internal void SeedIdempotencyEntryForTest(string key, DateTimeOffset createdAt)
+        {
+            _idempotencyCache[key] = new IdempotencyCacheEntry(
+                PayloadFingerprint: "test", Result: 0, CreatedAt: createdAt);
+        }
+
+        // P15-051 — type-whitelist for FieldWriteTools.value. The bridge
+        // layer's BridgeInputValidation.ValidateValue only branches on
+        // string-typed values (with a self-aware comment "type whitelisting
+        // is the session-manager's job"); a JsonElement(Array) or arbitrary
+        // CLR object reaches the wire unchecked and either marshals as a
+        // junk DBF value (silent corruption) or surfaces as a generic COM
+        // HRESULT (loses the precise reason). The session-level normalizer
+        // runs BEFORE BuildPayload so int 42 and JsonElement(42) produce
+        // the SAME fingerprint — idempotency replay stays stable across
+        // JSON-binding pathways. Throws FieldWriteInvalid (9015) for any
+        // non-scalar shape with {field, clrType, reason} context.
+        //
+        // CONTRACT (audit-finding P15-051 refined recommendation):
+        // - null → passes through as null (writable fields may legitimately
+        //   clear a value).
+        // - JsonElement → only Null/String/True/False/Number kinds accepted;
+        //   Number coerced to long > decimal > double in that priority so
+        //   the in-sim CLR type closely matches what a JSON-bound caller
+        //   would observe at the tool surface.
+        // - CLR types: string, bool, integer family (sbyte..ulong), float,
+        //   double, decimal, DateTime, DateTimeOffset are whitelisted.
+        // - Everything else → FieldWriteInvalid with clrType.GetType().FullName.
+        internal static object? NormalizeFieldWriteValue(object? value, string field)
+        {
+            if (value is null) return null;
+            if (value is JsonElement je)
+            {
+                switch (je.ValueKind)
+                {
+                    case JsonValueKind.Null:
+                        return null;
+                    case JsonValueKind.String:
+                        return je.GetString();
+                    case JsonValueKind.True:
+                        return true;
+                    case JsonValueKind.False:
+                        return false;
+                    case JsonValueKind.Number:
+                        if (je.TryGetInt64(out var l)) return l;
+                        if (je.TryGetDecimal(out var d)) return d;
+                        return je.GetDouble();
+                    default:
+                        throw new LacerteSDKError(
+                            SyntheticStatusCodes.FieldWriteInvalid,
+                            new Dictionary<string, object?>
+                            {
+                                ["field"] = field,
+                                ["clrType"] = $"JsonElement({je.ValueKind})",
+                                ["reason"] = "value must be a JSON scalar (string/number/bool/null); arrays and objects are not accepted.",
+                            });
+                }
+            }
+            switch (value)
+            {
+                case string:
+                case bool:
+                case sbyte:
+                case byte:
+                case short:
+                case ushort:
+                case int:
+                case uint:
+                case long:
+                case ulong:
+                case float:
+                case double:
+                case decimal:
+                case DateTime:
+                case DateTimeOffset:
+                    return value;
+                default:
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.FieldWriteInvalid,
+                        new Dictionary<string, object?>
+                        {
+                            ["field"] = field,
+                            ["clrType"] = value.GetType().FullName ?? "<unknown>",
+                            ["reason"] = "value must be a JSON-serializable scalar (string, number, bool, DateTime, or null).",
+                        });
             }
         }
 

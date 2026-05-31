@@ -46,13 +46,27 @@ namespace LacertMCP.Cli.Commands
 
             var jsonOpt = new Option<bool>("--json", () => false,
                 "Emit a machine-parseable JSON array instead of the human table.");
+            // P15-066: filtering options for operators sanity-checking the tool surface
+            // before pasting into a Claude Desktop / Cursor MCP config.
+            var filterOpt = new Option<string?>("--filter", () => null,
+                "Case-insensitive regex matched against tool name (e.g. '^lacerte_ef_' for e-file tools).");
+            var nameOpt = new Option<string?>("--name", () => null,
+                "Print one tool's full surface (all parameter descriptions). Exit 1 if no match.");
+            var namesOnlyOpt = new Option<bool>("--names-only", () => false,
+                "Print one tool name per line, no descriptions. Pairs with shell pipelines.");
 
             cmd.AddOption(jsonOpt);
+            cmd.AddOption(filterOpt);
+            cmd.AddOption(nameOpt);
+            cmd.AddOption(namesOnlyOpt);
 
             cmd.SetHandler((context) =>
             {
                 var asJson = context.ParseResult.GetValueForOption(jsonOpt);
-                context.ExitCode = Run(asJson, Console.Out);
+                var filter = context.ParseResult.GetValueForOption(filterOpt);
+                var name = context.ParseResult.GetValueForOption(nameOpt);
+                var namesOnly = context.ParseResult.GetValueForOption(namesOnlyOpt);
+                context.ExitCode = Run(asJson, filter, name, namesOnly, Console.Out, Console.Error);
             });
 
             return cmd;
@@ -74,9 +88,80 @@ namespace LacertMCP.Cli.Commands
             public bool Optional { get; set; }
         }
 
+        /// <summary>
+        /// Back-compat overload — preserved for older test call sites that pre-date the
+        /// P15-066 filter / name / names-only parameters.
+        /// </summary>
         public static int Run(bool asJson, TextWriter writer)
+            => Run(asJson, filter: null, nameExact: null, namesOnly: false, writer, Console.Error);
+
+        public static int Run(
+            bool asJson,
+            string? filter,
+            string? nameExact,
+            bool namesOnly,
+            TextWriter writer,
+            TextWriter stderr)
         {
             var tools = DiscoverTools();
+
+            // P15-066: apply --filter (regex on Name) before any output branch.
+            if (!string.IsNullOrEmpty(filter))
+            {
+                Regex re;
+                try
+                {
+                    re = new Regex(filter!, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                }
+                catch (ArgumentException ex)
+                {
+                    stderr.WriteLine($"Invalid --filter regex: {ex.Message}");
+                    return 2;
+                }
+                tools = tools.Where(t => re.IsMatch(t.Name)).ToList();
+            }
+
+            // --name <exact>: print one tool's full surface, or exit 1 if absent.
+            if (!string.IsNullOrEmpty(nameExact))
+            {
+                var match = tools.FirstOrDefault(t => string.Equals(t.Name, nameExact, StringComparison.Ordinal));
+                if (match == null)
+                {
+                    stderr.WriteLine($"No tool matched name '{nameExact}'.");
+                    return 1;
+                }
+                writer.WriteLine(match.Name);
+                if (!string.IsNullOrEmpty(match.Description))
+                {
+                    writer.WriteLine($"  {match.Description}");
+                }
+                writer.WriteLine($"  declaringType: {match.DeclaringType}");
+                if (match.Parameters.Count > 0)
+                {
+                    writer.WriteLine("  parameters:");
+                    foreach (var p in match.Parameters)
+                    {
+                        var opt = p.Optional ? "?" : "";
+                        writer.WriteLine($"    - {p.Name}{opt}: {p.Type}");
+                        if (!string.IsNullOrEmpty(p.Description))
+                        {
+                            writer.WriteLine($"        {p.Description}");
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            // --names-only: one tool name per line. Pairs cleanly with shell pipelines.
+            // Mutually exclusive with --json; --names-only wins (documented).
+            if (namesOnly)
+            {
+                foreach (var t in tools.OrderBy(x => x.Name, StringComparer.Ordinal))
+                {
+                    writer.WriteLine(t.Name);
+                }
+                return 0;
+            }
 
             if (asJson)
             {

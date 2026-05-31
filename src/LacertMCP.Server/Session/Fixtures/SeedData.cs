@@ -96,7 +96,6 @@ namespace LacertMCP.Server.Session.Fixtures
         // ----------------------------------------------------------------
         // Detail-row starter sets. 2-3 rows per client is enough to exercise
         // read/write paths; expand to 5-15 once the chokepoint methods land.
-        // TODO: expand to 5-15 per client per task #17.
         //
         // Series IDs (P14-055): the detail-file Series column is a NUMERIC
         // Lacerte screen identifier per spec §2 and the live ODBC wire

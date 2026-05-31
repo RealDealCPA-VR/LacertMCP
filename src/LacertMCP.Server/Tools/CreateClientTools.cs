@@ -54,7 +54,7 @@ namespace LacertMCP.Server.Tools
             [Description("Last name (individual). Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
             [Description("EmailID. Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailID,
             [Description("If true, validate + simulate the create then roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result; same key + different payload throws 9102.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call (audit P15-060); replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null)
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -156,6 +156,19 @@ namespace LacertMCP.Server.Tools
                 // (it just appends to the active module store) — so the gate
                 // lives here in the tool layer. The live SDK enforces server-
                 // side; we just surface the error earlier with the right name.
+                //
+                // P15-059 — after the accept-gate, canonicalize the operator's
+                // (possibly colloquial) alias (e.g. "1040", "1120S",
+                // "S-Corporation") to the canonical spec-mandated ReturnType
+                // ("Individual", "SCorporate", ...) BEFORE building
+                // CreateClientArgs. The live SDK's IClient(TaxType, ...)
+                // constructor accepts only the 9 spec strings; passing the
+                // form-number variant verbatim would yield TaxModuleMismatch
+                // (14) on a happy-path operator request, violating CLAUDE.md's
+                // two-mode discipline ("sim and live observationally identical").
+                // Canonicalizing here means downstream (manager → sim → bridge)
+                // only ever sees the spec alphabet.
+                string canonicalTaxType = taxType;
                 if (_session.Context != null)
                 {
                     var moduleChar = _session.Context.Module;
@@ -172,6 +185,13 @@ namespace LacertMCP.Server.Tools
                                 ["reason"] = $"TaxType '{taxType}' is not valid for module '{moduleChar}'.",
                             });
                     }
+                    // Accept-gate passed → canonicalization MUST return non-null
+                    // (same alias set, same case-insensitive match). The null-
+                    // coalesce keeps the local variable nullable-flow happy and
+                    // degrades gracefully to the operator-supplied value if a
+                    // future divergence between AcceptsTaxType and
+                    // CanonicalizeTaxType ever sneaks in.
+                    canonicalTaxType = Modules.CanonicalizeTaxType(moduleChar, taxType) ?? taxType;
                 }
 
                 // Year guard fires inside session.CreateClient via context;
@@ -191,7 +211,7 @@ namespace LacertMCP.Server.Tools
 
                 var args = new CreateClientArgs(
                     ClientID: clientID,
-                    TaxType: taxType,
+                    TaxType: canonicalTaxType,
                     FirstName: firstName,
                     LastName: lastName,
                     EmailID: emailID);
@@ -208,7 +228,7 @@ namespace LacertMCP.Server.Tools
                         new Dictionary<string, object?>
                         {
                             ["clientID"] = clientID,
-                            ["taxType"] = taxType,
+                            ["taxType"] = canonicalTaxType,
                         });
                 }
 

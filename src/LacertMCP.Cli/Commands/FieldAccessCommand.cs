@@ -68,17 +68,26 @@ namespace LacertMCP.Cli.Commands
                 }
                 var table = context.ParseResult.GetValueForOption(tableOpt);
                 var year = context.ParseResult.GetValueForOption(yearOpt);
-                context.ExitCode = RunList(moduleStr[0], table, year, Console.Out);
+                // P15-067: pass stdout + stderr explicitly so the routing is grep-able
+                // at the closure boundary, not buried in the method.
+                context.ExitCode = RunList(moduleStr[0], table, year, Console.Out, Console.Error);
             });
 
             return list;
         }
 
+        /// <summary>
+        /// Back-compat overload — preserved for existing call sites that pre-date the
+        /// P15-067 <c>stderr</c> parameter. Routes errors to <see cref="Console.Error"/>.
+        /// </summary>
         public static int RunList(char module, int table, int year, TextWriter writer)
+            => RunList(module, table, year, writer, Console.Error);
+
+        public static int RunList(char module, int table, int year, TextWriter writer, TextWriter stderr)
         {
             if (Modules.FileBasenameFor(module) == null)
             {
-                Console.Error.WriteLine($"Unknown module '{module}'. Expected one of I/C/P/S/F/R/T/N/B.");
+                stderr.WriteLine($"Unknown module '{module}'. Expected one of I/C/P/S/F/R/T/N/B.");
                 return 1;
             }
 
@@ -151,24 +160,34 @@ namespace LacertMCP.Cli.Commands
                 var ml = context.ParseResult.GetValueForOption(maxLenOpt);
                 var src = context.ParseResult.GetValueForOption(sourceOpt)!;
                 var note = context.ParseResult.GetValueForOption(noteOpt);
-                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, Console.Out);
+                // P15-067: pass stdout + stderr explicitly so the routing is grep-able
+                // at the closure boundary.
+                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, Console.Out, Console.Error);
             });
 
             return set;
         }
 
+        /// <summary>
+        /// Back-compat overload — preserved for existing call sites that pre-date the
+        /// P15-067 <c>stderr</c> parameter. Routes errors to <see cref="Console.Error"/>.
+        /// </summary>
         public static int RunSet(char module, int table, string field, string accessRaw,
             string? dataType, int? maxLength, string source, string? note, TextWriter writer)
+            => RunSet(module, table, field, accessRaw, dataType, maxLength, source, note, writer, Console.Error);
+
+        public static int RunSet(char module, int table, string field, string accessRaw,
+            string? dataType, int? maxLength, string source, string? note, TextWriter writer, TextWriter stderr)
         {
             var basename = Modules.FileBasenameFor(module);
             if (basename == null)
             {
-                Console.Error.WriteLine($"Unknown module '{module}'.");
+                stderr.WriteLine($"Unknown module '{module}'.");
                 return 1;
             }
             if (!Enum.TryParse<FieldAccess>(accessRaw, ignoreCase: true, out var access))
             {
-                Console.Error.WriteLine($"Invalid --access '{accessRaw}'. Expected: " +
+                stderr.WriteLine($"Invalid --access '{accessRaw}'. Expected: " +
                     string.Join(" | ", Enum.GetNames(typeof(FieldAccess))));
                 return 1;
             }
@@ -212,16 +231,31 @@ namespace LacertMCP.Cli.Commands
 
         // ---- discover ---------------------------------------------------------------
 
+        // P15-029: Exit code 3 = "not implemented through this verb" (intentionally
+        // distinct from Doctor's exit 2 = "environment skip" — see DoctorCommand
+        // summary). Operators on Windows + live SDK should NOT toggle env vars; the
+        // work was reassigned to LacertMCP.FieldAccessDumper.exe (the standalone
+        // introspector that ships under src/LacertMCP.FieldAccessDumper/).
         private static Command BuildDiscoverCommand()
         {
             var discover = new Command("discover",
-                "Bulk-introspect the access map by write-probing each field (requires live SDK + Windows).");
+                "Stub — bulk introspection moved to LacertMCP.FieldAccessDumper.exe. " +
+                "This verb exits 3 with a redirect message.");
             discover.SetHandler((context) =>
             {
                 Console.Out.WriteLine(
-                    "Bulk introspection requires live SDK + Windows. " +
-                    "See follow-up F5 in Todo.md for the introspection script roadmap.");
-                context.ExitCode = 2;
+                    "Bulk field-access introspection is not exposed through this command — " +
+                    "use the standalone introspector instead:");
+                Console.Out.WriteLine(
+                    "  LacertMCP.FieldAccessDumper.exe --module <I|C|P|S|F|R|T|N|B> --table <1..7>");
+                Console.Out.WriteLine(
+                    "  (Windows + live Lacerte SDK required at runtime; project lives under src/LacertMCP.FieldAccessDumper/).");
+                Console.Out.WriteLine();
+                Console.Out.WriteLine(
+                    "To set entries by hand off-box: `lacerte-mcp field-access set --module <X> --table <N> " +
+                    "--field <FIELD> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown>` " +
+                    "or edit Schema/FieldAccessMap/base/<module>.json directly.");
+                context.ExitCode = 3;
             });
             return discover;
         }

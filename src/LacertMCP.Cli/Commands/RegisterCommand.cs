@@ -92,17 +92,26 @@ namespace LacertMCP.Cli.Commands
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
             {
+                // Off-Windows is an intentional cross-platform dev convenience: the
+                // operator can't complete the Intuit consent ceremony anyway, so we
+                // keep the AppID-minted state usable for downstream sim work and
+                // exit 0. (P15-028 refinedRecommendation: only Win32NT flips to 3.)
                 Console.WriteLine("[stub] Live Intuit registration requires Windows + Lacerte SDK.");
                 Console.WriteLine("       AppID is persisted; re-run `lacerte-mcp register` on the Windows box to complete.");
                 return 0;
             }
 
-            // The actual ITPRegistration COM call lands in Phase 9 (Bridge/Registration.cs).
-            // Today the bridge is not yet wrapped — print honest status rather than throw.
-            Console.WriteLine("[stub] Lacerte SDK bridge not yet wired into the CLI (Phase 9 task #63).");
-            Console.WriteLine("       AppID persisted; once Phase 9 lands this command will invoke");
-            Console.WriteLine("       ITPRegistration.Register(appName, appId, taxYear) and print the TAPIStatus.");
-            return 0;
+            // P15-028: On Windows the operator reasonably expects ITPRegistration.Register()
+            // to fire. It doesn't yet (Phase 9 task #63). Returning 0 here makes the silent
+            // no-op look like success to any `if ($LASTEXITCODE -eq 0)` wrapper, and the
+            // operator only discovers the failure 24h later when tools start returning
+            // NotSignedIn (9101). Route the "partial" message to stderr and return exit 3
+            // so wrapping scripts can distinguish "AppID minted, consent skipped" from
+            // "fully complete".
+            Console.Error.WriteLine("[partial] AppID minted, but the Intuit consent ceremony is not yet wired into the CLI (Phase 9 task #63).");
+            Console.Error.WriteLine("          First MCP tool call will return NotSignedIn (9101) until Phase 9 ships and you re-run `lacerte-mcp register`.");
+            Console.Error.WriteLine("          Track progress: Todo.md Phase 9 #63 (Bridge/Registration.cs).");
+            return 3;
         }
     }
 }

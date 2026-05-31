@@ -23,7 +23,11 @@ namespace LacertMCP.Tests.Tools
         [Fact]
         public async Task SessionStatus_FreshManager_ReturnsSimMode_NotRegistered_NoContext()
         {
-            var tools = NewTools();
+            // P15-050 — use the explicit unregistered helper so this test
+            // continues to assert the fresh-manager-pre-Register snapshot
+            // shape (the default NewSimManager auto-registers now to keep
+            // legacy chokepoint tests green).
+            var tools = new SessionTools(ToolTestHelpers.NewUnregisteredSimManager());
             var json = await tools.LacerteSessionStatus();
             var root = ToolTestHelpers.Parse(json);
 
@@ -38,8 +42,10 @@ namespace LacertMCP.Tests.Tools
         [Fact]
         public async Task SessionStatus_AfterRegister_ReflectsRegistered()
         {
+            // P15-050 — NewSimManager already auto-Registers; no need to call
+            // Register again. The original double-Register was harmless but
+            // confusing post-P15-050.
             var mgr = ToolTestHelpers.NewSimManager();
-            await mgr.Register();
             var tools = new SessionTools(mgr);
 
             var root = ToolTestHelpers.Parse(await tools.LacerteSessionStatus());

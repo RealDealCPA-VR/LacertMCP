@@ -1,12 +1,10 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using LacertMCP.Server.Bridge;
 using LacertMCP.Server.Errors;
-using LacertMCP.Server.Schema;
 using LacertMCP.Server.Session;
 using Xunit;
 
@@ -27,29 +25,9 @@ namespace LacertMCP.Tests.Resilience
         private const int WritableTable = 1;
         private const string WritableField = "C1_15";
 
-        private static readonly object _seedLock = new object();
-
         private static void EnsureWritableFieldSeeded()
-        {
-            lock (_seedLock)
-            {
-                var t = typeof(FieldAccessMapLoader);
-                var cacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-                var cache = cacheField?.GetValue(null) as ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>;
-                if (cache == null) return;
-
-                var key = $"{WritableModule}|{WritableTable}|{WritableField}";
-                if (cache.TryGetValue(WritableModule, out var existing) && existing.ContainsKey(key)) return;
-
-                var seed = new Dictionary<string, FieldEntry>();
-                if (existing != null)
-                {
-                    foreach (var kv in existing) seed[kv.Key] = kv.Value;
-                }
-                seed[key] = new FieldEntry(FieldAccess.ReadWrite, Source: "autoreconnect-seed");
-                cache[WritableModule] = seed;
-            }
-        }
+            => LacertMCP.Tests.AccessMapInMemorySeed.EnsureWritableFieldSeeded(
+                WritableModule, WritableTable, WritableField, source: "autoreconnect-seed");
 
         private static LacerteSessionManager NewLiveManagerWithFake(ILacerteBridge bridge)
         {
@@ -59,7 +37,13 @@ namespace LacertMCP.Tests.Resilience
                 types: new[] { typeof(ILacerteBridge), typeof(IDictionary<string, string?>) },
                 modifiers: null);
             Assert.NotNull(ctor);
-            return (LacerteSessionManager)ctor!.Invoke(new object?[] { bridge, null });
+            var mgr = (LacerteSessionManager)ctor!.Invoke(new object?[] { bridge, null });
+            // P15-050 — pretend Register() AccessGranted ran so the new
+            // RequireRegistered gate passes. The real Register() path would
+            // need an AppId in the OS credential store; the bridge-fake
+            // tests don't exercise it.
+            mgr.SetRegisteredForTest(true);
+            return mgr;
         }
 
         [Fact]

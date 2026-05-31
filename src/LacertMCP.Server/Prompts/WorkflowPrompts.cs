@@ -65,8 +65,29 @@ Step 3 — Create the client record
 
 Step 4 — Seed core address / phone fields (if collected during intake)
   • For each field, call `lacerte_field_write` with `{{ table: 1, clientNumber, field, value }}`.
-  • Common DATA1 fields for I: C1_1 (first name), C1_2 (last name), C1_3 (email). Use `lacerte_field_access_map` if unsure which field is writable.
   • Pass `idempotencyKey` (e.g. ""intake-{name}-name"") so a retry does not double-write.
+
+  Canonical Tax-Organizer column → Lacerte DATA1 field mapping (module I).
+  Only the three name/email fields are confirmed off-spec today; every other
+  code below is marked TBD pending the live FieldAccessDumper introspection
+  pass (Todo.md item F5). Do NOT invent codes — if the operator hands you a
+  column not in this table, call `lacerte_field_access_map` (it returns the
+  per-field access enum) and STOP if the field is missing from the map.
+
+    | CSV column           | Lacerte field | Confirmed?           |
+    | -------------------- | ------------- | -------------------- |
+    | firstName            | C1_1          | yes (spec §4)        |
+    | lastName             | C1_2          | yes (spec §4)        |
+    | emailID / email      | C1_3          | yes (spec §4)        |
+    | addressLine1         | TBD-F5        | no — gated on F5     |
+    | addressLine2         | TBD-F5        | no — gated on F5     |
+    | city                 | TBD-F5        | no — gated on F5     |
+    | state                | TBD-F5        | no — gated on F5     |
+    | zip                  | TBD-F5        | no — gated on F5     |
+    | homePhone            | TBD-F5        | no — gated on F5     |
+    | workPhone            | TBD-F5        | no — gated on F5     |
+    | dateOfBirth (DOB)    | TBD-F5        | no — gated on F5     |
+    | ssn / taxpayerID     | TBD-F5        | no — gated on F5     |
 
 Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at intake)
   • For each row, call `lacerte_detail_write` with `{{ clientNumber, row: {{ Series, Code, ... }} }}`.
@@ -201,6 +222,77 @@ Idempotency note: if a retry replays the same `idempotencyKey` with the same pay
             return new GetPromptResult
             {
                 Description = "Apply a field write across many clients with dry-run preview, idempotency keys, stop-on-first-error.",
+                Messages = new List<PromptMessage>
+                {
+                    new PromptMessage
+                    {
+                        Role = Role.User,
+                        Content = new TextContentBlock { Text = text },
+                    },
+                },
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // /lacerte_csv_intake
+        // -----------------------------------------------------------------
+
+        [McpServerPrompt(Name = "lacerte_csv_intake")]
+        [Description(
+            "Bulk-onboard clients from a CSV / Tax-Organizer export. Operator declares a column→field mapping ONCE up " +
+            "front; the prompt walks per-row create + seed + per-row outcome report. Mirrors REQUIREMENTS §1.3 " +
+            "(\"Bootstrapping new clients from a CSV or Tax Organizer responses\"). " +
+            "Steps reference lacerte_session_status, lacerte_set_context, lacerte_field_access_map, " +
+            "lacerte_client_create, and lacerte_field_write.")]
+        public static GetPromptResult CsvIntake(
+            [Description("Optional human label for the source spreadsheet (e.g. \"2024-organizer-batch-A.csv\"). Used only in operator-facing report rows. Default: \"intake.csv\".")]
+            string? sourceLabel = null,
+            [Description("Optional row-count hint so the LLM can warn the operator when the batch crosses the >50 confirmation gate. Default: 0 (ask the operator).")]
+            int rowCount = 0)
+        {
+            var label = string.IsNullOrEmpty(sourceLabel) ? "intake.csv" : sourceLabel!;
+            var countNote = rowCount > 0
+                ? $"You will process {rowCount} row(s) from `{label}`."
+                : $"Ask the operator how many rows are in `{label}` before you begin.";
+
+            var text =
+$@"You are bulk-onboarding clients from `{label}`. {countNote} Bulk creates are HIGH RISK — the steps below ENFORCE a one-shot column→field mapping declaration AND per-row idempotency keys so a retry never double-creates.
+
+Step 1 — Confirm session + context
+  • `lacerte_session_status` — must be `isRegistered: true`.
+  • If `context` is null, ask the operator for `(dataPath, taxYear, module)` and call `lacerte_set_context` with `readOnly: false`.
+
+Step 2 — Declare the column → field mapping ONCE
+  • Ask the operator (or read the CSV header row) for the column names present in `{label}`.
+  • Build a mapping dictionary `{{ csvColumn: lacerteField }}` per the canonical table in the `lacerte_client_intake` prompt's Step 4 (firstName=C1_1, lastName=C1_2, emailID=C1_3 are confirmed; address/phone/DOB/SSN are TBD pending Todo.md F5).
+  • For each TBD field the operator wants to seed, call `lacerte_field_access_map` to confirm the field exists and is `ReadWrite` on the active module. If `Unknown` / `ReadOnly` / `Hidden`, STOP and tell the operator that field cannot be bulk-seeded yet.
+
+Step 3 — Validate the row payloads BEFORE any write
+  • For each CSV row, build `{{ clientID, taxType, firstName, lastName, emailID }}` plus a `seedFields` dict from the column mapping.
+  • Reject any row missing the 5 required fields up front; report which row + which field is missing in your operator summary BEFORE any side-effect.
+  • If row count > 50, ask the operator for explicit confirmation before proceeding.
+
+Step 4 — Per-row create (stop-on-first-error by default)
+  • For each row, generate `idempotencyKey = \""csv-intake-<batchId>-<clientID>\""` so a retry of the same row replays the cached result instead of double-creating.
+  • Call `lacerte_client_create` with the row's 5 required fields. If `lacerte_client_create` supports a `seedFields` param (P15-038 part 1), pass the seed dict in the SAME call so create + seed share one idempotency unit. Otherwise:
+      - call `lacerte_client_create` first;
+      - capture the returned `clientNumber`;
+      - then loop the seedFields dict, calling `lacerte_field_write` for each `{{ table: 1, clientNumber, field, value, idempotencyKey: \""csv-intake-<batchId>-<clientID>-<field>\"" }}`.
+  • On `DuplicateClient` (status 18) STOP unless the operator explicitly said \""skip duplicates\""; on any other non-Success statusCode, STOP and surface the structured `userMessage` + `remediation`.
+
+Step 5 — Verify a 3-row sample
+  • Pick 3 random successful `clientNumber`s from the batch.
+  • Call `lacerte_client_read` on each and confirm at least one seed field matches the CSV value the operator gave you.
+
+Step 6 — Report
+  • Render a short table: `csvRow | clientID | clientNumber | status | seedFieldsWritten | error?`
+  • Totals at the bottom: requested / created / duplicateSkipped / failed / verifiedSample.
+
+Surface every tool error verbatim — do not summarize away a 9xxx status code. If you stopped mid-batch, name the exact row index so the operator can fix + resume.";
+
+            return new GetPromptResult
+            {
+                Description = "Bulk-onboard clients from a CSV / Tax-Organizer export with a one-shot column→field mapping, per-row idempotency, stop-on-first-error.",
                 Messages = new List<PromptMessage>
                 {
                     new PromptMessage

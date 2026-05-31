@@ -1,3 +1,4 @@
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -39,13 +40,14 @@ namespace LacertMCP.Server.Tools.Internal
             int? subClientID,
             string? stateAbbrev,
             bool dryRun,
-            string? idempotencyKey)
+            string? idempotencyKey,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
                 var status = await session.WriteField(
                     table, clientNumber, field, value,
-                    subClientID, stateAbbrev, dryRun, idempotencyKey);
+                    subClientID, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
 
                 var info = StatusCodes.GetStatusInfo(status);
                 return (object)new

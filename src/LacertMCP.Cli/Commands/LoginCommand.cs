@@ -60,15 +60,19 @@ namespace LacertMCP.Cli.Commands
 
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
             {
+                // Off-Windows: keep exit 0 (cross-platform dev convenience —
+                // operator can't run the ceremony off-Windows anyway).
                 Console.WriteLine("[stub] Live login requires Windows + Lacerte SDK.");
                 return 0;
             }
 
-            // Live wiring lands in Phase 9 (Bridge/Registration.cs).
-            Console.WriteLine("[stub] Lacerte SDK bridge not yet wired into the CLI (Phase 9 task #63).");
-            Console.WriteLine("       Once Phase 9 lands this will silently refresh if the 24h cache");
-            Console.WriteLine("       is warm, or surface the Intuit sign-in window if expired.");
-            return 0;
+            // P15-028: Login runs on a cron (every 24h ticket refresh). A silent exit-0
+            // here lets a stale ticket lurk forever — the operator's cron logs would
+            // show "success" while tools return TicketExpired (9103). Route the partial
+            // message to stderr and return exit 3 so the cron wrapper can alarm.
+            Console.Error.WriteLine("[partial] Login refresh not yet wired (Phase 9 task #63).");
+            Console.Error.WriteLine("          Existing 24h ticket cannot be renewed until upgrade — tools will return TicketExpired (9103) once the current ticket lapses.");
+            return 3;
         }
     }
 }

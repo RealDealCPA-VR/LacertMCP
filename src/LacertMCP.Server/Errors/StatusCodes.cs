@@ -172,53 +172,59 @@ namespace LacertMCP.Server.Errors
                 "Failed to create the per-client detail file (.IDx) for a new client.",
                 "Verify disk space and write permission on the datapath; retry lacerte_client_create."),
 
+            // P15-036: DBxError remediations name the offending file via context keys
+            // {expectedDbf, dataPath} when the live bridge populates them. The expected
+            // filename is DATA<N><ModuleChar><YY>.DBF (e.g. DATA1I24.DBF for Individual TY24).
+            // If context.expectedDbf is absent, the throw originated from a path that didn't
+            // enrich it (e.g. the sim's old "row not found" path) and the operator should
+            // file an issue — DBxError is reserved for real DBF I/O failures from the SDK.
             [DB1Error] = new StatusInfo(
                 "DB1Error",
                 Severity.Error,
                 "A table-specific DBF error occurred (DATA1).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA1<moduleChar><YY>.DBF (e.g. DATA1I24.DBF for Individual TY24). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB2Error] = new StatusInfo(
                 "DB2Error",
                 Severity.Error,
-                "A table-specific DBF error occurred (DATA2).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "A table-specific DBF error occurred (DATA2 — dependents/partners/shareholders).",
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA2<moduleChar><YY>.DBF (e.g. DATA2I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB3Error] = new StatusInfo(
                 "DB3Error",
                 Severity.Error,
-                "A table-specific DBF error occurred (DATA3).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "A table-specific DBF error occurred (DATA3 — state info).",
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA3<moduleChar><YY>.DBF (e.g. DATA3I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB4Error] = new StatusInfo(
                 "DB4Error",
                 Severity.Error,
-                "A table-specific DBF error occurred (DATA4).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "A table-specific DBF error occurred (DATA4 — state sub-client info).",
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA4<moduleChar><YY>.DBF (e.g. DATA4I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB5Error] = new StatusInfo(
                 "DB5Error",
                 Severity.Error,
-                "A table-specific DBF error occurred (DATA5).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "A table-specific DBF error occurred (DATA5 — F4 return status).",
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA5<moduleChar><YY>.DBF (e.g. DATA5I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB6Error] = new StatusInfo(
                 "DB6Error",
                 Severity.Error,
                 "A table-specific DBF error occurred (DATA6).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA6<moduleChar><YY>.DBF (e.g. DATA6I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB7Error] = new StatusInfo(
                 "DB7Error",
                 Severity.Error,
-                "A table-specific DBF error occurred (DATA7).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "A table-specific DBF error occurred (DATA7 — form list).",
+                "If context.expectedDbf is set, check that file under context.dataPath, then run Lacerte File -> Repair Indexes for the affected module/year. Expected filename is DATA7<moduleChar><YY>.DBF (e.g. DATA7I24.DBF). If expectedDbf is empty, this is likely a misrouted 'row not found' — file an issue with the wire log timestamp."),
 
             [DB8Error] = new StatusInfo(
                 "DB8Error",
                 Severity.Error,
                 "A table-specific DBF error occurred (DATA8 — reserved; if this fires, treat as SDK bug).",
-                "Check the table file on disk; run Lacerte's index-repair on the affected module/year."),
+                "If context.expectedDbf is set, check that file under context.dataPath, then file an issue with Intuit — DATA8 is reserved and not exposed by current SDK paths. If expectedDbf is empty, this is likely a misrouted error from the MCP layer — file an issue with the wire log timestamp."),
 
             [InValidClientName] = new StatusInfo(
                 "InValidClientName",

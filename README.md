@@ -2,7 +2,7 @@
 
 A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as tools an LLM can call. Wraps the Lacerte SDK (`LacerteSDK_Access` COM/.NET + `LacerteDSII` ODBC) over JSON-RPC/stdio.
 
-**Status:** v0.1.0 scaffolding — 481/492 tests passing (11 expected live-only skips), 0 failures, 0 warnings. Read/Write/Create tools, simulation store, ODBC layer, COM bridge scaffolding, CLI, prompts, and hardening primitives all land. Live verification requires a Windows + Lacerte + SDK box (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" section).
+**Status:** v0.1.0 scaffolding — 695/705 tests passing (10 expected live-only skips), 0 failures, 0 warnings. Read/Write/Create tools, simulation store, ODBC layer, COM bridge scaffolding, CLI, prompts, and hardening primitives all land. Live verification requires a Windows + Lacerte + SDK box (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" section).
 
 ## What this is
 
@@ -140,7 +140,7 @@ The `App.config` next to `LacertMCP.Server.exe` carries `useLegacyV2RuntimeActiv
 | `lacerte_forms_read` | DATA7 form rows for one client (read-only). | 5 |
 | `lacerte_detail_read` | Per-client detail file rows (Series/Code/Amount/Description). | 5 |
 | `lacerte_ef_status` | TY19+ EFilings JOIN EFStatuses for the active context. | 5 |
-| `lacerte_health` | Health probe. Returns "reachable (sim)" in sim mode. | 0 |
+| `lacerte_health` | Health probe. Returns a structured { mode, status } envelope (mode = "simulation"|"live", status = "reachable"); live HRESULT probe via _session.HealthProbe() is the Phase-9 follow-up. | 0 |
 
 ### Write / Create / Metadata tools (Phases 6-8)
 
@@ -164,6 +164,52 @@ Three first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Pr
 | `lacerte_bulk_field_update` | Bulk field write across many clients with mandatory dry-run preview (first N), idempotency keys, stop-on-first-error. | `table: int = 1`, `field: string` (required), `previewCount: int = 3` |
 
 Canonical step lists live in `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
+
+## Response envelope
+
+Every tool returns a JSON string with one of two shapes — success or error. Both are produced by `src/LacertMCP.Server/Errors/WrapToolHandler.cs` (the canonical implementation; any tool that bypasses it is a bug — see `ACCEPTANCE_CRITERIA.md` lines 33/100 for the spec). The shape is stable across all tools, in both simulation and live mode.
+
+**Success:**
+
+```json
+{
+  "success": true,
+  "result": { "rows": [/* ... */], "total": 42, "limit": 100, "offset": 0, "hasMore": false, "nextOffset": null },
+  "cid": "a1b2c3d4"
+}
+```
+
+`result` is the tool-specific payload (the example above is a trimmed `lacerte_client_list` response). `cid` is an 8-hex per-request correlation ID stamped by `WrapToolHandler`; the same `cid` appears on nested `WireLog.Record` entries in the disk log so an operator can grep the whole causal chain for one tool call.
+
+**Error:** see the `## Errors` section below for the full field list, semantics, and `origin` discriminator. The error envelope carries the same top-level `success: false`, the structured `statusCode` / `statusName` / `severity` / `userMessage` / `remediation` / `context` fields documented there, and the same `cid` correlation ID.
+
+**Redaction split (P15-006):** both envelopes are run through `WireLog.Redact(..., RedactionScope.Wire)` before they leave the process — a *narrow* keyset that scrubs only true secrets (SSN / EIN / TIN, bank / routing, DOB, email, phone). Operator-actionable strings like `context.reason`, `context.rawError`, detail-row `Description`, and address columns (`City` / `Zip`) survive on the wire so the LLM consumer has a real diagnostic to act on. The on-disk debug log (`logs/lacerte-YYYYMMDD.log`, when `LACERTE_DEBUG_WIRE=1`) uses a separate, broader keyset (`RedactionScope.Disk`) that does scrub those operator-facing columns — the asymmetry is intentional.
+
+## Errors
+
+Every tool returns one of two JSON envelope shapes — success or error. The error shape is consistent across all tools and includes a discriminator (`origin`) so consumers know where the fix lives:
+
+```json
+{
+  "success": false,
+  "statusCode": 9012,
+  "statusName": "UnknownFieldAccess",
+  "origin": "synthetic",
+  "severity": "error",
+  "userMessage": "...",
+  "remediation": "...",
+  "context": { /* structured retry hints, redacted of true secrets */ }
+}
+```
+
+The `origin` field is either:
+
+- `"sdk"` — codes **0–204**, real Lacerte SDK TAPIStatus (0–28) or TPSDKStatus (200–204) state. Look up the code in Intuit's SDK documentation; remediation is **operator-side** (the operator typically needs to fix something in Lacerte itself, re-auth, or correct a tax-data input).
+- `"synthetic"` — codes **9001–9299**, minted by this MCP **before** any SDK call. Pre-flight validation (9001–9099), auth lifecycle (9100–9199), or COM bridge / runtime (9200–9299). Remediation is usually **MCP-side** (fix the tool call args, flip a server config flag, or run a CLI command like `lacerte-mcp register`).
+
+Call the `lacerte_return_codes` tool for the full code catalog with names, severities, user messages, remediation strings, and the same `origin` discriminator per code. See `DECISIONS.md` 2026-05-30 "Synthetic statusCode range" + 2026-05-30 "Error envelope carries `origin` discriminator" for the design rationale.
+
+All `userMessage` and `remediation` strings are **en-US only** (see `DECISIONS.md` 2026-05-30 "Status messages are en-US only"). SDK-echoed text in `context.reason` / `context.rawError` is passed through unmodified.
 
 ## CLI
 

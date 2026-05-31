@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using LacertMCP.Server.Errors;
@@ -211,6 +212,39 @@ namespace LacertMCP.Server.Odbc
             "from [DATA1-Client Info] as ci " +
             "left outer join [EFilings] as ef on ci.C1_0 = ef.ClientId " +
             "left outer join [EFStatuses] as s on ef.Id = s.EFilingId";
+
+        /// <summary>
+        /// P15-010 — EF-status join filtered by a since-date threshold on
+        /// <c>EFStatusDate</c>. Used by the operator "watch e-file status"
+        /// poll workflow (REQUIREMENTS §1.4) so a 6-week e-file history
+        /// doesn't round-trip on every poll.
+        ///
+        /// <para>
+        /// The since-date is emitted as a SQL date literal in
+        /// <c>yyyy-MM-dd</c> (ISO 8601) since LacerteDSII (FoxPro-style)
+        /// does not honor ODBC parameter binding for date columns
+        /// reliably. The caller is responsible for passing a non-null
+        /// <see cref="DateTime"/>; this helper formats it via
+        /// <see cref="CultureInfo.InvariantCulture"/> to avoid locale
+        /// surprises. The same LEFT OUTER JOIN shape as <see cref="EfStatusJoin"/>
+        /// is preserved so client-without-eFiling rows still appear (their
+        /// null StatusDate is naturally excluded by the &gt;= comparison —
+        /// the workflow only wants rows that changed since the threshold,
+        /// so dropping the unsubmitted rows is correct).
+        /// </para>
+        /// </summary>
+        public static string EfStatusJoinSince(DateTime sinceUtc)
+        {
+            var iso = sinceUtc.ToString("yyyy-MM-dd",
+                System.Globalization.CultureInfo.InvariantCulture);
+            return
+                "select ci.C1_0 as ClientId, ef.Id as EFilingId, ef.EFId, ef.InstanceId, " +
+                "s.EFStatus as Status, s.EFStatusDate as StatusDate " +
+                "from [DATA1-Client Info] as ci " +
+                "left outer join [EFilings] as ef on ci.C1_0 = ef.ClientId " +
+                "left outer join [EFStatuses] as s on ef.Id = s.EFilingId " +
+                "where s.EFStatusDate >= {d '" + iso + "'}";
+        }
 
         // -------------------------------------------------------------------
         // Detail file reads (per-client [<CLIENT>-Detail] logical tables) — §5

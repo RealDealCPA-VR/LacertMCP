@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -27,8 +26,10 @@ namespace LacertMCP.Tests.Bridge
     {
         // -----------------------------------------------------------------
         // In-memory access-map seed. Mutates the loader's static cache via
-        // reflection — avoids the on-disk race that AccessMapTestFixture's
-        // file-write approach has with Stream B's parallel Tools tests.
+        // reflection (see AccessMapInMemorySeed) — avoids the on-disk race
+        // that AccessMapTestFixture's file-write approach has with the
+        // Tools/* tests that mutate the same FieldAccessMapLoader cache via
+        // AccessMapTestFixture.
         //
         // The session manager's WriteField calls FieldAccessMapLoader.AssertWritable
         // synchronously; we need at least one entry that resolves to ReadWrite
@@ -39,51 +40,9 @@ namespace LacertMCP.Tests.Bridge
         private const int WritableTable = 1;
         private const string WritableField = "C1_15";
 
-        private static readonly object _seedLock = new object();
-        private static bool _seeded;
-
         private static void EnsureWritableFieldSeeded()
-        {
-            // Idempotent: one-shot seed across all tests in this class.
-            // Mutating the loader's _moduleCache is process-wide, but since
-            // we ONLY add (never remove) entries, races with Stream B's
-            // tests are tolerable — their AccessMapTestFixture clears the
-            // cache and re-reads from disk every test, so they're unaffected
-            // by our additive entry.
-            //
-            // Actually safer: do the seed lazily per-test under a lock and
-            // re-seed if the cache got cleared since last test.
-            lock (_seedLock)
-            {
-                var t = typeof(FieldAccessMapLoader);
-                var cacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-                var cache = cacheField?.GetValue(null) as ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>;
-                if (cache == null) return; // loader internals changed; tests will surface that elsewhere.
-
-                if (cache.TryGetValue(WritableModule, out var existing) &&
-                    existing.ContainsKey(BuildKey(WritableModule, WritableTable, WritableField)))
-                {
-                    _seeded = true;
-                    return;
-                }
-
-                // Build a fresh map that has at minimum our writable entry
-                // plus whatever was on disk for the module.
-                var seed = new Dictionary<string, FieldEntry>();
-                if (existing != null)
-                {
-                    foreach (var kv in existing) seed[kv.Key] = kv.Value;
-                }
-                seed[BuildKey(WritableModule, WritableTable, WritableField)] =
-                    new FieldEntry(FieldAccess.ReadWrite, Source: "test-seed");
-                cache[WritableModule] = seed;
-                _seeded = true;
-                _ = _seeded; // suppress unused-field warning; field intent is "have we seeded this process".
-            }
-        }
-
-        private static string BuildKey(char module, int table, string field)
-            => $"{module}|{table}|{field}";
+            => LacertMCP.Tests.AccessMapInMemorySeed.EnsureWritableFieldSeeded(
+                WritableModule, WritableTable, WritableField, source: "bridge-wireup-seed");
 
 
         // -----------------------------------------------------------------
@@ -101,7 +60,13 @@ namespace LacertMCP.Tests.Bridge
                 types: new[] { typeof(ILacerteBridge), typeof(IDictionary<string, string?>) },
                 modifiers: null);
             Assert.NotNull(ctor);
-            return (LacerteSessionManager)ctor!.Invoke(new object?[] { bridge, null });
+            var mgr = (LacerteSessionManager)ctor!.Invoke(new object?[] { bridge, null });
+            // P15-050 — pretend Register() AccessGranted ran so the new
+            // RequireRegistered gate passes. The real Register() path would
+            // need an AppId in the OS credential store; the bridge-fake
+            // wire-up tests exercise the bridge routing, not registration.
+            mgr.SetRegisteredForTest(true);
+            return mgr;
         }
 
         // -----------------------------------------------------------------

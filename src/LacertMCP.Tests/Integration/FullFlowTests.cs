@@ -48,14 +48,18 @@ namespace LacertMCP.Tests.Integration
             Assert.NotNull(smitRow);
             Assert.True(smitRow!.ContainsKey("ClientNumber"));
 
-            // ----- 5. WriteField with a force-bypass (access map is empty in v1) -----
-            // Map ships empty so the access gate would fail-closed. Demonstrate
-            // the write chokepoint by exercising the dry-run path on a field
-            // that DOES go through the gate, asserting the structured error
-            // shape — proves the gate fires before any wire side-effect.
-            // C1_1 is Unknown in the empty v1 map → 9012 UnknownFieldAccess
-            // (distinct from 9001 FieldIsReadOnly, which is for known
-            // non-writable fields or read-only sessions).
+            // ----- 5. WriteField with no fixture seam — exercises the
+            // fail-closed access-map gate. The map ships {} in v1; the
+            // populated-map happy path is covered by
+            // FieldWriteRoundTripTests (P15-011) and the unit-level happy
+            // path tests in FieldWriteToolsTests, both of which use
+            // AccessMapTestFixture to seed I|1|C1_15 as ReadWrite.
+            //
+            // Here we assert the structured error shape — proves the gate
+            // fires before any wire side-effect. C1_1 is Unknown in the
+            // empty v1 map → 9012 UnknownFieldAccess (distinct from 9001
+            // FieldIsReadOnly, which is for known non-writable fields or
+            // read-only sessions).
             var writeErr = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteField(1, "1001", "C1_1", "NewFirst",
                     dryRun: true, idempotencyKey: "fullflow-field-1"));

@@ -57,6 +57,7 @@ The bar is "works flawlessly on the operator's box," not "ships to thousands of 
 - **Two-mode parity.** Simulation mode (off-Windows or `LACERTE_SIMULATION=1`) must return responses that are observationally identical to live mode for the happy path of every read tool.
 - **Auditability.** All write calls must be loggable via a debug flag (`LACERTE_DEBUG_WIRE=1` mirrors QB MCP's `QB_DEBUG_QBXML=1`).
 - **No silent failures.** Every SDK return code must be mapped to a structured MCP error — never pass an enum integer back to the client.
+- **Locale.** All MCP-layer `UserMessage` and `Remediation` strings (in `StatusCodes.StatusTable`, `SyntheticStatusCodes.StatusTable`, and the `GetStatusInfo` unknown-code fallback) are emitted in **en-US** only. SDK-echoed text in `context.reason` / `context.rawError` is passed through unmodified. See `DECISIONS.md` 2026-05-30 "Status messages are en-US only".
 
 ## Explicitly out of scope (for v1)
 

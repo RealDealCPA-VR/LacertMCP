@@ -67,6 +67,8 @@ namespace LacertMCP.Tests.Parity
         public async Task WriteField_Data2_AccessGateFiresFirst_FailsClosed(SessionMode mode)
         {
             using var mgr = ParitySessionFactory.For(mode);
+            // P15-050 — RequireRegistered gate now fires after RequireContext.
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathPData2024, 2024, 'P');
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteField(2, "1001", "C2_5", "x"));
@@ -81,6 +83,8 @@ namespace LacertMCP.Tests.Parity
         public async Task WriteField_Data3_AccessGateFiresFirst_FailsClosed(SessionMode mode)
         {
             using var mgr = ParitySessionFactory.For(mode);
+            // P15-050 — RequireRegistered gate now fires after RequireContext.
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteField(3, "1001", "C3_1", "x"));

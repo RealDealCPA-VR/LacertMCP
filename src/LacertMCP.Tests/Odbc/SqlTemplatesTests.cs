@@ -259,6 +259,24 @@ namespace LacertMCP.Tests.Odbc
             Assert.Contains("s.EFStatusDate as StatusDate", sql);
         }
 
+        // P15-010 — EfStatusJoinSince adds a `where s.EFStatusDate >= {d 'ISO'}`
+        // clause for the operator's "watch e-file status across the firm" poll
+        // workflow. Pin the SQL shape so a future refactor that mis-formats
+        // the date literal (e.g. switches to `{ts 'yyyy-MM-dd HH:mm:ss'}` and
+        // breaks LacerteDSII parsing) is caught here.
+        [Fact]
+        public void EfStatusJoinSince_Appends_Where_With_DateLiteral()
+        {
+            var sql = SqlTemplates.EfStatusJoinSince(new System.DateTime(2026, 4, 15));
+            Assert.Contains("[DATA1-Client Info]", sql);
+            Assert.Contains("left outer join [EFilings]", sql);
+            Assert.Contains("left outer join [EFStatuses]", sql);
+            Assert.Contains("where s.EFStatusDate >= {d '2026-04-15'}", sql);
+            // Projection still matches the canonical 6 columns.
+            Assert.Contains("as ClientId", sql);
+            Assert.Contains("as EFilingId", sql);
+        }
+
         // -------------------------------------------------------------------
         // Detail tables — per-client [<CLIENT>-Detail] logical table per §5
         // -------------------------------------------------------------------
