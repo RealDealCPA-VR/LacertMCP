@@ -148,5 +148,94 @@ namespace LacertMCP.Tests.Cli
 
             Assert.Equal(0, exit);
         }
+
+        // ----- P16-022: differentiated mint vs re-use message -----
+
+        /// <summary>
+        /// P16-022: on Windows, a re-run of `register` (existing AppID, no
+        /// --reset) must emit "Existing AppID re-used" on stderr, not the
+        /// "AppID minted" text — that's a factual lie on the re-run path
+        /// because nothing was minted. Cumulative with P15-028: still exit 3.
+        /// </summary>
+        [Fact]
+        public void Register_OnWin32NT_ReRun_StderrSays_Reused_NotMinted()
+        {
+            if (!OnWindows) return;
+
+            // First call mints; second call re-uses.
+            var originalOut = Console.Out;
+            var originalErr = Console.Error;
+            try
+            {
+                Console.SetOut(new StringWriter());
+                Console.SetError(new StringWriter());
+                RegisterCommand.Run("Test App", DateTime.UtcNow.Year - 1, reset: false);
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalErr);
+            }
+
+            // Now re-run with reset:false and inspect the stderr.
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exit;
+            try
+            {
+                Console.SetOut(stdout);
+                Console.SetError(stderr);
+                exit = RegisterCommand.Run("Test App", DateTime.UtcNow.Year - 1, reset: false);
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalErr);
+            }
+
+            Assert.Equal(3, exit);
+            var stderrText = stderr.ToString();
+            Assert.Contains("Existing AppID re-used", stderrText);
+            // The new-mint line must NOT appear on the re-use path.
+            Assert.DoesNotContain("AppID minted, but", stderrText);
+        }
+
+        // ----- P16-004: corrected error-code references -----
+
+        /// <summary>
+        /// P16-004: the login stub's stderr message must reference
+        /// LoginExpired (9007) — the actual proactive expiry code — not
+        /// TicketExpired (9103, which is InvalidAppId; TicketExpired is
+        /// not a defined StatusInfo name anywhere).
+        /// </summary>
+        [Fact]
+        public void Login_OnWin32NT_StderrReferences_LoginExpired_9007_NotTicketExpired_9103()
+        {
+            if (!OnWindows) return;
+
+            AppIdStore.Set(Guid.NewGuid());
+
+            var originalOut = Console.Out;
+            var originalErr = Console.Error;
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            try
+            {
+                Console.SetOut(stdout);
+                Console.SetError(stderr);
+                LoginCommand.Run("Test App", DateTime.UtcNow.Year - 1);
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+                Console.SetError(originalErr);
+            }
+
+            var stderrText = stderr.ToString();
+            Assert.Contains("LoginExpired", stderrText);
+            Assert.Contains("9007", stderrText);
+            Assert.DoesNotContain("TicketExpired", stderrText);
+            Assert.DoesNotContain("9103", stderrText);
+        }
     }
 }

@@ -4,6 +4,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml;
@@ -160,6 +161,12 @@ namespace LacertMCP.Cli.Commands
                     WriteIndented = true,
                     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                    // P16-068: load-bearing — the App.config remediation literally
+                    // contains `<startup>` and `<supportedRuntime>` XML, which the
+                    // default HTML-safe encoder turns into `<` noise that is
+                    // unreadable when an operator pastes it into a bug report.
+                    // Doctor JSON is shell/terminal/jq-bound, never embedded in HTML.
+                    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
                 };
                 // CRITICAL: PropertyNamingPolicy does NOT apply to enum values; without
                 // this converter ProbeStatus would serialize as the int 0/1/2/3.
@@ -193,6 +200,36 @@ namespace LacertMCP.Cli.Commands
                     break;
                 default:
                     writer.WriteLine("Result: OK (all probes green). Exit 0.");
+                    break;
+            }
+
+            // P16-073: append an exit-code-keyed "Next:" block to human output so
+            // doctor doesn't end as a probe table the operator has to context-switch
+            // to the README to act on. Mirrors the self-curing discipline status
+            // command adopted in P16-041. Skip on --json (JSON consumers have the
+            // exitCode + per-probe remediation already and the schema is contract-pinned
+            // by P15-027).
+            writer.WriteLine();
+            switch (exit)
+            {
+                case 0:
+                    writer.WriteLine("Next: `lacerte-mcp tools` lists what the server exposes. To go live, set LACERTE_LIVE=1 in your MCP client config (Claude Desktop / Cursor / Windsurf) and restart the host.");
+                    break;
+                case 1:
+                    // If AppID-missing is the only fail, push register; otherwise generic.
+                    var appIdFail = results.FirstOrDefault(r => r.Name == "AppID GUID" && r.Status == ProbeStatus.Fail);
+                    var failCount = results.Count(r => r.Status == ProbeStatus.Fail);
+                    if (appIdFail != null && failCount == 1)
+                    {
+                        writer.WriteLine("Next: run `lacerte-mcp register --app-name \"Operator Lacerte MCP\" --tax-year <year>` from an interactive PowerShell (the Intuit consent dialog needs a desktop).");
+                    }
+                    else
+                    {
+                        writer.WriteLine("Next: address the red probe(s) above (each has a `→` remediation). Re-run `lacerte-mcp doctor` to confirm green. See README.md Troubleshooting for context.");
+                    }
+                    break;
+                case 2:
+                    writer.WriteLine("Next: PARTIAL is normal off-Windows — Windows-only probes are skipped. For sim/dev work: `lacerte-mcp tools` lists the surface and `$env:LACERTE_SIMULATION = \"1\"` keeps the server in in-memory fixture mode. See README.md Quick Start.");
                     break;
             }
             return exit;
@@ -326,10 +363,27 @@ namespace LacertMCP.Cli.Commands
 
             // 6. LACERTE_DATA_PATH env (mode-independent — useful even off-Windows for sim)
             //    P15-031: when set, also probe the directory exists on disk.
-            results.AddRange(ProbeDataPathEnv("LACERTE_DATA_PATH"));
+            //    P16-023: per-env-var remediation + bonus tier-down so an operator
+            //    with LACERTE_DATA_ROOT correctly configured isn't told (falsely)
+            //    that DATA_PATH must be set via `lacerte_set_context`.
+            var dataRootSet = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT"));
+            results.AddRange(ProbeDataPathEnv(
+                "LACERTE_DATA_PATH",
+                unsetDetail: dataRootSet
+                    ? "not set; per-call dataPath will resolve from LACERTE_DATA_ROOT (current discovery covers this)"
+                    : "not set (call the `lacerte_set_context` tool per-session, or set LACERTE_DATA_PATH in env for a persistent default)",
+                unsetRemediation: null,
+                downgradeUnsetToPass: dataRootSet));
 
             // 6b. P15-031: LACERTE_DATA_ROOT env + directory-exists.
-            results.AddRange(ProbeDataPathEnv("LACERTE_DATA_ROOT"));
+            //    P16-023: distinct remediation — DATA_ROOT is NOT settable via
+            //    lacerte_set_context (that tool only writes DATA_PATH); the prior
+            //    copy-pasted message sent operators on a wild-goose chase.
+            results.AddRange(ProbeDataPathEnv(
+                "LACERTE_DATA_ROOT",
+                unsetDetail: "not set; `lacerte_list_datapaths` will fall back to C:\\Lacerte",
+                unsetRemediation: "Set LACERTE_DATA_ROOT in the MCP client config (or Windows env) to your install root, e.g. C:\\Lacerte. NOTE: this is NOT settable via lacerte_set_context — that tool only writes the current per-session DATA_PATH.",
+                downgradeUnsetToPass: false));
 
             // 6c. P15-031: FieldAccessMap base shards present — without them every
             //     write returns Unknown access; an operator with a corrupt build dir
@@ -672,16 +726,30 @@ namespace LacertMCP.Cli.Commands
         /// P15-031: env-presence + directory-exists pair. Yields ONE probe when the env
         /// var is unset (Warn) or TWO probes (presence Pass + directory-exists Pass/Fail)
         /// when set, so the operator can see both layers in the table.
+        ///
+        /// <para>
+        /// P16-023: per-env-var <paramref name="unsetDetail"/> + <paramref name="unsetRemediation"/>
+        /// so the DATA_PATH and DATA_ROOT warns can carry distinct guidance (the prior
+        /// copy-pasted message told operators DATA_ROOT was settable via
+        /// <c>lacerte_set_context</c>, which is false). When <paramref name="downgradeUnsetToPass"/>
+        /// is true, the unset state is reported as <see cref="ProbeStatus.Pass"/> instead
+        /// of <see cref="ProbeStatus.Warn"/> — used for DATA_PATH when DATA_ROOT is wired
+        /// (discovery already covers the gap, so the unset warn is a false positive).
+        /// </para>
         /// </summary>
-        private static IEnumerable<ProbeResult> ProbeDataPathEnv(string envVar)
+        private static IEnumerable<ProbeResult> ProbeDataPathEnv(
+            string envVar,
+            string unsetDetail,
+            string? unsetRemediation,
+            bool downgradeUnsetToPass)
         {
             var val = Environment.GetEnvironmentVariable(envVar);
             if (string.IsNullOrEmpty(val))
             {
                 yield return new ProbeResult($"{envVar} env",
-                    ProbeStatus.Warn,
-                    "not set (will need to call lacerte_set_context before any tool that reads/writes data)",
-                    null);
+                    downgradeUnsetToPass ? ProbeStatus.Pass : ProbeStatus.Warn,
+                    unsetDetail,
+                    unsetRemediation);
                 yield break;
             }
 
@@ -775,13 +843,47 @@ namespace LacertMCP.Cli.Commands
         /// is not a parseable GUID". The plain AppIdStore.Get() collapses both into
         /// null, which would mislead an operator who DID run register but hit a
         /// corruption — they'd see "not persisted" and re-mint, masking the bug.
+        ///
+        /// <para>
+        /// P16-058: when running on Windows + Live mode, the Absent and Ok branches
+        /// both acknowledge that <c>register</c> is currently a Phase 9 stub — the
+        /// AppID persists but the Intuit consent ceremony does not yet fire. Without
+        /// this honesty doctor would tell the operator "run register" (Absent) or
+        /// silently report Pass (Ok), then the first tool call would return
+        /// AppNotRegistered (9006) or LoginExpired (9007) and the operator would have
+        /// no idea why. Off-Windows or in sim mode we keep the original terse messages
+        /// (the operator can't complete the ceremony anyway and the Phase 9 caveat
+        /// is just noise in dev environments).
+        /// </para>
+        ///
+        /// <para>
+        /// PHASE-9-CLEANUP: when Phase 9 task #63 lands and
+        /// <c>ITPRegistration.Register()</c> actually fires in
+        /// <see cref="LacertMCP.Cli.Commands.RegisterCommand"/>, delete the Win32NT-Live
+        /// branches in both cases here — the canonical Absent remediation can return
+        /// to "Run `lacerte-mcp register` to mint and store one." and the Ok branch
+        /// can return to Pass without the Phase-9-stub caveat.
+        /// </para>
         /// </summary>
         private static ProbeResult ProbeAppId()
         {
             var diag = AppIdStore.GetDiagnostic(out var id, out var raw);
+            var onWindowsLive = Environment.OSVersion.Platform == PlatformID.Win32NT
+                                && Environment.GetEnvironmentVariable("LACERTE_LIVE") == "1"
+                                && Environment.GetEnvironmentVariable("LACERTE_SIMULATION") != "1";
+
             switch (diag)
             {
                 case AppIdStore.AppIdDiagnostic.Ok:
+                    if (onWindowsLive)
+                    {
+                        // Warn (not Pass) — the AppID is persisted but doctor can't verify
+                        // a successful ITPRegistration.Register() ever ran (Phase 9 stub).
+                        // Warn keeps exit code in the PARTIAL bucket (2), not FAIL (1).
+                        return new ProbeResult("AppID GUID",
+                            ProbeStatus.Warn,
+                            $"persisted ({AppIdStore.Mask(id)}) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")} — consent ceremony status unknown (Phase 9 stub: cannot verify a successful ITPRegistration.Register() ever ran). If first tool call returns AppNotRegistered (9006) or LoginExpired (9007), this is why.");
+                    }
                     return new ProbeResult("AppID GUID",
                         ProbeStatus.Pass,
                         $"persisted ({AppIdStore.Mask(id)}) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")}");
@@ -792,10 +894,13 @@ namespace LacertMCP.Cli.Commands
                         "Run `lacerte-mcp unregister --confirm` followed by `lacerte-mcp register` to re-mint a fresh AppID.");
                 case AppIdStore.AppIdDiagnostic.Absent:
                 default:
+                    var remediation = onWindowsLive
+                        ? "Run `lacerte-mcp register` to mint and store one. NOTE: on Windows + live mode this command is currently a Phase 9 stub — it persists the AppID and exits 3 with `[partial]`, but the Intuit consent ceremony is not yet wired (Todo.md Phase 9 task #63 / Bridge/Registration.cs). First MCP tool call will return AppNotRegistered (9006) or LoginExpired (9007) until that ships."
+                        : "Run `lacerte-mcp register` to mint and store one.";
                     return new ProbeResult("AppID GUID",
                         ProbeStatus.Fail,
                         "not persisted",
-                        "Run `lacerte-mcp register` to mint and store one.");
+                        remediation);
             }
         }
     }

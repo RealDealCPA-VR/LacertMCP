@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using LacertMCP.Server.Errors;
 using Xunit;
 
@@ -154,6 +155,156 @@ namespace LacertMCP.Tests.Errors
             Assert.NotEqual(
                 "Check the table file on disk; run Lacerte's index-repair on the affected module/year.",
                 info.Remediation);
+        }
+
+        [Fact]
+        public void Remediations_NeverNameNonexistentMcpTool_LacerteRegister_P16_011()
+        {
+            // P16-011 — guard rail: no remediation string may say
+            // `lacerte_register` because there is no LacerteRegister MCP
+            // tool — an LLM following that string will tools/call a non-
+            // existent name and loop. The CLI ceremony is `lacerte-mcp
+            // register` (hyphenated). This sentinel prevents regression:
+            // future contributors adding a new remediation string can't
+            // reintroduce the underscore form without a test failure.
+            var allRemediations =
+                SyntheticStatusCodes.StatusTable.Values.Select(v => v.Remediation)
+                .Concat(StatusCodes.StatusTable.Values.Select(v => v.Remediation))
+                .Where(r => r != null)
+                .ToList();
+            var offenders = allRemediations
+                .Where(r => Regex.IsMatch(r!, @"\blacerte_register\b"))
+                .ToList();
+            Assert.Empty(offenders);
+        }
+
+        [Fact]
+        public void UnknownFieldAccess_Remediation_P16_001_P16_016_PointsAtWorkingSurfaces()
+        {
+            // P16-001 / P16-016 — the prior remediation pointed at two dead-ends:
+            // (a) the `lacerte-mcp field-access discover` CLI verb that now exits 3
+            // with a redirect, and (b) a `force:true` parameter that no MCP tool
+            // exposes. Both made the most-common write-path error a tool-not-found
+            // loop. The new remediation must point at: (i) the in-session
+            // `lacerte_field_access_map` MCP tool for discovery, (ii) the
+            // `LacertMCP.FieldAccessDumper.exe` standalone for populate, and
+            // (iii) the `lacerte_reload_schema` MCP tool for refresh.
+            var info = SyntheticStatusCodes.StatusTable[SyntheticStatusCodes.UnknownFieldAccess];
+            Assert.NotNull(info.Remediation);
+            Assert.Contains("lacerte_field_access_map", info.Remediation!);
+            Assert.Contains("LacertMCP.FieldAccessDumper.exe", info.Remediation);
+            Assert.Contains("lacerte_reload_schema", info.Remediation);
+            // The dead-end strings must NOT appear in this catalog entry.
+            Assert.DoesNotContain("field-access discover", info.Remediation);
+            Assert.DoesNotContain("force:true", info.Remediation);
+        }
+
+        public static IEnumerable<object[]> AuthLifecycleRemediations => new[]
+        {
+            new object[] { SyntheticStatusCodes.AppNotRegistered, true, false },   // register-needs-shell
+            new object[] { SyntheticStatusCodes.LoginExpired, false, true },       // login-needs-shell
+            new object[] { SyntheticStatusCodes.ReAuthRequired, false, true },     // login (with register fallback)
+            new object[] { SyntheticStatusCodes.InvalidAppId, true, false },       // unregister/register
+            new object[] { StatusCodes.ConsentDenied, true, false },               // re-register
+            new object[] { StatusCodes.RegVersionBlocked, true, false },           // upgrade-then-register
+            new object[] { StatusCodes.NotSignedIn, false, true },                 // login
+        };
+
+        [Theory]
+        [MemberData(nameof(AuthLifecycleRemediations))]
+        public void AuthLifecycle_Remediations_FrameCliAsShellCommand_P16_015_P16_018(
+            int code, bool referencesRegister, bool referencesLogin)
+        {
+            // P16-015 / P16-018 — every auth-lifecycle remediation must verb-prefix
+            // CLI references with "Ask the operator to run" (or similar shell-command
+            // tag) so the LLM cannot confuse the CLI ceremony with a callable MCP
+            // tool name. The old "Run lacerte-mcp register" wording read like a
+            // bare command name an LLM might try to invoke; the new wording makes
+            // the operator-side action explicit.
+            var info = code >= LacerteSDKError.SyntheticCodeThreshold
+                ? SyntheticStatusCodes.StatusTable[code]
+                : StatusCodes.StatusTable[code];
+            Assert.NotNull(info.Remediation);
+            Assert.Contains("Ask the operator", info.Remediation!);
+
+            // CLI commands must appear hyphenated (lacerte-mcp ...), never
+            // underscored (lacerte_register).
+            Assert.DoesNotContain("lacerte_register", info.Remediation);
+
+            if (referencesRegister)
+            {
+                Assert.Contains("lacerte-mcp register", info.Remediation);
+            }
+            if (referencesLogin)
+            {
+                Assert.Contains("lacerte-mcp login", info.Remediation);
+            }
+        }
+
+        [Fact]
+        public void InValidClientName_Remediation_DoesNotContradict_ClientIDRegex_P16_019()
+        {
+            // P16-019 — code 24 is reused for three distinct gates (ClientID
+            // whitelist, single-character module, required name fields). The
+            // pre-fix remediation said "Use letters, numbers, spaces, hyphen/
+            // apostrophe" which actively contradicted CreateClientTools'
+            // ^[A-Z0-9]+$ regex — an LLM following the old text retried
+            // `O-Reilly`/`O'Reilly` and looped. The new text must NOT advise
+            // hyphens/apostrophes on the ClientID path; it MUST steer the
+            // operator at context.reason for the gate-specific rule.
+            var info = StatusCodes.StatusTable[StatusCodes.InValidClientName];
+            Assert.NotNull(info.Remediation);
+            // The old contradictory wording must be gone.
+            Assert.NotEqual(
+                "Use letters, numbers, spaces, hyphen/apostrophe only; avoid < > \" ' & / \\ | ?.",
+                info.Remediation);
+            // The new text must steer at context.reason and name the canonical
+            // ClientID regex so the LLM doesn't invent allowed characters.
+            Assert.Contains("context.reason", info.Remediation!);
+            Assert.Contains("^[A-Z0-9]+$", info.Remediation);
+            // Module-char cases need a hint too.
+            Assert.Contains("I/C/P/S/F/R/T/N/B", info.Remediation);
+        }
+
+        [Fact]
+        public void ContextNotSet_Remediation_NamesDiscoveryTools_P16_042()
+        {
+            // P16-042 — the first error every LLM consumer hits. The previous
+            // "Call lacerte_set_context first" was correct but operationally
+            // insufficient — the LLM had no signal that lacerte_list_datapaths
+            // is the discovery primitive, no module catalog tool, and no hint
+            // about sim-mode seeded paths. The new remediation must name all
+            // three so an LLM can build a valid call without a second error.
+            var info = SyntheticStatusCodes.StatusTable[SyntheticStatusCodes.ContextNotSet];
+            Assert.NotNull(info.Remediation);
+            Assert.Contains("lacerte_list_datapaths", info.Remediation!);
+            Assert.Contains("lacerte_list_modules", info.Remediation);
+            Assert.Contains("lacerte_set_context", info.Remediation);
+            // Sim-mode seeded paths surface so an LLM hitting an empty live
+            // datapath list off-Windows knows where the in-memory fixtures live.
+            Assert.Contains("C:\\Lacerte\\24Tax\\IData", info.Remediation);
+        }
+
+        [Theory]
+        [InlineData(SyntheticStatusCodes.BridgeUnavailable)]
+        [InlineData(SyntheticStatusCodes.InternalServerError)]
+        public void BridgeAndInternalErrorRemediations_NameCidAndLogPath_P16_065(int code)
+        {
+            // P16-065 — when the bridge crashes or the server throws, the
+            // envelope already carries `cid` (the per-request correlation ID
+            // stamped by WrapToolHandler.cs) and the wire log already lands
+            // under ./logs/lacerte-YYYYMMDD.log. The pre-fix remediation
+            // never closed the loop by telling the operator the cid IS the
+            // grep token, never named the resolved-log-path lookup
+            // (`lacerte_session_status`), and never warned that
+            // LACERTE_DEBUG_WIRE must be ON BEFORE the failure. The new
+            // text must mention all three.
+            var info = SyntheticStatusCodes.StatusTable[code];
+            Assert.NotNull(info.Remediation);
+            Assert.Contains("cid", info.Remediation!);
+            Assert.Contains("LACERTE_DEBUG_WIRE", info.Remediation);
+            Assert.Contains("lacerte_session_status", info.Remediation);
+            Assert.Contains("BEFORE", info.Remediation);
         }
     }
 }

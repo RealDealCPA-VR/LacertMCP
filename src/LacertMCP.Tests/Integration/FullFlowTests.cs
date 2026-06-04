@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -8,10 +8,10 @@ using Xunit;
 namespace LacertMCP.Tests.Integration
 {
     /// <summary>
-    /// Phase 12 task #84 — end-to-end full flow against the simulation
+    /// Phase 12 task #84 â€” end-to-end full flow against the simulation
     /// backend. Exercises every chokepoint type the operator's day-1 workflow
-    /// touches: Register → SetContext → ListClients → ReadClient → WriteField
-    /// (success) → CreateClient → re-list and confirm new row.
+    /// touches: Register â†’ SetContext â†’ ListClients â†’ ReadClient â†’ WriteField
+    /// (success) â†’ CreateClient â†’ re-list and confirm new row.
     /// </summary>
     public class FullFlowTests
     {
@@ -48,16 +48,16 @@ namespace LacertMCP.Tests.Integration
             Assert.NotNull(smitRow);
             Assert.True(smitRow!.ContainsKey("ClientNumber"));
 
-            // ----- 5. WriteField with no fixture seam — exercises the
+            // ----- 5. WriteField with no fixture seam â€” exercises the
             // fail-closed access-map gate. The map ships {} in v1; the
             // populated-map happy path is covered by
             // FieldWriteRoundTripTests (P15-011) and the unit-level happy
             // path tests in FieldWriteToolsTests, both of which use
             // AccessMapTestFixture to seed I|1|C1_15 as ReadWrite.
             //
-            // Here we assert the structured error shape — proves the gate
+            // Here we assert the structured error shape â€” proves the gate
             // fires before any wire side-effect. C1_1 is Unknown in the
-            // empty v1 map → 9012 UnknownFieldAccess (distinct from 9001
+            // empty v1 map â†’ 9012 UnknownFieldAccess (distinct from 9001
             // FieldIsReadOnly, which is for known non-writable fields or
             // read-only sessions).
             var writeErr = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
@@ -67,11 +67,11 @@ namespace LacertMCP.Tests.Integration
 
             // ----- 6. CreateClient -----
             var createArgs = new CreateClientArgs(
-                ClientID: "NEW1",
+                ClientId: "NEW1",
                 TaxType: "1040",
                 FirstName: "First",
                 LastName: "Last",
-                EmailID: "first.last@example.com");
+                EmailId: "first.last@example.com");
             var createResult = await mgr.CreateClient(createArgs, idempotencyKey: "fullflow-create-1");
             Assert.Equal(StatusCodes.Success, createResult.Status);
             Assert.NotNull(createResult.ClientNumber);

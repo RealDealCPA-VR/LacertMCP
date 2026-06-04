@@ -10,7 +10,7 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 ## Tests
 
-- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports **695 passed, 10 skipped, 0 failed**.
+- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports `0 failed` with `skipped` matching the count documented in `HANDOFF.md` "Verify Before Continuing" (currently **10**, all live-only). The pass count grows over time as tests land — the operative invariants are 0 failed + skip count stable at 10.
 - [ ] The 10 skips are the 9 `[Fact(Skip = "Requires real Lacerte SDK …")]` cases under `Tests/Bridge/` (Reader, Writer, Registration, CanUseNewApisProbe, LacerteAccessClient) plus the one Windows-only Credential Manager P/Invoke round-trip in `Tests/Cli/AppIdStoreTests.cs`.
 
 ## Server startup
@@ -123,10 +123,10 @@ Mark each box `[x]` only after the operator personally observed the tool succeed
 
 - [ ] `lacerte-mcp register` ceremony on a fresh box: GUID minted, persisted in Credential Manager, dialogs pop, AccessGranted returned. Exercised end-to-end on a fresh Windows install.
 - [ ] MCP server startup within the 24h cache window: `Register()` returns silently (no dialogs). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
-- [ ] After 24h elapse OR explicit logout: every tool call short-circuits to synthetic `9101 ReAuthRequired` with the `lacerte-mcp login` remediation message. Exercised end-to-end.
+- [ ] After 24h elapse OR explicit logout: every tool call that touches `RequireContext` short-circuits to synthetic `9007 LoginExpired` with the `lacerte-mcp register` / `lacerte-mcp login` remediation message; calls that bypass `RequireContext` (e.g. `lacerte_session_status`) still succeed and report `registered: false`. Exercised end-to-end.
 
 ### Sanity / observability
 
-- [ ] `lacerte-mcp doctor` returns exit 0 — all 7 probes green (Windows version, x64, .NET 4.8, ODBC DSN, SDK install, env, AppID). Exercised end-to-end.
+- [ ] `lacerte-mcp doctor` returns exit 0 — every probe green (canonical list in `DoctorCommand.cs` XML doc; includes Windows version, x64, App.config shim, .NET 4.8, ODBC DSN, SDK install, COM ProgID, Operating mode, LACERTE_DATA_PATH + directory, LACERTE_DATA_ROOT + directory, FieldAccessMap shards, AppID). Exercised end-to-end.
 - [ ] `LACERTE_DEBUG_WIRE=1` writes a `logs/lacerte-YYYYMMDD.log` with COM call args + SQL strings (Phase 11 #75). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] No tool ever surfaces a raw `TAPIStatus` integer — every error response is the structured `{success:false, statusCode, statusName, severity, userMessage, remediation, context}` shape (Boundary Invariant #9). Exercised end-to-end.

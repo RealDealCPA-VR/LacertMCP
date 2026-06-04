@@ -456,8 +456,8 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "NEWC", TaxType: "Individual",
-                FirstName: "New", LastName: "Client", EmailID: "new@example.com");
+                ClientId: "NEWC", TaxType: "Individual",
+                FirstName: "New", LastName: "Client", EmailId: "new@example.com");
             var (status, cn) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.Success, status);
             // TY24 IData seeded with 1001+1002, NextClientNumber pre-set to 1003.
@@ -478,7 +478,7 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "TOOLONGNAME", TaxType: "Individual");
+                ClientId: "TOOLONGNAME", TaxType: "Individual");
             var (status, cn) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.LengthExceeded, status);
             Assert.Null(cn);
@@ -491,7 +491,7 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2020, Year: 2020, Module: 'I',
-                ClientID: "SMIT", TaxType: "Individual");
+                ClientId: "SMIT", TaxType: "Individual");
             var (status, cn) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.DuplicateClient, status);
             Assert.Null(cn);
@@ -504,7 +504,7 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "BAD-ID", TaxType: "Individual");
+                ClientId: "BAD-ID", TaxType: "Individual");
             var (status, _) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.InValidClientName, status);
         }
@@ -516,7 +516,7 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "OOPS", TaxType: "Corporate");
+                ClientId: "OOPS", TaxType: "Corporate");
             var (status, _) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.TaxModuleMismatch, status);
         }
@@ -528,9 +528,33 @@ namespace LacertMCP.Tests.Session
             store.Register();
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2017, Module: 'I',
-                ClientID: "OLD", TaxType: "Individual");
+                ClientId: "OLD", TaxType: "Individual");
             var (status, _) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.InValidTaxYear, status);
+        }
+
+        [Fact]
+        public void SimulateCreateClient_LowercaseClientID_NormalizedAndStored()
+        {
+            // P16-038 — direct sim callers (bypassing CreateClientTools)
+            // must also see ClientId case-normalized so the live bridge's
+            // case-sensitive ClientNumberPattern stays observationally
+            // equivalent to the sim store. Two-mode discipline.
+            var store = new SimulationStore();
+            store.Register();
+            var args = new SimulateCreateClientArgs(
+                DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
+                ClientId: "abc1", TaxType: "Individual",
+                FirstName: "Low", LastName: "Case", EmailId: "lc@example.com");
+            var (status, cn) = store.SimulateCreateClient(args);
+            Assert.Equal(StatusCodes.Success, status);
+            Assert.NotNull(cn);
+
+            // Stored ClientID must be uppercase so downstream case-sensitive
+            // lookups don't miss.
+            var module = store.TryGetModule(SeedData.DataPathIData2024, 2024, 'I')!;
+            var row = module.Clients[cn!];
+            Assert.Equal("ABC1", row.Fields["ClientID"] as string);
         }
 
         [Fact]
@@ -540,7 +564,7 @@ namespace LacertMCP.Tests.Session
             // No Register() call — registered latch is still 0.
             var args = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "NEW", TaxType: "Individual");
+                ClientId: "NEW", TaxType: "Individual");
             var (status, _) = store.SimulateCreateClient(args);
             Assert.Equal(StatusCodes.NotSignedIn, status);
         }
@@ -564,7 +588,7 @@ namespace LacertMCP.Tests.Session
             store.WriteDetail(SeedData.DataPathIData2020, 2020, 'I', "1001", newRow);
             var createArgs = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "TEMP", TaxType: "Individual");
+                ClientId: "TEMP", TaxType: "Individual");
             var (status, _) = store.SimulateCreateClient(createArgs);
             Assert.Equal(StatusCodes.Success, status);
 
@@ -602,7 +626,7 @@ namespace LacertMCP.Tests.Session
             // the same NextClientNumber because the counter rolled back.
             var args1 = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "FIRST", TaxType: "Individual");
+                ClientId: "FIRST", TaxType: "Individual");
             var (s1, cn1) = store.SimulateCreateClient(args1);
             Assert.Equal(StatusCodes.Success, s1);
 
@@ -610,7 +634,7 @@ namespace LacertMCP.Tests.Session
 
             var args2 = new SimulateCreateClientArgs(
                 DataPath: SeedData.DataPathIData2024, Year: 2024, Module: 'I',
-                ClientID: "SECND", TaxType: "Individual");
+                ClientId: "SECND", TaxType: "Individual");
             var (s2, cn2) = store.SimulateCreateClient(args2);
             Assert.Equal(StatusCodes.Success, s2);
             Assert.Equal(cn1, cn2);   // both should be 1003 if rollback worked

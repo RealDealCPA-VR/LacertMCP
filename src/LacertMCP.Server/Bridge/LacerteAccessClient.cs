@@ -174,15 +174,15 @@ namespace LacertMCP.Server.Bridge
         public int UpdateTaxReturn(
             string appId, string dataPath, int year, char module,
             int table, string clientNumber, string field, object? value,
-            int? subClientID, string? stateAbbrev)
+            int? subClientId, string? stateAbbrev)
         {
             EnsureLive();
             // Live verification deferred to Windows + Lacerte box.
             var dbf = FormatDbfName(table, module, year);
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<int>("Bridge.UpdateTaxReturn",
-                new { dbf, clientNumber, field, value, subClientID, stateAbbrev },
-                () => Writer.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev));
+                new { dbf, clientNumber, field, value, subClientId, stateAbbrev },
+                () => Writer.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev));
         }
 
         public int WriteDetail(
@@ -205,8 +205,8 @@ namespace LacertMCP.Server.Bridge
 
         public BridgeCreateClientResult CreateClient(
             string appId, string dataPath, int year, char module,
-            string clientID, string taxType,
-            string? firstName, string? lastName, string? emailID)
+            string clientId, string taxType,
+            string? firstName, string? lastName, string? emailId)
         {
             // P15-020 — bridge-boundary defense-in-depth. Validation runs
             // BEFORE EnsureLive() + WireLog so a bad arg is rejected even on
@@ -214,23 +214,23 @@ namespace LacertMCP.Server.Bridge
             // Writer.WriteToDBFDatabase pattern where validation precedes
             // AcquireWriter. CreateClient is the only COM-mutation surface
             // that bypassed BridgeInputValidation in Phase 14; it accepts
-            // operator-supplied firstName/lastName/emailID strings which the
+            // operator-supplied firstName/lastName/emailId strings which the
             // SDK marshaller silently truncates on the first NUL
-            // ("Smith\0; DROP" → "Smith" in DBF).
+            // ("Smith\0; DROP" -> "Smith" in DBF).
             BridgeInputValidation.ValidateCreateClientArgs(
-                appId, dataPath, clientID, taxType, firstName, lastName, emailID);
+                appId, dataPath, clientId, taxType, firstName, lastName, emailId);
             EnsureLive();
 
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<BridgeCreateClientResult>("Bridge.CreateClient",
-                new { clientID, taxType, firstName, lastName, emailID },
+                new { clientId, taxType, firstName, lastName, emailId },
                 () =>
             {
                 // Live verification deferred to Windows + Lacerte box.
                 // The canonical sequence is:
                 //   1. var list = comInstance.IClientList;
                 //   2. list.SetDataPath(dataPath);
-                //   3. var client = list.IClient(taxType, clientID, emailID, firstName, lastName);
+                //   3. var client = list.IClient(taxType, clientId, emailId, firstName, lastName);
                 //   4. var status = (int)client.CreateClient();
                 //   5. var assigned = (string)client.ClientNumber;
                 // Wrapped with late binding via dynamic so this compiles without
@@ -241,7 +241,7 @@ namespace LacertMCP.Server.Bridge
                 {
                     dynamic clientList = com.IClientList;
                     clientList.SetDataPath(dataPath);
-                    dynamic client = clientList.IClient(taxType, clientID, emailID, firstName, lastName);
+                    dynamic client = clientList.IClient(taxType, clientId, emailId, firstName, lastName);
                     int status = (int)client.CreateClient();
                     string? assigned = status == 1 ? (string?)client.ClientNumber : null;
                     return new BridgeCreateClientResult(status, assigned);
@@ -256,7 +256,7 @@ namespace LacertMCP.Server.Bridge
                         new Dictionary<string, object?>
                         {
                             ["op"] = "CreateClient",
-                            ["clientID"] = clientID,
+                            ["clientId"] = clientId,
                             ["reason"] = ex.Message,
                         }, ex);
                 }

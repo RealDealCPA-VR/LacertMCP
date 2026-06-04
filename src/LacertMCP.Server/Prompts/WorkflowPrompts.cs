@@ -90,8 +90,12 @@ Step 4 — Seed core address / phone fields (if collected during intake)
     | ssn / taxpayerID     | TBD-F5        | no — gated on F5     |
 
 Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at intake)
-  • For each row, call `lacerte_detail_write` with `{{ clientNumber, row: {{ Series, Code, ... }} }}`.
-  • The SDK does NOT validate detail-row shape; this tool's client-side validation is the only safeguard. Read the error message verbatim and fix the failed field before retrying.
+  • `lacerte_detail_write` takes 5 REQUIRED flat params (clientNumber, series, code, amount, description) plus 7 optional row-key segments that default to empty string (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) and 3 optional control params (replaceIndex, dryRun, idempotencyKey). There is NO nested `row:` wrapper — every field is a top-level kwarg.
+  • A W-2 row looks like:
+      `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", source: ""W2"", tsj: ""T"" }})`
+    Series cheat-sheet: 11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners. `tsj` is one of T/S/J/"""" (taxpayer/spouse/joint/unspecified). `stateAbbrev` is """" or a 2-letter postal code (validated ^[A-Z]{{2}}$).
+  • For idempotent retries pass `idempotencyKey: ""intake-<clientID>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true`.
+  • The SDK does NOT validate detail-row shape; this tool's client-side validation is the only safeguard. Read the error message verbatim — series/code/stateAbbrev/tsj each surface a per-field `reason` in the error context if rejected.
 
 Step 6 — Verify the new client appears in the roster
   • Call `lacerte_client_list` (no filter) and confirm the new `clientNumber` is present.
@@ -174,11 +178,15 @@ Surface every tool error verbatim — do not summarize away a 9xxx status code."
         // /lacerte_bulk_field_update
         // -----------------------------------------------------------------
 
-        [McpServerPrompt(Name = "lacerte_bulk_field_update")]
+        // P16-052 — prompt name aligned with the actual tool name
+        // (lacerte_field_write_bulk). The noun-first family (lacerte_field_write
+        // + lacerte_field_write_bulk) is the canonical pattern; verb-first
+        // names are legacy.
+        [McpServerPrompt(Name = "lacerte_field_write_bulk")]
         [Description(
-            "Apply the same field write across a list of clients with dry-run preview, idempotency keys, " +
-            "and a stop-on-first-error rule. Steps reference lacerte_session_status, lacerte_set_context, " +
-            "lacerte_field_access_map, lacerte_field_write, and lacerte_client_read.")]
+            "Apply the same field write across a list of clients in a single MCP round-trip with dry-run preview, " +
+            "per-row idempotency keys, and a stop-on-first-error rule. Steps reference lacerte_session_status, " +
+            "lacerte_set_context, lacerte_field_access_map, lacerte_field_write_bulk, and lacerte_client_read.")]
         public static GetPromptResult BulkFieldUpdate(
             [Description("DATA table number to update (1 = client, 2 = subclient, 3 = state, 4 = state-subclient, 5 = status). Default 1.")]
             int table = 1,
@@ -190,7 +198,7 @@ Surface every tool error verbatim — do not summarize away a 9xxx status code."
             var fieldLabel = string.IsNullOrEmpty(field) ? "<ask the operator for the field>" : field!;
 
             var text =
-$@"You are about to bulk-update field `{fieldLabel}` on DATA{table} across multiple clients. Bulk writes are HIGH RISK — the steps below ENFORCE a dry-run preview AND idempotency keys to keep retries safe.
+$@"You are about to bulk-update field `{fieldLabel}` on DATA{table} across multiple clients. Bulk writes are HIGH RISK — the steps below ENFORCE a dry-run preview AND per-row idempotency keys to keep retries safe. Use `lacerte_field_write_bulk` (single MCP call that fans out to N rows) — do NOT loop `lacerte_field_write` per client; the bulk tool runs the same chokepoint with one round-trip and aggregates `{{totalCount, successCount, errorCount, perItem[]}}`.
 
 Step 1 — Confirm session + context
   • `lacerte_session_status` — must be `isRegistered: true`.
@@ -206,22 +214,24 @@ Step 3 — Build the target client list
   • Tell the operator the count. If > 50, ask for explicit confirmation before proceeding.
 
 Step 4 — Dry-run preview (first {previewCount})
-  • For each of the first {previewCount} clients, call `lacerte_field_write` with `{{ table: {table}, clientNumber, field: ""{fieldLabel}"", value, dryRun: true, idempotencyKey: ""bulk-<batchId>-<clientNumber>"" }}`.
-  • If ANY preview returns a non-Success statusCode, STOP and report the failed client + the error. Do not proceed to the real write.
+  • Build an `entries` array with the first {previewCount} clients: `[{{ clientNumber, field: ""{fieldLabel}"", value }}, ...]`. For DATA2/4 add `subClientId`; for DATA3/4 add `stateAbbrev`.
+  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: true, continueOnError: false, idempotencyKey: ""bulk-<batchId>"" }}`. The tool synthesizes per-row keys as `""<prefix>-<clientNumber>-<field>""` automatically — never aliases across fields.
+  • Inspect `perItem[]`. If ANY row's `success` is false (or `statusCode` is non-Success), STOP and report the failed clientNumber + the structured error. Do not proceed to the real write.
 
 Step 5 — Real write (only if preview was 100% clean)
-  • Loop over the full list. Call `lacerte_field_write` with `dryRun: false` and the SAME idempotencyKey shape — `""bulk-<batchId>-<clientNumber>""`.
-  • On the first failure, STOP. Surface the structured error. Do not skip + continue — the operator needs to know exactly where the batch stopped.
+  • Build the full `entries` array for every target client (same per-row shape as Step 4).
+  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: false, continueOnError: false, idempotencyKey: ""bulk-<batchId>"" }}`. SAME prefix as Step 4 — the session-side idempotency lock replays cached results for the preview rows instead of re-writing them, so the previewed rows are skipped automatically.
+  • If `errorCount > 0` in the response envelope, STOP. The first failing row's `index` + `statusCode` + `userMessage` tell the operator exactly where the batch stopped. Remaining rows after the failure are marked `skipped: true` (stop-on-first-error posture).
 
 Step 6 — Verify a sample
-  • Pick 3 random clients from the batch. Call `lacerte_client_read` for each and confirm `{fieldLabel}` now holds the new value.
-  • Report total written + sample-verified counts.
+  • Pick 3 random clients from the batch's successful `perItem[]` rows. Call `lacerte_client_read` for each and confirm `{fieldLabel}` now holds the new value.
+  • Report `totalCount` / `successCount` / `errorCount` from the bulk response plus the sample-verified count.
 
-Idempotency note: if a retry replays the same `idempotencyKey` with the same payload, the session manager returns the cached result without re-writing. If the payload differs, it throws `IdempotencyConflict (9102)` — pick a fresh key suffix.";
+Idempotency note: per-row keys are `""<prefix>-<clientNumber>-<field>""`. If a retry replays the same prefix with the same per-row payload, the session manager returns the cached result without re-writing. If the per-row payload differs, that row throws `IdempotencyConflict (9102)` and the batch stops (or continues, depending on `continueOnError`). Pick a fresh `batchId` for a genuinely new run.";
 
             return new GetPromptResult
             {
-                Description = "Apply a field write across many clients with dry-run preview, idempotency keys, stop-on-first-error.",
+                Description = "Apply a field write across many clients via lacerte_field_write_bulk (single MCP call) with dry-run preview, per-row idempotency keys, stop-on-first-error.",
                 Messages = new List<PromptMessage>
                 {
                     new PromptMessage

@@ -40,34 +40,60 @@ namespace LacertMCP.Server.Tools
         public SessionTools(LacerteSessionManager session) => _session = session;
 
         [McpServerTool]
-        [Description("Return a snapshot of the active session — mode, registration state, 24h expiry, active context (datapath/year/module/readOnly). Zero wire I/O.")]
+        [Description("Return a snapshot of the active session — mode, registration state, 24h expiry, active context (datapath/taxYear/module/readOnly), and wire-log diagnostic state (debugWireEnabled + wireLogPath, for the 9201/9203 'inspect logs/...' remediation). Zero wire I/O.")]
         public Task<string> LacerteSessionStatus()
             => WrapToolHandler.Run(() =>
             {
                 var s = _session.SessionStatus();
+                // P16-083 (boundary rounding) — clamp the human-rendered
+                // minutes-until-expiry to one decimal so chat summaries don't
+                // splat 13 fractional digits (e.g. 1439.9333333333334).
+                double? minutesUntilExpiry = s.MinutesUntilExpiry.HasValue
+                    ? Math.Round(s.MinutesUntilExpiry.Value, 1, MidpointRounding.AwayFromZero)
+                    : (double?)null;
                 return Task.FromResult<object>(new
                 {
-                    mode = s.Mode.ToString(),
+                    // Lowercase mode ("simulation"/"live") aligned with
+                    // lacerte_health + HeartbeatWriter so every surface emits
+                    // the same casing for the same conceptual field.
+                    mode = s.Mode.ToString().ToLowerInvariant(),
                     isRegistered = s.IsRegistered,
                     registeredAt = s.RegisteredAt,
                     expiresAt = s.ExpiresAt,
-                    minutesUntilExpiry = s.MinutesUntilExpiry,
+                    minutesUntilExpiry,
                     context = s.Context == null ? null : new
                     {
                         dataPath = s.Context.DataPath,
-                        year = s.Context.Year,
+                        // P16-069/P16-079 — canonical wire name `taxYear`
+                        // (replaces `year`). Aligns input parameter +
+                        // response field across the tool surface.
+                        taxYear = s.Context.Year,
                         module = s.Context.Module.ToString(),
                         readOnly = s.Context.ReadOnly,
                     },
                     appName = s.AppName,
                     appId = s.AppId,
+                    // P16-066 — surface debug-log state so the operator hitting
+                    // the 9201/9203 remediation ('inspect logs/lacerte-...log')
+                    // can see whether logging is on AND where the log lives
+                    // in one tool call. wireLogPath is always populated — when
+                    // logging is off it carries the would-be path so the
+                    // operator can enable LACERTE_DEBUG_WIRE=1, restart, and
+                    // grep at the exact location.
+                    debugWireEnabled = s.DebugWireEnabled,
+                    wireLogPath = s.WireLogPath,
                 });
             });
 
         [McpServerTool]
         [Description("Set the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates year >= 2018 and module in I/C/P/S/F/R/T/N/B. Pass readOnly=true to lock the session against any write tool.")]
         public Task<string> LacerteSetContext(
-            [Description("Absolute path to a Lacerte data folder (e.g. \"C:\\\\Lacerte\\\\24Tax\\\\IData\").")] string dataPath,
+            // P16-051/P16-078 — example renders as `C:\Lacerte\24Tax\IData`
+            // on the wire (single backslashes), matching the rest of the
+            // codebase. The pre-P16 form `C:\\Lacerte\\24Tax\\IData` was a
+            // C#-source escape leak that smaller LLMs would mimic verbatim
+            // into the call payload, triggering InvalidDataPath 9013.
+            [Description("Absolute path to a Lacerte data folder (e.g. C:\\Lacerte\\24Tax\\IData).")] string dataPath,
             [Description("Four-digit tax year. SDK floor is 2018.")] int taxYear,
             [Description("Single-character module code: one of I, C, P, S, F, R, T, N, B.")] string module,
             [Description("If true, every write tool short-circuits to 9001 (FieldIsReadOnly) before any side effect. Default false.")] bool readOnly = false)
@@ -86,10 +112,13 @@ namespace LacertMCP.Server.Tools
 
                 _session.SetContext(dataPath, taxYear, module[0], readOnly);
                 var ctx = _session.SessionStatus().Context!;
+                // P16-069/P16-079 — response field is `taxYear` to match the
+                // input parameter (was `year` pre-P16; renamed for input/
+                // output symmetry).
                 return Task.FromResult<object>(new
                 {
                     dataPath = ctx.DataPath,
-                    year = ctx.Year,
+                    taxYear = ctx.Year,
                     module = ctx.Module.ToString(),
                     readOnly = ctx.ReadOnly,
                 });
@@ -135,25 +164,63 @@ namespace LacertMCP.Server.Tools
                         returnType = m.ReturnType,
                     })
                     .ToList();
-                return Task.FromResult<object>(new { count = rows.Count, modules = rows });
+                // P16-024 — canonical `rows` key for cross-tool consistency.
+                // `modules` retained as a v0.1 alias (removed in v0.2).
+                return Task.FromResult<object>(new { count = rows.Count, rows, modules = rows });
             });
 
         [McpServerTool]
-        [Description("Discover Lacerte data paths under the install root by scanning for {YY}Tax\\{Module}Data folders. Root is LACERTE_DATA_ROOT env var, falling back to C:\\Lacerte. Returns {path, year, module} entries.")]
+        [Description("Discover Lacerte data paths under the install root by scanning for {YY}Tax\\{Module}Data folders. Root is LACERTE_DATA_ROOT env var, falling back to C:\\Lacerte. Returns {path, taxYear, module} entries plus a `hint` field when the scan returns zero rows so the LLM can guide the operator to the correct env var or layout.")]
         public Task<string> LacerteListDatapaths()
             => WrapToolHandler.Run(() =>
             {
                 var rootEnv = Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT");
                 var root = string.IsNullOrEmpty(rootEnv) ? LacerteInstallRootFallback : rootEnv!;
-                var entries = DiscoverDatapaths(root);
-                return Task.FromResult<object>(new
-                {
-                    root,
-                    rootExists = Directory.Exists(root),
-                    count = entries.Count,
-                    datapaths = entries,
-                });
+                return Task.FromResult(BuildListDatapathsPayload(root));
             });
+
+        /// <summary>
+        /// P16-030 — pure helper that builds the LacerteListDatapaths response
+        /// payload for a given root. Extracted so tests can exercise the hint
+        /// branches without mutating <c>LACERTE_DATA_ROOT</c> (which is
+        /// process-wide and would race against parallel test fixtures).
+        ///
+        /// <para>
+        /// Payload shape:
+        /// <list type="bullet">
+        ///   <item><c>root</c>, <c>rootExists</c>, <c>count</c></item>
+        ///   <item><c>rows</c> / <c>datapaths</c> — canonical key + v0.1 alias</item>
+        ///   <item><c>hint</c> — guided remediation string, null on the happy
+        ///     path (count > 0); differentiates root-missing vs root-empty so
+        ///     the LLM can suggest the right next step.</item>
+        /// </list>
+        /// </para>
+        /// </summary>
+        public static object BuildListDatapathsPayload(string root)
+        {
+            var rootExists = Directory.Exists(root);
+            var entries = DiscoverDatapaths(root);
+            string? hint = null;
+            if (!rootExists)
+            {
+                hint = "Discovery root '" + root + "' does not exist. If Lacerte is installed elsewhere, set the LACERTE_DATA_ROOT env var to that path and restart the MCP. Expected layout: {root}\\{YY}Tax\\{Module}Data (e.g. C:\\Lacerte\\24Tax\\IData for Individual TY24, 23Tax\\CData for Corporate TY23). Modules: I/C/P/S/F/R/T/N/B.";
+            }
+            else if (entries.Count == 0)
+            {
+                hint = "Root '" + root + "' exists but contains no {YY}Tax\\{Module}Data subfolders. Either Lacerte is installed at a different root (set LACERTE_DATA_ROOT and restart), or this box uses the alternate shared-module layout C:\\Lacerte\\{YY}data\\ (in that case pass the leaf to lacerte_set_context directly — the scanner only finds the per-module shape).";
+            }
+            // P16-024 — canonical `rows` key for cross-tool consistency.
+            // `datapaths` retained as a v0.1 alias (removed in v0.2).
+            return new
+            {
+                root,
+                rootExists,
+                count = entries.Count,
+                rows = entries,
+                datapaths = entries,
+                hint,
+            };
+        }
 
         // -----------------------------------------------------------------
         // Internals
@@ -212,10 +279,12 @@ namespace LacertMCP.Server.Tools
                     var moduleInfo = Modules.GetByChar(moduleChar);
                     if (moduleInfo == null) continue;
 
+                    // P16-069/P16-079 — canonical wire field name `taxYear`
+                    // (was `year`) — uniform with the rest of the surface.
                     result.Add(new
                     {
                         path = modDir,
-                        year,
+                        taxYear = year,
                         module = moduleChar.ToString(),
                         moduleName = moduleInfo.Name,
                     });

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -10,6 +11,12 @@ namespace LacertMCP.Server.Tools
     /// DATA5 (F4 Status Info) read tool. Per <c>Todo.md</c> Phase 5 task #46.
     /// DATA5 surfaces the per-client F4 status indicators (e.g. completed,
     /// e-file ready, locked); read-only outside a few global toggles.
+    ///
+    /// <para>
+    /// Audit P16-047 — paginated envelope (limit/offset/total/hasMore/
+    /// nextOffset) so every DATA-row read tool shares one shape the LLM can
+    /// memorize. Audit P16-076 — accepts CancellationToken.
+    /// </para>
     /// </summary>
     [McpServerToolType]
     public sealed class StatusTools
@@ -19,17 +26,31 @@ namespace LacertMCP.Server.Tools
         public StatusTools(LacerteSessionManager session) => _session = session;
 
         [McpServerTool]
-        [Description("Read DATA5 F4-status rows for one client. Surfaces per-client status indicators (completed, e-file ready, locked, etc.). DATA5 is read-only outside a few global flags.")]
+        [Description("Read DATA5 F4-status rows for one client. Surfaces per-client status indicators (completed, e-file ready, locked, etc.). DATA5 is read-only outside a few global flags. Supports limit/offset pagination.")]
         public Task<string> LacerteStatusRead(
-            [Description("The ClientNumber whose status rows to read.")] string clientNumber)
+            [Description("The ClientNumber whose status rows to read.")] string clientNumber,
+            [Description("Maximum rows to return. Default 100, clamped to Pagination.MaxLimit (1000).")] int limit = 100,
+            [Description("Zero-based row offset into the result set. Default 0.")] int offset = 0,
+            CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
-                var rows = await _session.ReadStatuses(clientNumber).ConfigureAwait(false);
+                var rows = await _session.ReadStatuses(clientNumber, cancellationToken).ConfigureAwait(false);
+                var page = Pagination.Pagination.Page(rows, limit, offset);
+                // P16-024 — canonical `rows` key for cross-tool consistency.
+                // `statuses` retained as a v0.1 alias (removed in v0.2).
+                // P16-047 — paginated envelope.
                 return new
                 {
                     clientNumber,
-                    count = rows.Count,
-                    statuses = rows,
+                    rows = page.Rows,
+                    total = page.Total,
+                    limit = page.Limit,
+                    offset = page.Offset,
+                    hasMore = page.HasMore,
+                    nextOffset = page.NextOffset,
+                    // legacy (v0.1) — remove in v0.2:
+                    count = page.Rows.Count,
+                    statuses = page.Rows,
                 };
             });
     }

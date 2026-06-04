@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -45,15 +46,17 @@ namespace LacertMCP.Cli.Commands
                 "List every MCP tool the server registers (by reflecting on [McpServerTool] attributes).");
 
             var jsonOpt = new Option<bool>("--json", () => false,
-                "Emit a machine-parseable JSON array instead of the human table.");
+                "Emit a machine-parseable JSON array instead of the human table. Mutually exclusive with --names-only.");
             // P15-066: filtering options for operators sanity-checking the tool surface
             // before pasting into a Claude Desktop / Cursor MCP config.
+            // P16-067: --filter with zero matches now exits 1 so a CI script using
+            // `if ($LASTEXITCODE -ne 0)` can catch a refactor that drops the prefix.
             var filterOpt = new Option<string?>("--filter", () => null,
-                "Case-insensitive regex matched against tool name (e.g. '^lacerte_ef_' for e-file tools).");
+                "Case-insensitive regex matched against tool name (e.g. '^lacerte_ef_' for e-file tools). Exit 1 if zero matches.");
             var nameOpt = new Option<string?>("--name", () => null,
-                "Print one tool's full surface (all parameter descriptions). Exit 1 if no match.");
+                "Print one tool's full surface (all parameter descriptions). Exit 1 if no match. When combined with --filter, the name must also satisfy the filter.");
             var namesOnlyOpt = new Option<bool>("--names-only", () => false,
-                "Print one tool name per line, no descriptions. Pairs with shell pipelines.");
+                "Print one tool name per line, no descriptions. Pairs with shell pipelines. Mutually exclusive with --json.");
 
             cmd.AddOption(jsonOpt);
             cmd.AddOption(filterOpt);
@@ -103,6 +106,16 @@ namespace LacertMCP.Cli.Commands
             TextWriter writer,
             TextWriter stderr)
         {
+            // P16-067: enforce mutual exclusion of --json and --names-only as a usage
+            // error (exit 2) rather than the previous silent --names-only wins. Same
+            // exit-code convention as the invalid-regex branch below. Without this
+            // an operator piping `--json --names-only` into jq got non-JSON output.
+            if (asJson && namesOnly)
+            {
+                stderr.WriteLine("--json and --names-only are mutually exclusive; pick one.");
+                return 2;
+            }
+
             var tools = DiscoverTools();
 
             // P15-066: apply --filter (regex on Name) before any output branch.
@@ -119,6 +132,17 @@ namespace LacertMCP.Cli.Commands
                     return 2;
                 }
                 tools = tools.Where(t => re.IsMatch(t.Name)).ToList();
+
+                // P16-067: parity with --name's no-match contract — `--filter` returning
+                // zero tools is the same negative semantics ("nothing found") as
+                // `--name <missing>`, so exit 1 rather than the previous silent exit 0.
+                // Without this CI scripts asserting `lacerte-mcp tools --filter '^lacerte_ef_'`
+                // silently passed when a refactor dropped the prefix.
+                if (tools.Count == 0)
+                {
+                    stderr.WriteLine($"No tools matched filter '{filter}'.");
+                    return 1;
+                }
             }
 
             // --name <exact>: print one tool's full surface, or exit 1 if absent.
@@ -153,7 +177,8 @@ namespace LacertMCP.Cli.Commands
             }
 
             // --names-only: one tool name per line. Pairs cleanly with shell pipelines.
-            // Mutually exclusive with --json; --names-only wins (documented).
+            // Mutual exclusion with --json is now enforced as a usage error at the top
+            // of Run (P16-067).
             if (namesOnly)
             {
                 foreach (var t in tools.OrderBy(x => x.Name, StringComparer.Ordinal))
@@ -173,6 +198,10 @@ namespace LacertMCP.Cli.Commands
                     WriteIndented = true,
                     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+                    // P16-068: keep `<`, `>`, `+`, `&` literal so tool descriptions
+                    // and parameter types containing them (e.g. URL templates, type
+                    // signatures) survive jq / clip / paste-into-bug-report unmangled.
+                    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
                 });
                 writer.WriteLine(json);
                 return 0;

@@ -43,5 +43,15 @@ namespace LacertMCP.Server.Session
         // >= 2018 in the ctor; null when unset). Operator-facing confirmation
         // that the documented env var was actually picked up — before P15-004
         // the var was advertised in README/.env.example but never read.
-        int? DefaultTaxYear = null);
+        int? DefaultTaxYear = null,
+        // P16-066: surfaces the LACERTE_DEBUG_WIRE state + resolved log path so
+        // an operator hitting the 9201/9203 remediation ("inspect logs/
+        // lacerte-YYYYMMDD.log") can immediately see whether logging is on AND
+        // where the log file lives — without having to read source or rely on
+        // the startup banner (which Claude Desktop swallows). DebugWireEnabled
+        // mirrors WireLog.IsEnabled; WireLogPath is the path WireLog would
+        // write to today (always non-null — when disabled it's the would-be
+        // path so the operator can enable + restart + grep without guessing).
+        bool DebugWireEnabled = false,
+        string? WireLogPath = null);
 }

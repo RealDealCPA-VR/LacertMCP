@@ -161,7 +161,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: "ok", subClientID: null, stateAbbrev: null));
+                    value: "ok", subClientId: null, stateAbbrev: null));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
 
@@ -177,7 +177,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, badClient, GoodField,
-                    value: "ok", subClientID: null, stateAbbrev: null));
+                    value: "ok", subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
         }
@@ -192,7 +192,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: "ok", subClientID: 1, stateAbbrev: badState));
+                    value: "ok", subClientId: 1, stateAbbrev: badState));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(StatusCodes.InValidStateAbbrev, ex.StatusCode);
         }
@@ -203,7 +203,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: "ok", subClientID: -1, stateAbbrev: "CA"));
+                    value: "ok", subClientId: -1, stateAbbrev: "CA"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(StatusCodes.InValidSubClientID, ex.StatusCode);
         }
@@ -214,7 +214,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: "data\0evil", subClientID: null, stateAbbrev: null));
+                    value: "data\0evil", subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
         }
@@ -227,7 +227,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: "ok", subClientID: null, stateAbbrev: ""));
+                    value: "ok", subClientId: null, stateAbbrev: ""));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
 
@@ -532,7 +532,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.UpdateTaxReturn(
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
-                    value: double.NaN, subClientID: null, stateAbbrev: null));
+                    value: double.NaN, subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
@@ -626,7 +626,9 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "Jane", "Doe", bigEmail));
             Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
-            Assert.Equal("emailID", ex.Context["field"]);
+            // P16-054/P16-080 — bridge-side field name renamed to `emailId`
+            // to match the wire form.
+            Assert.Equal("emailId", ex.Context["field"]);
         }
 
         [Fact]
@@ -662,10 +664,10 @@ namespace LacertMCP.Tests.Bridge
         [Fact]
         public void ValidateCreateClientArgs_NullOptionalsOk()
         {
-            // firstName/lastName/emailID are nullable in the COM signature.
+            // firstName/lastName/emailId are nullable in the COM signature.
             BridgeInputValidation.ValidateCreateClientArgs(
                 GoodAppId, GoodDataPath, "NEW01", "Individual",
-                firstName: null, lastName: null, emailID: null);
+                firstName: null, lastName: null, emailId: null);
         }
     }
 }

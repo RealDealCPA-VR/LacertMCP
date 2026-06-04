@@ -44,7 +44,7 @@ namespace LacertMCP.Tests.Bridge
                     clientNumber: "JOHNS",
                     field: "C1_5",
                     value: "test address",
-                    subClientID: null,
+                    subClientId: null,
                     stateAbbrev: null));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
@@ -63,7 +63,7 @@ namespace LacertMCP.Tests.Bridge
                     clientNumber: "JOHNS",
                     field: "C4_15",
                     value: "test",
-                    subClientID: 2,
+                    subClientId: 2,
                     stateAbbrev: "CA"));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
@@ -135,7 +135,7 @@ namespace LacertMCP.Tests.Bridge
                 clientNumber: "JOHNS",
                 field: "C1_5",
                 value: "MCP scaffolding test write (TY24)",
-                subClientID: null,
+                subClientId: null,
                 stateAbbrev: null);
             Assert.Equal(StatusCodes.Success, status);
         }

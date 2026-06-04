@@ -229,8 +229,8 @@ namespace LacertMCP.Server.Errors
             [InValidClientName] = new StatusInfo(
                 "InValidClientName",
                 Severity.Error,
-                "The client name contains characters Lacerte rejects.",
-                "Use letters, numbers, spaces, hyphen/apostrophe only; avoid < > \" ' & / \\ | ?."),
+                "A token failed validation (ClientID character whitelist, single-character module code, or a required name field). Code 24 is reused for three distinct gates — see context.reason and context.field/module for the specific rule that fired.",
+                "Read context.reason in the envelope for the gate-specific rule (it is correct everywhere). Common cases: (a) ClientID must match ^[A-Z0-9]+$ (uppercase letters and digits only, 1-8 chars — no spaces, no hyphen, no apostrophe; for example `OREILLY`, not `O'Reilly` or `O-Reilly`); (b) module must be a single character in I/C/P/S/F/R/T/N/B; (c) firstName/lastName/emailID required and non-whitespace for lacerte_client_create."),
 
             [InValidTaxYear] = new StatusInfo(
                 "InValidTaxYear",
@@ -260,8 +260,8 @@ namespace LacertMCP.Server.Errors
             [ConsentDenied] = new StatusInfo(
                 "ConsentDenied",
                 Severity.Error,
-                "You declined consent in the Lacerte registration dialog.",
-                "Re-run lacerte_register and click Accept on the consent dialog."),
+                "The operator declined consent in the Lacerte registration dialog.",
+                "Ask the operator to re-run the shell command `lacerte-mcp register` on the Lacerte box (this is a CLI command, not an MCP tool) and click Accept on the Intuit consent dialog, then restart the MCP server."),
 
             [AccessGranted] = new StatusInfo(
                 "AccessGranted",
@@ -273,13 +273,13 @@ namespace LacertMCP.Server.Errors
                 "RegVersionBlocked",
                 Severity.Error,
                 "Registration is blocked because Lacerte/SDK is below the minimum version.",
-                "Upgrade Lacerte to the minimum supported build, then re-run lacerte_register."),
+                "Ask the operator to upgrade Lacerte to the minimum supported build, then run the shell command `lacerte-mcp register` (CLI, not an MCP tool) and restart the MCP server."),
 
             [NotSignedIn] = new StatusInfo(
                 "NotSignedIn",
                 Severity.Error,
-                "No active Intuit login, or the 24-hour login window has expired.",
-                "Run lacerte_register (or open Lacerte and sign in) to refresh the login token."),
+                "No active Intuit login, or the 24-hour login window has expired. The one-time consent is still valid so a full re-register is not needed.",
+                "Ask the operator to run the shell command `lacerte-mcp login` on the Lacerte box (CLI, not an MCP tool) or open Lacerte and sign in, then restart the MCP server. Fall back to `lacerte-mcp register` only if `login` reports the AppID is unknown."),
 
             [LacerteTaxSetupRequired] = new StatusInfo(
                 "LacerteTaxSetupRequired",

@@ -98,13 +98,14 @@ namespace LacertMCP.Server.Bridge
 
         /// <summary>
         /// TY21+ write path. Wraps
-        /// <c>IDBFWriter.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev)</c>.
+        /// <c>IDBFWriter.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev)</c>.
         /// Returns the TAPIStatus integer (1 = Success).
+        /// <para>P16-054/P16-080 — `subClientId` casing matches the wire form.</para>
         /// </summary>
         int UpdateTaxReturn(
             string appId, string dataPath, int year, char module,
             int table, string clientNumber, string field, object? value,
-            int? subClientID, string? stateAbbrev);
+            int? subClientId, string? stateAbbrev);
 
         /// <summary>
         /// Per-client detail-file write. Wraps the detail-row write path on
@@ -125,8 +126,9 @@ namespace LacertMCP.Server.Bridge
         /// </summary>
         BridgeCreateClientResult CreateClient(
             string appId, string dataPath, int year, char module,
-            string clientID, string taxType,
-            string? firstName, string? lastName, string? emailID);
+            // P16-054/P16-080 — `clientId`/`emailId` casing matches the wire.
+            string clientId, string taxType,
+            string? firstName, string? lastName, string? emailId);
     }
 
     /// <summary>

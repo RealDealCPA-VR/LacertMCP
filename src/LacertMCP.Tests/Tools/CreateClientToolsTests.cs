@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
@@ -35,11 +36,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "NEWC1",
+                clientId: "NEWC1",
                 taxType: "Individual",
                 firstName: "New",
                 lastName: "Client",
-                emailID: "new@example.com");
+                emailId: "new@example.com");
 
             var root = Parse(json);
             Assert.True(root.GetProperty("success").GetBoolean(), json);
@@ -55,11 +56,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "TOOLONGNAME", // 11 chars — exceeds 8
+                clientId: "TOOLONGNAME", // 11 chars — exceeds 8
                 taxType: "Individual",
                 firstName: "Too",
                 lastName: "Long",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -79,11 +80,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "BAD!", // ! is not in [A-Z0-9]
+                clientId: "BAD!", // ! is not in [A-Z0-9]
                 taxType: "Individual",
                 firstName: "Bad",
                 lastName: "Chars",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -98,11 +99,11 @@ namespace LacertMCP.Tests.Tools
 
             // BROW is seeded in TY24 IData — duplicate should fail.
             var json = await tool.LacerteClientCreate(
-                clientID: "BROW",
+                clientId: "BROW",
                 taxType: "Individual",
                 firstName: "Dup",
                 lastName: "Brown",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -139,11 +140,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: 'I');
 
             var json = await tool.LacerteClientCreate(
-                clientID: "MISMTCH",
+                clientId: "MISMTCH",
                 taxType: "Corporate", // wrong for module I
                 firstName: "Mis",
                 lastName: "Match",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -157,11 +158,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "EMTYTYP",
+                clientId: "EMTYTYP",
                 taxType: "",
                 firstName: "Empty",
                 lastName: "Type",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -175,11 +176,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync(readOnly: true);
 
             var json = await tool.LacerteClientCreate(
-                clientID: "ROC1",
+                clientId: "ROC1",
                 taxType: "Individual",
                 firstName: "Read",
                 lastName: "Only",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -196,11 +197,11 @@ namespace LacertMCP.Tests.Tools
             var beforeCount = beforeList.Count;
 
             var json = await tool.LacerteClientCreate(
-                clientID: "DRY1",
+                clientId: "DRY1",
                 taxType: "Individual",
                 firstName: "Dry",
                 lastName: "Run",
-                emailID: "dry@example.com",
+                emailId: "dry@example.com",
                 dryRun: true);
 
             Assert.True(Parse(json).GetProperty("success").GetBoolean(), json);
@@ -215,21 +216,21 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json1 = await tool.LacerteClientCreate(
-                clientID: "IDP1",
+                clientId: "IDP1",
                 taxType: "Individual",
                 firstName: "Idem",
                 lastName: "Potent",
-                emailID: "idp@example.com",
+                emailId: "idp@example.com",
                 idempotencyKey: "cc-1");
             Assert.True(Parse(json1).GetProperty("success").GetBoolean(), json1);
 
             // Same key, different ClientID → conflict.
             var json2 = await tool.LacerteClientCreate(
-                clientID: "IDP2",
+                clientId: "IDP2",
                 taxType: "Individual",
                 firstName: "Idem",
                 lastName: "Potent",
-                emailID: "idp@example.com",
+                emailId: "idp@example.com",
                 idempotencyKey: "cc-1");
 
             var root2 = Parse(json2);
@@ -248,11 +249,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "NOFNAM",
+                clientId: "NOFNAM",
                 taxType: "Individual",
                 firstName: "   ",
                 lastName: "Doe",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -268,11 +269,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "NOLNAM",
+                clientId: "NOLNAM",
                 taxType: "Individual",
                 firstName: "John",
                 lastName: "",
-                emailID: "x@example.com");
+                emailId: "x@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
@@ -288,17 +289,17 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync();
 
             var json = await tool.LacerteClientCreate(
-                clientID: "NOEMAIL",
+                clientId: "NOEMAIL",
                 taxType: "Individual",
                 firstName: "John",
                 lastName: "Doe",
-                emailID: "");
+                emailId: "");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(StatusCodes.InValidClientName,
                 root.GetProperty("statusCode").GetInt32());
-            Assert.Equal("emailID",
+            Assert.Equal("emailId",
                 root.GetProperty("context").GetProperty("field").GetString());
         }
 
@@ -319,11 +320,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: module);
 
             var json = await tool.LacerteClientCreate(
-                clientID: "ALIAS1",
+                clientId: "ALIAS1",
                 taxType: taxType,
                 firstName: "Al",
                 lastName: "Ias",
-                emailID: "a@example.com");
+                emailId: "a@example.com");
 
             var root = Parse(json);
             Assert.True(root.GetProperty("success").GetBoolean(), json);
@@ -344,11 +345,11 @@ namespace LacertMCP.Tests.Tools
             var (mgrB, toolB) = await NewRegisteredToolWithContextAsync();
 
             var jsonAlias = await toolA.LacerteClientCreate(
-                clientID: "C1040", taxType: "1040",
-                firstName: "Form", lastName: "Number", emailID: "f@example.com");
+                clientId: "C1040", taxType: "1040",
+                firstName: "Form", lastName: "Number", emailId: "f@example.com");
             var jsonCanon = await toolB.LacerteClientCreate(
-                clientID: "C1040", taxType: "Individual",
-                firstName: "Form", lastName: "Number", emailID: "f@example.com");
+                clientId: "C1040", taxType: "Individual",
+                firstName: "Form", lastName: "Number", emailId: "f@example.com");
 
             var rootAlias = Parse(jsonAlias);
             var rootCanon = Parse(jsonCanon);
@@ -372,16 +373,102 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: module);
 
             var json = await tool.LacerteClientCreate(
-                clientID: "ALIASS",
+                clientId: "ALIASS",
                 taxType: taxType,
                 firstName: "S",
                 lastName: "Corp",
-                emailID: "s@example.com");
+                emailId: "s@example.com");
 
             var root = Parse(json);
             Assert.True(root.GetProperty("success").GetBoolean(), json);
             Assert.Equal(StatusCodes.Success,
                 root.GetProperty("result").GetProperty("statusCode").GetInt32());
+        }
+
+        // -----------------------------------------------------------------
+        // P16-038 — lowercase / mixed-case ClientId is normalized to upper
+        // before the regex / dup / sim / bridge layers see it, so the
+        // permissive IgnoreCase tool-layer regex doesn't pass an input that
+        // the case-sensitive bridge ClientNumberPattern would reject.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task ClientCreate_LowercaseClientID_NormalizedToUpper_Succeeds()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            var json = await tool.LacerteClientCreate(
+                clientId: "abc1",
+                taxType: "Individual",
+                firstName: "Lower",
+                lastName: "Case",
+                emailId: "lc@example.com");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            var result = root.GetProperty("result");
+            Assert.Equal(StatusCodes.Success, result.GetProperty("statusCode").GetInt32());
+            // Wire envelope echoes the normalized (uppercase) form.
+            Assert.Equal("ABC1", result.GetProperty("clientId").GetString());
+
+            // Stored row should also be uppercase so downstream case-sensitive
+            // lookups don't miss. Verify via ListClients which returns the
+            // raw DBF rows (sim and live both surface ClientID verbatim).
+            var cn = result.GetProperty("clientNumber").GetString();
+            var rows = await mgr.ListClients(limit: 1000);
+            var created = rows.FirstOrDefault(r =>
+                r.TryGetValue("C1_0", out var v) && v is string s && s == cn);
+            Assert.NotNull(created);
+            Assert.True(created!.TryGetValue("ClientID", out var idObj));
+            Assert.Equal("ABC1", idObj as string);
+        }
+
+        [Fact]
+        public async Task ClientCreate_MixedCaseClientID_NormalizedToUpper_Succeeds()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            var json = await tool.LacerteClientCreate(
+                clientId: "AbC1",
+                taxType: "Individual",
+                firstName: "Mixed",
+                lastName: "Case",
+                emailId: "mc@example.com");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            var result = root.GetProperty("result");
+            Assert.Equal(StatusCodes.Success, result.GetProperty("statusCode").GetInt32());
+            Assert.Equal("ABC1", result.GetProperty("clientId").GetString());
+        }
+
+        [Fact]
+        public async Task ClientCreate_LowercaseClientID_DupCheckUsesNormalizedForm()
+        {
+            var (mgr, tool) = await NewRegisteredToolWithContextAsync();
+
+            // First create with lowercase — should normalize and persist as ABC1.
+            var json1 = await tool.LacerteClientCreate(
+                clientId: "abc1",
+                taxType: "Individual",
+                firstName: "First",
+                lastName: "Insert",
+                emailId: "f@example.com");
+            Assert.True(Parse(json1).GetProperty("success").GetBoolean(), json1);
+
+            // Second create with uppercase form should collide with the
+            // first because both normalize to ABC1.
+            var json2 = await tool.LacerteClientCreate(
+                clientId: "ABC1",
+                taxType: "Individual",
+                firstName: "Second",
+                lastName: "Insert",
+                emailId: "s@example.com");
+
+            var root2 = Parse(json2);
+            Assert.False(root2.GetProperty("success").GetBoolean(), json2);
+            Assert.Equal(StatusCodes.DuplicateClient,
+                root2.GetProperty("statusCode").GetInt32());
         }
 
         [Fact]
@@ -394,11 +481,11 @@ namespace LacertMCP.Tests.Tools
             var (mgr, tool) = await NewRegisteredToolWithContextAsync(module: 'I');
 
             var json = await tool.LacerteClientCreate(
-                clientID: "BOGUS",
+                clientId: "BOGUS",
                 taxType: "Bogus", // not an alias for module I
                 firstName: "Bo",
                 lastName: "Gus",
-                emailID: "b@example.com");
+                emailId: "b@example.com");
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean(), json);

@@ -49,21 +49,22 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("TY21+ explicit write entrypoint (UpdateTaxReturn under the hood, keyed by ClientNumber). Equivalent surface to lacerte_field_write — both go through the same session chokepoint which year-routes the backend call. Use this when you specifically want the TY21+ API in a TY21+ context. Returns the TAPIStatus integer (1=Success).")]
+        [Description("Alias for lacerte_field_write kept to mirror Intuit's TY21+ UpdateTaxReturn developer-doc surface. Behavior is identical: both funnel through the same session chokepoint and the session year-routes the backend call. Prefer lacerte_field_write in new code — only use this tool when a user prompt or workflow explicitly references the UpdateTaxReturn SDK API by name. Returns the TAPIStatus integer (1=Success).")]
         public Task<string> LacerteUpdateReturn(
             [Description("DBF table number. 1..5 are writable; 6 (Display) and 7 (Forms) are read-only per spec §2.")] int table,
             [Description("Lacerte ClientNumber (the C{t}_0 identifier).")] string clientNumber,
             [Description("Field name (e.g. C1_1).")] string field,
             [Description("Value to write. JSON-serializable scalar — string, number, or boolean.")] object? value,
-            [Description("Required for DATA2 / DATA4 writes. Positive integer.")] int? subClientID = null,
+            // P16-054/P16-080 — canonical wire casing `subClientId`.
+            [Description("Required for DATA2 / DATA4 writes. Positive integer.")] int? subClientId = null,
             [Description("Required for DATA3 / DATA4 writes. 2-letter state postal code.")] string? stateAbbrev = null,
             [Description("If true, validate + roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call (audit P15-060); replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null,
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
             return FieldWriteCore.Run(
                 _session, table, clientNumber, field, value,
-                subClientID, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
+                subClientId, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
         }
     }
 }

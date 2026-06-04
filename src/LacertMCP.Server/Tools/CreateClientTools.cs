@@ -46,58 +46,76 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Create a new client in the active datapath/year/module. ClientID must be <= 8 alphanumeric chars. TaxType must match the module (e.g. 'Individual' or '1040' for module I). FirstName, LastName and EmailID are required per spec §4 and REQUIREMENTS §Create. Returns the freshly-minted ClientNumber on success.")]
+        [Description("Create a new client in the active datapath/taxYear/module. ClientId must be <= 8 alphanumeric chars. TaxType must match the module (e.g. 'Individual' or '1040' for module I). FirstName, LastName and EmailId are required per spec §4 and REQUIREMENTS §Create. Returns the freshly-minted ClientNumber on success.")]
         public Task<string> LacerteClientCreate(
-            [Description("Operator-chosen ClientID. <= 8 chars, alphanumeric only.")] string clientID,
+            // P16-054/P16-080 — canonical wire casing is camelCase with the
+            // 2-letter Id suffix mixed-case (clientId / emailId / subClientId).
+            // This matches the .NET Framework Design Guidelines and removes
+            // the ALL-CAPS suffix anti-pattern that bled into JSON wire keys.
+            [Description("Operator-chosen ClientId. <= 8 chars, alphanumeric only. Lowercase is accepted and normalized to uppercase before storage so the value passed to the live SDK matches the case-sensitive bridge pattern.")] string clientId,
             [Description("TaxType string passed to the SDK's IClient constructor. Must match the active module (e.g. 'Individual' / '1040' for module I).")] string taxType,
-            [Description("First name (individual) OR entity-name override. Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string firstName,
-            [Description("Last name (individual). Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
-            [Description("EmailID. Required per Lacerte spec §4 — pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailID,
+            [Description("First name (individual) OR entity-name override. Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string firstName,
+            [Description("Last name (individual). Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
+            [Description("EmailId. Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailId,
             [Description("If true, validate + simulate the create then roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call (audit P15-060); replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null)
         {
             return WrapToolHandler.Run(async () =>
             {
                 // -----------------------------------------------------------
-                // Client-side validation — runs BEFORE the session call so
+                // Client-side validation - runs BEFORE the session call so
                 // the failure surface matches the SDK pre-check behavior.
                 // Throwing here means the synthetic 9xxx codes are surfaced
                 // instead of letting the SDK return LengthExceeded (13) or
                 // InValidClientName (24) with less specific context.
                 // -----------------------------------------------------------
 
-                if (string.IsNullOrEmpty(clientID))
+                if (string.IsNullOrEmpty(clientId))
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.ClientIDTooLong,
                         new Dictionary<string, object?>
                         {
-                            ["clientID"] = clientID,
-                            ["reason"] = "LengthExceeded — ClientID is required and must be 1-8 alphanumeric chars.",
+                            // P16-054/P16-080 — error-context echoes the
+                            // operator-facing wire name `clientId`.
+                            ["clientId"] = clientId,
+                            ["reason"] = "LengthExceeded - clientId is required and must be 1-8 alphanumeric chars.",
                         });
                 }
 
-                if (clientID.Length > 8)
+                // P16-038 — normalize case so lowercase operator-formatted input
+                // (common from LLM-generated tool calls) doesn't slip past the
+                // IgnoreCase regex on _rxClientId and then get late-rejected by
+                // the case-sensitive ClientNumberPattern at the bridge boundary
+                // (BridgeInputValidation.cs:36). Same normalization the sim
+                // store needs (SimulationStore.SimulateCreateClient stores
+                // ClientID verbatim today). Doing this before the length /
+                // regex / dup checks keeps every downstream layer
+                // observationally identical regardless of the operator's
+                // typing convention.
+                clientId = clientId.ToUpperInvariant();
+
+                if (clientId.Length > 8)
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.ClientIDTooLong,
                         new Dictionary<string, object?>
                         {
-                            ["clientID"] = clientID,
-                            ["length"] = clientID.Length,
+                            ["clientId"] = clientId,
+                            ["length"] = clientId.Length,
                             ["limit"] = 8,
-                            ["reason"] = "LengthExceeded — ClientID exceeds the 8-character limit.",
+                            ["reason"] = "LengthExceeded - clientId exceeds the 8-character limit.",
                         });
                 }
 
-                if (!_rxClientId.IsMatch(clientID))
+                if (!_rxClientId.IsMatch(clientId))
                 {
                     throw new LacerteSDKError(
                         StatusCodes.InValidClientName,
                         new Dictionary<string, object?>
                         {
-                            ["clientID"] = clientID,
-                            ["reason"] = "ClientID must match ^[A-Z0-9]+$ — letters and digits only.",
+                            ["clientId"] = clientId,
+                            ["reason"] = "clientId must match ^[A-Z0-9]+$ - letters and digits only.",
                         });
                 }
 
@@ -113,7 +131,7 @@ namespace LacertMCP.Server.Tools
                 }
 
                 // Per Lacerte_MCP_Structure_Spec.md §4 and REQUIREMENTS.md §Create,
-                // FirstName, LastName, and EmailID are part of the minimum-required
+                // FirstName, LastName, and EmailId are part of the minimum-required
                 // field set for lacerte_client_create. Enforce here so the failure
                 // surfaces as a structured InValidClientName (24) BEFORE the
                 // session call rather than as a late SDK rejection with less
@@ -140,14 +158,16 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
-                if (string.IsNullOrWhiteSpace(emailID))
+                if (string.IsNullOrWhiteSpace(emailId))
                 {
                     throw new LacerteSDKError(
                         StatusCodes.InValidClientName,
                         new Dictionary<string, object?>
                         {
-                            ["field"] = "emailID",
-                            ["reason"] = "EmailID is required per spec §4 / REQUIREMENTS §Create.",
+                            // P16-054/P16-080 — error-context echoes the
+                            // operator-facing wire name `emailId`.
+                            ["field"] = "emailId",
+                            ["reason"] = "EmailId is required per spec §4 / REQUIREMENTS §Create.",
                         });
                 }
 
@@ -210,11 +230,11 @@ namespace LacertMCP.Server.Tools
                 }
 
                 var args = new CreateClientArgs(
-                    ClientID: clientID,
+                    ClientId: clientId,
                     TaxType: canonicalTaxType,
                     FirstName: firstName,
                     LastName: lastName,
-                    EmailID: emailID);
+                    EmailId: emailId);
 
                 var result = await _session.CreateClient(args, dryRun, idempotencyKey);
 
@@ -227,18 +247,20 @@ namespace LacertMCP.Server.Tools
                         result.Status,
                         new Dictionary<string, object?>
                         {
-                            ["clientID"] = clientID,
+                            ["clientId"] = clientId,
                             ["taxType"] = canonicalTaxType,
                         });
                 }
 
                 var info = StatusCodes.GetStatusInfo(result.Status);
+                // P16-054/P16-080 — wire envelope key is `clientId` (was
+                // `clientID`).
                 return (object)new
                 {
                     statusCode = result.Status,
                     statusName = info.Name,
                     clientNumber = result.ClientNumber,
-                    clientID,
+                    clientId,
                     dryRun,
                 };
             });

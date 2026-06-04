@@ -18,12 +18,15 @@ using Xunit;
 namespace LacertMCP.Tests.Integration
 {
     /// <summary>
-    /// P15-049 — end-to-end MCP discovery roundtrip. Stands up an in-process
-    /// MCP server bound to a pair of anonymous pipe streams, drives it through
-    /// the real MCP client over JSON-RPC, and asserts that the SDK's auto-
-    /// discovery (<c>WithPromptsFromAssembly</c> + <c>WithToolsFromAssembly</c>
-    /// in <see cref="LacertMCP.Server.Program"/>) actually surfaces the
-    /// [McpServerPromptType] / [McpServerToolType] classes over the wire.
+    /// P15-049 / P16-050 — end-to-end MCP discovery roundtrip plus serverInfo
+    /// wire-field pin. Stands up an in-process MCP server bound to a pair of
+    /// anonymous pipe streams, drives it through the real MCP client over
+    /// JSON-RPC, and asserts that (1) the SDK's auto-discovery
+    /// (<c>WithPromptsFromAssembly</c> + <c>WithToolsFromAssembly</c> in
+    /// <see cref="LacertMCP.Server.Program"/>) actually surfaces the
+    /// [McpServerPromptType] / [McpServerToolType] classes over the wire, and
+    /// (2) the InitializeResult.serverInfo Implementation block carries the
+    /// canonical name + a BuildInfo-stamped Version.
     ///
     /// <para>
     /// The existing <see cref="LacertMCP.Tests.Prompts.WorkflowPromptsTests"/>
@@ -70,12 +73,24 @@ namespace LacertMCP.Tests.Integration
                 serverToClient.GetClientHandleAsString());
 
             // Server: same shape as Program.cs minus stdio.
+            // P16-050 — mirror Program.cs's ServerInfo configuration so this
+            // discovery harness exercises the same wire-level identity the
+            // real server publishes. Keeps the test from quietly succeeding
+            // against a defaults-only server while production drifted apart.
             var builder = Host.CreateApplicationBuilder();
             builder.Logging.ClearProviders();
             builder.Services.AddSingleton<LacerteSessionManager>(_ =>
                 new LacerteSessionManager(new Dictionary<string, string?>()));
             builder.Services
-                .AddMcpServer()
+                .AddMcpServer(opts =>
+                {
+                    opts.ServerInfo = new Implementation
+                    {
+                        Name = "lacerte-mcp",
+                        Title = "Lacerte MCP",
+                        Version = LacertMCP.Server.Diagnostics.BuildInfo.Version,
+                    };
+                })
                 .WithStreamServerTransport(serverReadsClientToServer, serverToClient)
                 .WithToolsFromAssembly(typeof(SessionTools).Assembly)
                 .WithPromptsFromAssembly(typeof(WorkflowPrompts).Assembly);
@@ -122,7 +137,9 @@ namespace LacertMCP.Tests.Integration
                 // someone forgot to register the test for.
                 Assert.Contains("lacerte_client_intake", names);
                 Assert.Contains("lacerte_review_ef_status", names);
-                Assert.Contains("lacerte_bulk_field_update", names);
+                // P16-052 — prompt renamed from lacerte_bulk_field_update to
+                // lacerte_field_write_bulk to match the tool method name.
+                Assert.Contains("lacerte_field_write_bulk", names);
                 Assert.Contains("lacerte_csv_intake", names);
                 Assert.Equal(4, names.Length);
             }
@@ -193,7 +210,9 @@ namespace LacertMCP.Tests.Integration
             try
             {
                 var prompt = await client.GetPromptAsync(
-                    "lacerte_bulk_field_update",
+                    // P16-052 — prompt renamed to lacerte_field_write_bulk to
+                    // match the tool method name.
+                    "lacerte_field_write_bulk",
                     new Dictionary<string, object?>
                     {
                         ["table"] = 1,
@@ -243,6 +262,37 @@ namespace LacertMCP.Tests.Integration
         }
 
         [Fact]
+        public async Task ServerInfo_Carries_Name_And_Version()
+        {
+            // P16-050 — pins the wire-level Implementation/serverInfo field
+            // populated in Program.cs (and mirrored above for this harness).
+            // Without this assertion the SDK silently falls back to assembly
+            // defaults, the host UI shows a bare 'LacertMCP.Server' with no
+            // SemVer, and bug reports from operators won't carry a version
+            // stamp. StartsWith("0.") rather than equals "0.1.0" lets the
+            // test survive minor version bumps without churn while still
+            // catching the case where Version is empty or defaults to
+            // "1.0.0.0".
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var (client, host) = await StartServerAndConnectClientAsync(cts.Token);
+            try
+            {
+                Assert.NotNull(client.ServerInfo);
+                Assert.Equal("lacerte-mcp", client.ServerInfo!.Name);
+                Assert.False(string.IsNullOrEmpty(client.ServerInfo.Version));
+                // Version comes from Directory.Build.props (BuildInfo); pin to
+                // the "0." family so bumps to 0.2.0 / 0.3.0 don't churn the
+                // test, but catch defaulted "1.0.0.0" assembly fallbacks.
+                Assert.StartsWith("0.", client.ServerInfo.Version!);
+            }
+            finally
+            {
+                await host.StopAsync(CancellationToken.None);
+                host.Dispose();
+            }
+        }
+
+        [Fact]
         public async Task ToolsList_ExposesAllRegisteredTools()
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -269,6 +319,44 @@ namespace LacertMCP.Tests.Integration
                 Assert.Contains("lacerte_field_write", names);
                 Assert.Contains("lacerte_ef_status", names);
                 Assert.Contains("lacerte_field_access_map", names);
+            }
+            finally
+            {
+                await host.StopAsync(CancellationToken.None);
+                host.Dispose();
+            }
+        }
+
+        // P16-007 / P16-009 — tool catalog descriptions must not ship the
+        // classic Windows-1252-decoded-then-re-saved-as-UTF-8 mojibake
+        // sequences (`Â§`, `â€"`, `â€™`, `â€œ`, etc.). Those bytes are visible
+        // to every MCP client that reads tools/list, and frontier LLMs have
+        // trained on the pattern as "corrupted text" — they downweight or
+        // skip a tool whose description contains it. Any new bad paste from
+        // a Word doc / Outlook draft into a [Description] attribute fails
+        // this test, localized to the specific tool name.
+        [Fact]
+        public async Task ToolsList_Descriptions_HaveNoMojibakeMarkers()
+        {
+            // Bad bytes (each is a 2-3 byte UTF-8 sequence that decodes as
+            // Windows-1252 metadata, not as the intended em-dash / section).
+            var badMarkers = new[] { "Â§", "â€\"", "â€™", "â€œ", "â€" };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var (client, host) = await StartServerAndConnectClientAsync(cts.Token);
+            try
+            {
+                var tools = await client.ListToolsAsync(cancellationToken: cts.Token);
+                foreach (var tool in tools)
+                {
+                    foreach (var marker in badMarkers)
+                    {
+                        Assert.False(
+                            (tool.Description ?? string.Empty).Contains(marker),
+                            $"Tool '{tool.Name}' description contains mojibake marker '{marker}'. " +
+                            $"Source file likely has a Windows-1252 byte saved as UTF-8 — re-save the [Description] string as clean UTF-8.");
+                    }
+                }
             }
             finally
             {

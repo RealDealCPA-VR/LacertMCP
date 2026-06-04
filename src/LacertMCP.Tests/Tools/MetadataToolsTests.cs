@@ -17,29 +17,60 @@ namespace LacertMCP.Tests.Tools
         public async Task FieldAccessMap_Individual_Table1_TY24_IncludesC1_0_AsReadOnly()
         {
             var tool = new MetadataTools();
-            var json = await tool.LacerteFieldAccessMap('I', 1, 2024);
+            // P16-027 — module is `string` (length-1) for JSON-binding parity
+            // with SessionTools.SetContext + CanUseNewApis.
+            var json = await tool.LacerteFieldAccessMap("I", 1, 2024);
             var root = Parse(json);
             Assert.True(root.GetProperty("success").GetBoolean(), json);
 
             var fields = root.GetProperty("result").GetProperty("fields");
             Assert.True(fields.TryGetProperty("C1_0", out var c10));
             Assert.Equal("ReadOnly", c10.GetString());
+            // P16-069/P16-079 — response field is `taxYear`.
+            Assert.Equal(2024, root.GetProperty("result").GetProperty("taxYear").GetInt32());
         }
 
         [Fact]
         public async Task FieldAccessMap_InvalidModule_Throws()
         {
             var tool = new MetadataTools();
-            var json = await tool.LacerteFieldAccessMap('Z', 1, 2024);
+            var json = await tool.LacerteFieldAccessMap("Z", 1, 2024);
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
+        }
+
+        [Fact]
+        public async Task FieldAccessMap_EmptyModule_Returns24()
+        {
+            // P16-027 — empty-string module rejected with the same
+            // InValidClientName (24) the SessionTools guards emit, so all
+            // three module-accepting tools fail identically.
+            var tool = new MetadataTools();
+            var json = await tool.LacerteFieldAccessMap("", 1, 2024);
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(24, root.GetProperty("statusCode").GetInt32());
+        }
+
+        [Fact]
+        public async Task FieldAccessMap_RejectsMultiCharModule_Returns24()
+        {
+            // P16-049 — multi-character module rejected with the same
+            // InValidClientName (24) the SessionTools guards emit, so
+            // every module-accepting tool fails identically when the
+            // single-character contract is violated.
+            var tool = new MetadataTools();
+            var json = await tool.LacerteFieldAccessMap("II", 1, 2024);
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(24, root.GetProperty("statusCode").GetInt32());
         }
 
         [Fact]
         public async Task FieldAccessMap_InvalidTable_Throws()
         {
             var tool = new MetadataTools();
-            var json = await tool.LacerteFieldAccessMap('I', 8, 2024); // DATA8 reserved
+            var json = await tool.LacerteFieldAccessMap("I", 8, 2024); // DATA8 reserved
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
         }
@@ -48,7 +79,7 @@ namespace LacertMCP.Tests.Tools
         public async Task FieldAccessMap_TaxYearTooOld_Returns9003()
         {
             var tool = new MetadataTools();
-            var json = await tool.LacerteFieldAccessMap('I', 1, 2017);
+            var json = await tool.LacerteFieldAccessMap("I", 1, 2017);
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(SyntheticStatusCodes.TaxYearTooOld,

@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Session;
@@ -8,7 +8,7 @@ using Xunit;
 namespace LacertMCP.Tests.Session
 {
     /// <summary>
-    /// P15-013 — CancellationToken plumbing on every public LacerteSessionManager
+    /// P15-013 â€” CancellationToken plumbing on every public LacerteSessionManager
     /// chokepoint. A pre-cancelled token must surface
     /// <see cref="System.OperationCanceledException"/> BEFORE any work runs.
     /// MCP cancel notifications target long-running tool calls (paged
@@ -99,11 +99,11 @@ namespace LacertMCP.Tests.Session
         {
             using var mgr = NewRegisteredSimWithContext();
             var args = new CreateClientArgs(
-                ClientID: "CTTEST",
+                ClientId: "CTTEST",
                 TaxType: "Individual",
                 FirstName: "Cancel",
                 LastName: "Test",
-                EmailID: "ct@example.com");
+                EmailId: "ct@example.com");
             await Assert.ThrowsAnyAsync<System.OperationCanceledException>(
                 async () => await mgr.CreateClient(args, cancellationToken: Cancelled()));
         }

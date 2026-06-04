@@ -141,5 +141,137 @@ namespace LacertMCP.Tests.Errors
             Assert.Equal(9009, root.GetProperty("statusCode").GetInt32());
             Assert.Equal("ContextNotSet", root.GetProperty("statusName").GetString());
         }
+
+        // ---------------------------------------------------------------
+        // P16-002 / P16-060 — `origin` field on the error envelope
+        // ---------------------------------------------------------------
+        //
+        // LacerteSDKError.Origin (sdk | synthetic) was added in P15-037 so
+        // the wire can carry a documented discriminator instead of forcing
+        // every LLM client to memorize the 9000+ synthetic threshold. The
+        // envelope-emission half is in WrapToolHandler.SerializeError. These
+        // tests pin the contract for every error path the wrapper exposes
+        // (LacerteSDKError sdk, LacerteSDKError synthetic, OdbcException
+        // mapped to TAPIStatus, and the generic catch-all that wraps as
+        // synthetic InternalServerError 9203).
+
+        [Fact]
+        public async Task Run_SdkOriginCode_EmitsOriginSdkOnEnvelope()
+        {
+            var json = await WrapToolHandler.Run(async () =>
+            {
+                await Task.Yield();
+                throw new LacerteSDKError(StatusCodes.ExposedForRead);
+            });
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(StatusCodes.ExposedForRead, root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("sdk", root.GetProperty("origin").GetString());
+        }
+
+        [Fact]
+        public async Task Run_SyntheticOriginCode_EmitsOriginSyntheticOnEnvelope()
+        {
+            var json = await WrapToolHandler.Run(async () =>
+            {
+                await Task.Yield();
+                throw new LacerteSDKError(SyntheticStatusCodes.SimulationOnly);
+            });
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("synthetic", root.GetProperty("origin").GetString());
+        }
+
+        [Fact]
+        public async Task Run_GenericException_EmitsOriginSyntheticOnEnvelope()
+        {
+            // P15-035 routes generic Exception through
+            // SyntheticStatusCodes.InternalServerError (9203); P16-002 pins
+            // that the origin discriminator is honest about that wrap so an
+            // LLM doesn't think a NullReferenceException came from the SDK.
+            var json = await WrapToolHandler.Run(async () =>
+            {
+                await Task.Yield();
+                throw new InvalidOperationException("boom");
+            });
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(SyntheticStatusCodes.InternalServerError, root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("synthetic", root.GetProperty("origin").GetString());
+        }
+
+        // ---------------------------------------------------------------
+        // P16-010 — JavaScriptEncoder.Create(UnicodeRanges.All)
+        // ---------------------------------------------------------------
+        //
+        // Default JavaScriptEncoder escapes every non-ASCII codepoint as
+        // `\u00XX`, producing unreadable wire envelopes for accented client
+        // names, em-dash detail-row descriptions, and SDK-emitted localized
+        // error text. These tests pin the encoder so the bytes that reach
+        // the LLM are the literal Unicode glyphs.
+
+        [Fact]
+        public async Task Run_Success_PassesUnicodeGlyphsThroughLiteral_P16_010()
+        {
+            var json = await WrapToolHandler.Run(async () =>
+            {
+                await Task.Yield();
+                return (object)new
+                {
+                    clientName = "José García",          // é, í
+                    description = "Form 2106 — Employee Expenses", // em-dash
+                    sectionRef = "REQUIREMENTS §2.1",         // section sign
+                };
+            });
+
+            // Literal glyphs reach the wire — token-efficient and
+            // operator-readable in Claude Desktop / Cursor / Windsurf.
+            Assert.Contains("José García", json);
+            Assert.Contains("Form 2106 — Employee Expenses", json);
+            Assert.Contains("§2.1", json);
+
+            // And the escape sequences are NOT in the wire bytes.
+            Assert.DoesNotContain("\\u00e9", json);
+            Assert.DoesNotContain("\\u00ed", json);
+            Assert.DoesNotContain("\\u2014", json);
+            Assert.DoesNotContain("\\u00a7", json);
+        }
+
+        [Fact]
+        public async Task Run_Error_PassesUnicodeGlyphsThroughLiteralInUserMessage_P16_010()
+        {
+            // Synthesize an envelope whose userMessage carries Unicode (via
+            // a synthetic status code with a localized-feel message string).
+            // We use the context dict as the carrier because real status
+            // messages are ASCII today — the test is about the encoder,
+            // not the message text.
+            var context = new Dictionary<string, object?>
+            {
+                ["reason"] = "Field §24 requires José — see Form 2106.",
+            };
+
+            var json = await WrapToolHandler.Run(async () =>
+            {
+                await Task.Yield();
+                throw new LacerteSDKError(SyntheticStatusCodes.ContextNotSet, context);
+            });
+
+            Assert.Contains("§24", json);
+            Assert.Contains("José", json);
+            Assert.Contains("—", json);
+            Assert.DoesNotContain("\\u00a7", json);
+            Assert.DoesNotContain("\\u00e9", json);
+            Assert.DoesNotContain("\\u2014", json);
+        }
     }
 }

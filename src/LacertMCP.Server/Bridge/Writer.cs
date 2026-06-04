@@ -83,20 +83,21 @@ namespace LacertMCP.Server.Bridge
 
         /// <summary>
         /// TY21+ write path. Wraps
-        /// <c>IDBFWriter.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev)</c>.
+        /// <c>IDBFWriter.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev)</c>.
         /// Returns the TAPIStatus integer (1 = Success).
+        /// <para>P16-054/P16-080 — `subClientId` casing matches the wire form.</para>
         /// </summary>
         public static int UpdateTaxReturn(
             string appId, string dataPath, string dbf, string clientNumber,
-            string field, object? value, int? subClientID, string? stateAbbrev)
+            string field, object? value, int? subClientId, string? stateAbbrev)
         {
             // P14-050 — bridge-boundary defense-in-depth. See WriteToDBFDatabase.
             BridgeInputValidation.ValidateUpdateTaxReturnArgs(
-                appId, dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev);
+                appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev);
 
             // F11 — wrap with WireLog.
             return WireLog.RecordSync<int>("Bridge.UpdateTaxReturn",
-                new { dbf, clientNumber, field, value, subClientID, stateAbbrev }, () =>
+                new { dbf, clientNumber, field, value, subClientId, stateAbbrev }, () =>
             {
                 var writer = AcquireWriter("UpdateTaxReturn");
                 try
@@ -106,7 +107,7 @@ namespace LacertMCP.Server.Bridge
                         dynamic w = writer;
                         int status = (int)w.UpdateTaxReturn(
                             appId, dataPath, dbf, clientNumber, field, value,
-                            subClientID ?? 0, stateAbbrev ?? string.Empty);
+                            subClientId ?? 0, stateAbbrev ?? string.Empty);
                         return status;
                     }
                     catch (LacerteSDKError) { throw; }

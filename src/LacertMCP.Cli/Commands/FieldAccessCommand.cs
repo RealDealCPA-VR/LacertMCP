@@ -4,8 +4,10 @@ using System.CommandLine;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using LacertMCP.Server.Schema;
 
 namespace LacertMCP.Cli.Commands
@@ -90,6 +92,13 @@ namespace LacertMCP.Cli.Commands
                 stderr.WriteLine($"Unknown module '{module}'. Expected one of I/C/P/S/F/R/T/N/B.");
                 return 1;
             }
+            // P16-021: range-validate --table. Without this `--table 99` cheerfully
+            // printed `Universal rule: C99_0 → ReadOnly` for a table that doesn't
+            // exist, eroding trust in the on-disk map.
+            if (!ValidateTable(table, stderr))
+            {
+                return 1;
+            }
 
             // Read the raw shard so we can print everything (the loader is lookup-oriented).
             var rows = ReadShard(module);
@@ -102,7 +111,10 @@ namespace LacertMCP.Cli.Commands
             if (filtered.Count == 0)
             {
                 writer.WriteLine($"(no entries in base map for module={module} table={table})");
-                writer.WriteLine($"Universal rule: C{table}_0 → ReadOnly (always, no entry needed).");
+                // P16-021: drop the hard-coded `C` prefix that was wrong on non-C
+                // modules (e.g. on module I it read like a typo). Use the actual
+                // module letter so the example matches the user's query.
+                writer.WriteLine($"Universal rule: any field ending in _0 (e.g. {module}{table}_0) is ReadOnly on every module — no entry needed.");
                 return 0;
             }
 
@@ -134,6 +146,11 @@ namespace LacertMCP.Cli.Commands
             var maxLenOpt = new Option<int?>("--max-length", () => null, "Optional max length (chars).");
             var sourceOpt = new Option<string>("--source", () => "manual", "Provenance tag (spec | introspect | manual).");
             var noteOpt = new Option<string?>("--note", () => null, "Optional description / note.");
+            // P16-021: --force is the escape hatch when the operator legitimately
+            // wants to write a field name that doesn't match the
+            // <letter><table>_<n> convention (e.g. legacy import).
+            var forceOpt = new Option<bool>("--force", () => false,
+                "Override the field-name shape check (defaults to <letter><table>_<n>, e.g. C1_42).");
 
             set.AddOption(moduleOpt);
             set.AddOption(tableOpt);
@@ -143,6 +160,7 @@ namespace LacertMCP.Cli.Commands
             set.AddOption(maxLenOpt);
             set.AddOption(sourceOpt);
             set.AddOption(noteOpt);
+            set.AddOption(forceOpt);
 
             set.SetHandler((context) =>
             {
@@ -160,9 +178,10 @@ namespace LacertMCP.Cli.Commands
                 var ml = context.ParseResult.GetValueForOption(maxLenOpt);
                 var src = context.ParseResult.GetValueForOption(sourceOpt)!;
                 var note = context.ParseResult.GetValueForOption(noteOpt);
+                var force = context.ParseResult.GetValueForOption(forceOpt);
                 // P15-067: pass stdout + stderr explicitly so the routing is grep-able
                 // at the closure boundary.
-                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, Console.Out, Console.Error);
+                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, force, Console.Out, Console.Error);
             });
 
             return set;
@@ -176,13 +195,36 @@ namespace LacertMCP.Cli.Commands
             string? dataType, int? maxLength, string source, string? note, TextWriter writer)
             => RunSet(module, table, field, accessRaw, dataType, maxLength, source, note, writer, Console.Error);
 
+        /// <summary>
+        /// Back-compat overload — preserved for existing call sites that pre-date the
+        /// P16-021 <c>force</c> parameter. Defaults to no override (force=false).
+        /// </summary>
         public static int RunSet(char module, int table, string field, string accessRaw,
             string? dataType, int? maxLength, string source, string? note, TextWriter writer, TextWriter stderr)
+            => RunSet(module, table, field, accessRaw, dataType, maxLength, source, note, force: false, writer, stderr);
+
+        public static int RunSet(char module, int table, string field, string accessRaw,
+            string? dataType, int? maxLength, string source, string? note, bool force, TextWriter writer, TextWriter stderr)
         {
             var basename = Modules.FileBasenameFor(module);
             if (basename == null)
             {
                 stderr.WriteLine($"Unknown module '{module}'.");
+                return 1;
+            }
+            // P16-021: range-validate --table before we mutate the shard. Without
+            // this guard `--table 99` silently wrote a key the loader couldn't read,
+            // polluting the on-disk JSON with junk that became a PR-review puzzle.
+            if (!ValidateTable(table, stderr))
+            {
+                return 1;
+            }
+            // P16-021: shape-check --field. The convention is <letter><table>_<n>
+            // (e.g. C1_42, I3_0). A typo like `oops_typo` silently became a dead
+            // row. --force is the explicit escape hatch for legacy imports.
+            if (!force && !FieldShapeRegex.IsMatch(field))
+            {
+                stderr.WriteLine($"--field '{field}' does not match the <letter><table>_<n> convention (e.g. C1_42). Pass --force to override.");
                 return 1;
             }
             if (!Enum.TryParse<FieldAccess>(accessRaw, ignoreCase: true, out var access))
@@ -273,6 +315,11 @@ namespace LacertMCP.Cli.Commands
                 ReadCommentHandling = JsonCommentHandling.Skip,
                 WriteIndented = true,
                 DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                // P16-068: keep operator-readable text (notes / descriptions /
+                // data-type tags that may contain `<`, `>`, `+`, `&`) literal in
+                // the on-disk shard JSON. Shards are PR-reviewed; \uXXXX noise
+                // makes diffs unreadable.
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             };
             opts.Converters.Add(new JsonStringEnumConverter());
             return opts;
@@ -330,5 +377,34 @@ namespace LacertMCP.Cli.Commands
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
             m?.Invoke(null, null);
         }
+
+        // ---- P16-021 input validation helpers --------------------------------------
+
+        /// <summary>
+        /// P16-021: shared range guard for <c>--table</c>. DATA tables are 1..7
+        /// (1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status, 6=Display,
+        /// 7=Forms — see Modules / Tables in the schema layer). Used by both
+        /// <see cref="RunList"/> and <see cref="RunSet"/> so a typo can't pollute
+        /// the on-disk shard or print confidently-wrong universal-rule text.
+        /// </summary>
+        private static bool ValidateTable(int table, TextWriter stderr)
+        {
+            if (table < 1 || table > 7)
+            {
+                stderr.WriteLine($"--table must be in 1..7 (got {table}). DATA tables are numbered 1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status, 6=Display, 7=Forms.");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// P16-021: field-name convention regex — <c>&lt;letter&gt;&lt;table&gt;_&lt;n&gt;</c>
+        /// (e.g. <c>C1_42</c>, <c>c1_42</c>, <c>I3_0</c>). Case-insensitive on the
+        /// leading letter; trailing digits are unbounded. Operator can pass
+        /// <c>--force</c> to bypass for legacy imports.
+        /// </summary>
+        private static readonly Regex FieldShapeRegex = new Regex(
+            "^[A-Za-z][1-7]_\\d+$",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
     }
 }

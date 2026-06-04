@@ -539,5 +539,139 @@ namespace LacertMCP.Tests.Cli
             // Must be under the test bin's AppContext.BaseDirectory.
             Assert.StartsWith(AppContext.BaseDirectory, resolved);
         }
+
+        // ----- P16-023: DATA_PATH vs DATA_ROOT remediation differentiation -----
+
+        /// <summary>
+        /// P16-023: when LACERTE_DATA_ROOT is unset, the unset-state probe must
+        /// carry a remediation that names DATA_ROOT specifically and explains
+        /// it is NOT settable via `lacerte_set_context` (preempting the prior
+        /// copy-pasted message that sent operators on a wild-goose chase).
+        /// </summary>
+        [Fact]
+        public void Doctor_DataRoot_Unset_Remediation_Names_DataRoot_Not_SetContext()
+        {
+            var savedRoot = Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT");
+            try
+            {
+                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", null);
+                var results = DoctorCommand.RunAllProbes();
+                var dataRoot = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_ROOT env");
+                Assert.NotNull(dataRoot);
+                // Either the warn carries the remediation OR (if downgraded to pass
+                // because DATA_ROOT IS set elsewhere) the test is a no-op.
+                if (dataRoot!.Status == DoctorCommand.ProbeStatus.Warn)
+                {
+                    Assert.False(string.IsNullOrEmpty(dataRoot.Remediation),
+                        "DATA_ROOT unset warn must carry a remediation.");
+                    Assert.Contains("LACERTE_DATA_ROOT", dataRoot.Remediation!);
+                    Assert.Contains("NOT settable via lacerte_set_context", dataRoot.Remediation);
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", savedRoot);
+            }
+        }
+
+        /// <summary>
+        /// P16-023: bonus tier-down — when DATA_PATH is unset BUT DATA_ROOT is
+        /// set to an existing directory, DATA_PATH should report Pass (not Warn)
+        /// because discovery via DATA_ROOT already covers the use case. Without
+        /// this an operator with correctly-configured DATA_ROOT sees a false-
+        /// positive warn telling them to call set_context.
+        /// </summary>
+        [Fact]
+        public void Doctor_DataPath_Unset_With_DataRoot_Set_Downgrades_To_Pass()
+        {
+            var savedRoot = Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT");
+            var savedPath = Environment.GetEnvironmentVariable("LACERTE_DATA_PATH");
+            try
+            {
+                // Use the temp dir as a guaranteed-existing path for DATA_ROOT.
+                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", Path.GetTempPath());
+                Environment.SetEnvironmentVariable("LACERTE_DATA_PATH", null);
+
+                var results = DoctorCommand.RunAllProbes();
+                var dataPath = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_PATH env");
+                Assert.NotNull(dataPath);
+                Assert.Equal(DoctorCommand.ProbeStatus.Pass, dataPath!.Status);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", savedRoot);
+                Environment.SetEnvironmentVariable("LACERTE_DATA_PATH", savedPath);
+            }
+        }
+
+        // ----- P16-058: AppID probe acknowledges Phase 9 stub on Win32NT+Live -----
+
+        /// <summary>
+        /// P16-058: off-Windows (or on Windows in sim mode), the Absent
+        /// remediation must remain terse (no Phase-9 noise — operator can't
+        /// complete the ceremony anyway in dev environments).
+        /// </summary>
+        [Fact]
+        public void Doctor_ProbeAppId_OffWindows_NoAppId_RemediationDoesNotMentionPhase9()
+        {
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT) return;
+
+            var results = DoctorCommand.RunAllProbes();
+            var appId = results.FirstOrDefault(r => r.Name == "AppID GUID");
+            Assert.NotNull(appId);
+            if (appId!.Status == DoctorCommand.ProbeStatus.Fail)
+            {
+                Assert.False(string.IsNullOrEmpty(appId.Remediation));
+                Assert.DoesNotContain("Phase 9", appId.Remediation!);
+            }
+        }
+
+        // ----- P16-073: doctor Next: epilogue -----
+
+        /// <summary>
+        /// P16-073: human output must include a "Next:" block keyed to exit code
+        /// so the operator isn't left at a probe table needing to context-switch
+        /// to README. JSON output must NOT include it (schema is contract-pinned).
+        /// </summary>
+        [Fact]
+        public void Doctor_HumanOutput_Includes_Next_Step_Block()
+        {
+            var sw = new StringWriter();
+            DoctorCommand.Run(sw, asJson: false);
+            var output = sw.ToString();
+            Assert.Contains("Next:", output);
+        }
+
+        [Fact]
+        public void Doctor_JsonOutput_Does_Not_Include_Next_Step_Block()
+        {
+            var sw = new StringWriter();
+            DoctorCommand.Run(sw, asJson: true);
+            var output = sw.ToString();
+            Assert.DoesNotContain("Next:", output);
+            // Sanity: still parseable JSON.
+            using var doc = JsonDocument.Parse(output);
+            Assert.True(doc.RootElement.TryGetProperty("probes", out _));
+        }
+
+        // ----- P16-068: UnsafeRelaxedJsonEscaping -----
+
+        /// <summary>
+        /// P16-068: doctor JSON must not escape `<` / `>` / `&` / `+` — the
+        /// App.config remediation literally contains <startup> XML and the
+        /// default HTML-safe encoder turns it into unreadable `<` noise
+        /// when an operator pastes the JSON into a bug report.
+        /// </summary>
+        [Fact]
+        public void Doctor_Json_Does_Not_Escape_Ascii_Punctuation()
+        {
+            var sw = new StringWriter();
+            DoctorCommand.Run(sw, asJson: true);
+            var output = sw.ToString();
+            Assert.DoesNotContain("\\u003C", output);
+            Assert.DoesNotContain("\\u003E", output);
+            Assert.DoesNotContain("\\u002B", output);
+            Assert.DoesNotContain("\\u0026", output);
+        }
     }
 }

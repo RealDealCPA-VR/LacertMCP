@@ -38,21 +38,22 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Write a single field value to a DATA1..DATA5 row for the active context (DATA6/DATA7 are read-only per spec). Pre-TY21 path uses WriteToDBFDatabase under the hood; TY21+ silently routes to UpdateTaxReturn (use lacerte_update_return for an explicit entrypoint). Returns the TAPIStatus integer (1=Success).")]
+        [Description("Write a single field value to a DATA1..DATA5 row for the active context (DATA6/DATA7 are read-only per spec). Pre-TY21 contexts use WriteToDBFDatabase; TY21+ contexts route to UpdateTaxReturn — both transparently, no caller branching needed. This is the primary write entrypoint for all years; lacerte_update_return is a thin alias retained for SDK-docs parity. Returns the TAPIStatus integer (1=Success).")]
         public Task<string> LacerteFieldWrite(
             [Description("DBF table number. 1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status are writable; 6=Display and 7=Forms are read-only per spec §2 and will be rejected with ExposedForRead.")] int table,
-            [Description("Lacerte ClientNumber (the C{t}_0 identifier, not the operator-chosen ClientID).")] string clientNumber,
+            [Description("Lacerte ClientNumber (the C{t}_0 identifier, not the operator-chosen ClientId).")] string clientNumber,
             [Description("Field name (e.g. C1_1, C2_15, C4_G3). Must be a writable field in the access map.")] string field,
             [Description("Value to write. JSON-serializable scalar — string, number, or boolean.")] object? value,
-            [Description("Required for DATA2 / DATA4 writes. Positive integer identifying the dependent/partner/shareholder row.")] int? subClientID = null,
+            // P16-054/P16-080 — canonical wire casing `subClientId`.
+            [Description("Required for DATA2 / DATA4 writes. Positive integer identifying the dependent/partner/shareholder row.")] int? subClientId = null,
             [Description("Required for DATA3 / DATA4 writes. 2-letter state postal code (e.g. CA, NY).")] string? stateAbbrev = null,
             [Description("If true, run the full validation + access-map gate then roll back without persisting. Returns the would-be TAPIStatus.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call (audit P15-060); replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null,
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
             return FieldWriteCore.Run(
                 _session, table, clientNumber, field, value,
-                subClientID, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
+                subClientId, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
         }
     }
 }

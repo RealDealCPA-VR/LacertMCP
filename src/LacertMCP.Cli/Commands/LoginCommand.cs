@@ -66,12 +66,18 @@ namespace LacertMCP.Cli.Commands
                 return 0;
             }
 
-            // P15-028: Login runs on a cron (every 24h ticket refresh). A silent exit-0
-            // here lets a stale ticket lurk forever — the operator's cron logs would
-            // show "success" while tools return TicketExpired (9103). Route the partial
-            // message to stderr and return exit 3 so the cron wrapper can alarm.
+            // P15-028 / P16-004: Login runs on a cron (every 24h ticket refresh). A
+            // silent exit-0 here lets a stale ticket lurk forever — the operator's
+            // cron logs would show "success" while tools start returning the proactive
+            // expiry probe code LoginExpired (9007) (LacerteSessionManager
+            // ThrowIfAuthExpired) or, if the reactive path slips past the probe, raw
+            // SDK NotSignedIn (203). Route the partial message to stderr and return
+            // exit 3 so the cron wrapper can alarm. The earlier draft of this string
+            // named TicketExpired (9103) — wrong on both counts: 9103 is InvalidAppId
+            // (the bridge-boundary AppID shape check), and TicketExpired is not a
+            // defined StatusInfo name anywhere.
             Console.Error.WriteLine("[partial] Login refresh not yet wired (Phase 9 task #63).");
-            Console.Error.WriteLine("          Existing 24h ticket cannot be renewed until upgrade — tools will return TicketExpired (9103) once the current ticket lapses.");
+            Console.Error.WriteLine("          Existing 24h ticket cannot be renewed until upgrade — tools will return LoginExpired (9007) once the current ticket lapses.");
             return 3;
         }
     }

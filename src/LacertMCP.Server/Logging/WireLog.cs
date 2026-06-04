@@ -5,9 +5,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Text.Unicode;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -127,6 +129,12 @@ namespace LacertMCP.Server.Logging
         private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
         {
             WriteIndented = false,
+            // P16-010 — mirror WrapToolHandler's encoder so disk log lines
+            // are operator-readable when opened in a text editor (accented
+            // names, em-dashes, section signs render as glyphs not
+            // `\u00XX`). HTML-sensitive chars still escape — see the
+            // WrapToolHandler.JsonOptions comment for the rationale.
+            Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
         };
 
         // P15-052 — per-request correlation ID. Set by WrapToolHandler.Run at
@@ -386,6 +394,42 @@ namespace LacertMCP.Server.Logging
                 var cfg = _testForceConfig ?? _config.Value;
                 return cfg == null ? null : Path.Combine(cfg.LogDir, FilenameForToday());
             }
+        }
+
+        /// <summary>
+        /// P16-066 — the path WireLog WOULD write to today, computed unconditionally
+        /// of <c>LACERTE_DEBUG_WIRE</c>. When logging is active, this matches
+        /// <see cref="CurrentLogPath"/>. When logging is disabled, this returns the
+        /// path the operator would see if they set <c>LACERTE_DEBUG_WIRE=1</c> and
+        /// restarted — applying the same default-dir / <c>LACERTE_DEBUG_LOG_PATH</c>
+        /// override / <c>PathValidation</c> chain as <see cref="ResolveConfig"/>.
+        ///
+        /// <para>
+        /// Surfaced via <c>lacerte_session_status</c> so an operator hitting the
+        /// 9201/9203 remediation ("inspect logs/lacerte-YYYYMMDD.log") can see the
+        /// exact path the file lives at without having to enable logging first.
+        /// </para>
+        /// </summary>
+        public static string ResolvedOrWouldBeLogPath()
+        {
+            // If logging is active, return the actual active path.
+            var active = _testForceConfig ?? _config.Value;
+            if (active != null)
+            {
+                return Path.Combine(active.LogDir, FilenameForToday());
+            }
+
+            // Logging disabled — replay the same dir-resolution logic as
+            // ResolveConfig so the operator sees where the file WOULD land.
+            var defaultDir = Path.Combine(Directory.GetCurrentDirectory(), "logs");
+            var dirOverride = Environment.GetEnvironmentVariable("LACERTE_DEBUG_LOG_PATH");
+            string dir = defaultDir;
+            if (!string.IsNullOrEmpty(dirOverride))
+            {
+                var validated = LacertMCP.Server.Session.PathValidation.ValidateLogDir(dirOverride);
+                dir = validated ?? defaultDir;
+            }
+            return Path.Combine(dir, FilenameForToday());
         }
 
         /// <summary>

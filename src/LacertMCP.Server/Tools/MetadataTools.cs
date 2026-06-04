@@ -29,22 +29,37 @@ namespace LacertMCP.Server.Tools
         // Schema.Modules now (single source of truth).
 
         [McpServerTool]
-        [Description("Return the resolved field access map for (module, table, year). Includes (a) the universal C{t}_0 -> ReadOnly rule, and (b) every cataloged field for the module/table from the loaded JSON shard. Useful before attempting a field write — the same gate runs server-side via AssertWritable.")]
+        [Description("Return the resolved field access map for (module, table, taxYear). Includes (a) the universal C{t}_0 -> ReadOnly rule, and (b) every cataloged field for the module/table from the loaded JSON shard. Useful before attempting a field write — the same gate runs server-side via AssertWritable.")]
         public Task<string> LacerteFieldAccessMap(
-            [Description("Single-character module code: I/C/P/S/F/R/T/N/B.")] char module,
+            [Description("Single-character module code: one of I, C, P, S, F, R, T, N, B.")] string module,
             [Description("DBF table number 1..7.")] int table,
-            [Description("Tax year (>= 2018). Overlay deltas for the year are applied on top of the base map.")] int year)
+            [Description("Tax year (>= 2018). Overlay deltas for the year are applied on top of the base map.")] int taxYear)
         {
             return WrapToolHandler.Run(() =>
             {
-                var moduleInfo = Modules.GetByChar(module);
+                // P16-027 — module typed as string for JSON-binding parity
+                // with SessionTools.SetContext / CanUseNewApis. Length-1
+                // guard mirrors those tools so binding errors surface the
+                // same way across the trio.
+                if (string.IsNullOrEmpty(module) || module.Length != 1)
+                {
+                    throw new LacerteSDKError(
+                        StatusCodes.InValidClientName,
+                        new Dictionary<string, object?>
+                        {
+                            ["module"] = module,
+                            ["reason"] = "module must be a single character (I/C/P/S/F/R/T/N/B).",
+                        });
+                }
+                var moduleChar = module[0];
+                var moduleInfo = Modules.GetByChar(moduleChar);
                 if (moduleInfo == null)
                 {
                     throw new LacerteSDKError(
                         StatusCodes.InValidClientName,
                         new Dictionary<string, object?>
                         {
-                            ["module"] = module.ToString(),
+                            ["module"] = module,
                             ["validModules"] = string.Join(",", Modules.All.Select(m => m.Char)),
                         });
                 }
@@ -58,11 +73,11 @@ namespace LacertMCP.Server.Tools
                             ["validTables"] = "1..7",
                         });
                 }
-                if (year < 2018)
+                if (taxYear < 2018)
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.TaxYearTooOld,
-                        new Dictionary<string, object?> { ["taxYear"] = year, ["floor"] = 2018 });
+                        new Dictionary<string, object?> { ["taxYear"] = taxYear, ["floor"] = 2018 });
                 }
 
                 // Build the result map. We always include the universal
@@ -85,7 +100,7 @@ namespace LacertMCP.Server.Tools
                 for (int i = 0; i <= 25; i++)
                 {
                     var f = "C" + table + "_" + i;
-                    var access = FieldAccessMapLoader.GetFieldAccess(module, table, f, year);
+                    var access = FieldAccessMapLoader.GetFieldAccess(moduleChar, table, f, taxYear);
                     // Skip Unknown (the empty shards return Unknown for every
                     // probe except the universal C{t}_0 rule) — surfacing all
                     // 26 Unknown rows would just be noise. Callers who want
@@ -101,17 +116,19 @@ namespace LacertMCP.Server.Tools
                 foreach (var suffix in new[] { "_G1", "_G2", "_G3" })
                 {
                     var f = "C" + table + suffix;
-                    var access = FieldAccessMapLoader.GetFieldAccess(module, table, f, year);
+                    var access = FieldAccessMapLoader.GetFieldAccess(moduleChar, table, f, taxYear);
                     if (access == FieldAccess.Unknown) continue;
                     entries[f] = access.ToString();
                 }
 
                 return Task.FromResult<object>(new
                 {
-                    module = module.ToString(),
+                    module,
                     moduleName = moduleInfo.Name,
                     table,
-                    year,
+                    // P16-069/P16-079 — canonical `taxYear` (replaces `year`)
+                    // so the wire name matches the input parameter.
+                    taxYear,
                     count = entries.Count,
                     fields = entries,
                 });
@@ -119,7 +136,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Return the full Lacerte SDK return-code table — TAPIStatus 0..28 + TPSDKStatus 200..204 + synthetic 9xxx — with name, severity, user message, and remediation. Discoverable resource so the model can quote canonical error guidance.")]
+        [Description("Return the full Lacerte SDK return-code table — TAPIStatus 0..28 + TPSDKStatus 200..204 + synthetic 9xxx — with name, severity, user message, and remediation. Discoverable resource so the model can quote canonical error guidance. Each row carries `origin` (TAPIStatus / TPSDKStatus / Synthetic — Lacerte's own SDK subdivision) and `originGroup` (sdk / synthetic — matches the wire-envelope `origin` field for direct filtering).")]
         public Task<string> LacerteReturnCodes()
         {
             return WrapToolHandler.Run(() =>
@@ -139,6 +156,11 @@ namespace LacertMCP.Server.Tools
                         userMessage = info.UserMessage,
                         remediation = info.Remediation,
                         origin = kv.Key >= 200 ? "TPSDKStatus" : "TAPIStatus",
+                        // P16-053 — low-cardinality wire-envelope-matching
+                        // `originGroup` (sdk / synthetic). LLMs can filter
+                        // `originGroup == envelope.origin` to locate the
+                        // catalog row for a structured error.
+                        originGroup = kv.Key >= LacerteSDKError.SyntheticCodeThreshold ? "synthetic" : "sdk",
                     });
                 }
 
@@ -153,12 +175,16 @@ namespace LacertMCP.Server.Tools
                         userMessage = kv.Value.UserMessage,
                         remediation = kv.Value.Remediation,
                         origin = "Synthetic",
+                        originGroup = "synthetic",
                     });
                 }
 
                 return Task.FromResult<object>(new
                 {
                     count = rows.Count,
+                    // P16-024 — canonical `rows` key for cross-tool consistency.
+                    // `codes` retained as a v0.1 alias (removed in v0.2).
+                    rows,
                     codes = rows,
                 });
             });

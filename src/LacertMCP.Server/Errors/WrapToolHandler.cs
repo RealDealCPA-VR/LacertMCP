@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Odbc;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Unicode;
 using System.Threading.Tasks;
 using LacertMCP.Server.Logging;
 using LacertMCP.Server.Odbc;
@@ -19,8 +21,12 @@ namespace LacertMCP.Server.Errors
     ///   <item><description><b>Success</b> →
     ///     <c>{ "success": true, "result": &lt;handler return value&gt;, "cid": "..." }</c>.</description></item>
     ///   <item><description><b><see cref="LacerteSDKError"/></b> →
-    ///     <c>{ "success": false, "statusCode", "statusName", "severity", "userMessage",
-    ///     "remediation", "context", "cid" }</c>.</description></item>
+    ///     <c>{ "success": false, "statusCode", "statusName", "origin", "severity",
+    ///     "userMessage", "remediation", "context", "cid" }</c>.
+    ///     P15-037/P16-002/P16-060: <c>origin</c> is <c>"sdk"</c> for SDK-origin codes
+    ///     (TAPIStatus 0-28, TPSDKStatus 200-204) and <c>"synthetic"</c> for MCP-minted
+    ///     codes (>=9000). The same discriminator appears on every <c>lacerte_return_codes</c>
+    ///     row as <c>originGroup</c> so an LLM can filter the catalog by it.</description></item>
     ///   <item><description><b><see cref="OdbcException"/></b> → routed via
     ///     <see cref="OdbcErrorMapper.Map(OdbcException, IReadOnlyDictionary{string,object?})"/>
     ///     so SQLSTATE telemetry maps to proper TAPIStatus codes (DBFNotAccessable,
@@ -69,6 +75,17 @@ namespace LacertMCP.Server.Errors
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
             WriteIndented = false,
+            // P16-010 — pass Unicode through verbatim so accented client
+            // names (José García), em-dash detail-row descriptions
+            // (Form 2106 — Employee Business Expenses), and SDK-emitted
+            // localized error text reach the LLM as readable glyphs rather
+            // than `\u00XX` escape sequences. JavaScriptEncoder.Default
+            // escapes every non-ASCII codepoint, costing extra tokens and
+            // hurting model parsing on a transport (JSON-RPC over stdio)
+            // that has no need for that level of escaping. Keep HTML-sensitive
+            // chars (`<`, `>`, `&`, `'`, `+`) escaped as defense-in-depth in
+            // case a future MCP host embeds responses in HTML chrome.
+            Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
         };
 
         /// <summary>
@@ -148,6 +165,11 @@ namespace LacertMCP.Server.Errors
                 ["success"] = false,
                 ["statusCode"] = err.StatusCode,
                 ["statusName"] = err.StatusName,
+                // P16-053 / P15-037 — surface `origin` so wire consumers can
+                // tell at a glance whether the code came from the SDK or was
+                // MCP-minted (synthetic). Matches the `originGroup` column
+                // on lacerte_return_codes for direct filtering.
+                ["origin"] = err.Origin,
                 ["severity"] = err.Severity.ToString().ToLowerInvariant(),
                 ["userMessage"] = err.UserMessage,
                 ["remediation"] = err.Remediation,

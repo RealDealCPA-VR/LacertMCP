@@ -177,5 +177,67 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal(2, exit);
             Assert.Contains("Invalid --filter regex", stderr.ToString());
         }
+
+        // ----- P16-067: filter no-match exit-code parity + flag mutex -----
+
+        /// <summary>
+        /// P16-067: <c>--filter</c> with zero matches now exits 1 (parity with
+        /// <c>--name</c>'s no-match contract) so a CI script `if ($LASTEXITCODE -ne 0)`
+        /// can catch a refactor that drops the prefix it asserted on.
+        /// </summary>
+        [Fact]
+        public void Tools_FilterNoMatches_ReturnsExit1_WithStderrMessage()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = ToolsCommand.Run(asJson: false, filter: "^no_such_prefix_zzz_",
+                nameExact: null, namesOnly: false, stdout, stderr);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("No tools matched filter", stderr.ToString());
+            Assert.Equal("", stdout.ToString());
+        }
+
+        /// <summary>
+        /// P16-067: <c>--json</c> + <c>--names-only</c> is a usage error (exit 2),
+        /// not a silent pick of names-only. The previous behavior produced non-JSON
+        /// output when piped into jq.
+        /// </summary>
+        [Fact]
+        public void Tools_JsonAndNamesOnly_RejectedWithExit2()
+        {
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = ToolsCommand.Run(asJson: true, filter: null,
+                nameExact: null, namesOnly: true, stdout, stderr);
+
+            Assert.Equal(2, exit);
+            Assert.Contains("mutually exclusive", stderr.ToString());
+            // Discovery must not have run (no tool list on stdout).
+            Assert.Equal("", stdout.ToString());
+        }
+
+        // ----- P16-068: UnsafeRelaxedJsonEscaping (no `+`/`<` noise) -----
+
+        /// <summary>
+        /// P16-068: tool descriptions or types containing `+`, `<`, `>`, `&` must
+        /// survive the JSON emitter verbatim (not as `+` etc.). Picks a known
+        /// tool's JSON serialization and asserts the bytes don't contain `\u00`.
+        /// </summary>
+        [Fact]
+        public void Tools_Json_DoesNotEscapeAsciiPunctuation()
+        {
+            var sw = new StringWriter();
+            ToolsCommand.Run(asJson: true, filter: null, nameExact: null,
+                namesOnly: false, sw, new StringWriter());
+            var output = sw.ToString();
+            // We don't expect every tool to contain `<` etc., but the encoder
+            // setting itself can be pinned by asserting no `\u00` escape sequences
+            // for printable ASCII appear in the payload.
+            Assert.DoesNotContain("\\u003C", output);
+            Assert.DoesNotContain("\\u003E", output);
+            Assert.DoesNotContain("\\u002B", output);
+            Assert.DoesNotContain("\\u0026", output);
+        }
     }
 }

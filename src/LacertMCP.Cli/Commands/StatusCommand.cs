@@ -1,6 +1,7 @@
 using System;
 using System.CommandLine;
 using System.IO;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using LacertMCP.Cli.Storage;
 using LacertMCP.Server.Diagnostics;
@@ -91,7 +92,17 @@ namespace LacertMCP.Cli.Commands
                     lastRegisterAttempt = (string?)null, // wire-tracked in Phase 9; not surfaced here
                 };
 
-                var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+                // P16-068: UnsafeRelaxedJsonEscaping keeps `+` (in buildVersion like
+                // "0.1.0+abc1234"), `<`, `>`, `&` literal instead of \u-escaped — the
+                // default encoder is HTML-safe, but CLI JSON is shell/terminal/jq-bound
+                // and never embedded in HTML. The escape made build hashes pasted into
+                // bug reports look amateurish (+) and angle-bracket remediation
+                // text (e.g. App.config <startup>) unreadable.
+                var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                });
                 writer.WriteLine(json);
                 return 0;
             }
@@ -120,6 +131,27 @@ namespace LacertMCP.Cli.Commands
             writer.WriteLine($"  Location   : {location}");
             writer.WriteLine($"  Platform   : {platform}");
             writer.WriteLine($"  Build      : {BuildInfo.Version}");
+
+            // P16-041: self-curing "now what?" line for unregistered fresh checkouts.
+            // Mirrors DoctorCommand.ProbeAppId remediation discipline — the CLI has
+            // all the state needed (platform, registration) to pick the right next
+            // command without making the operator context-switch to README/doctor.
+            // Skip on the --json path: JSON consumers already know what
+            // registered:false means and the shape is the contract.
+            if (!appId.HasValue)
+            {
+                writer.WriteLine();
+                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                {
+                    writer.WriteLine("Next: run `lacerte-mcp register` to mint an AppID and grant Intuit consent (live mode),");
+                    writer.WriteLine("      or set LACERTE_SIMULATION=1 to use the in-memory seed for off-line/dev work.");
+                }
+                else
+                {
+                    writer.WriteLine("Next: simulation is the only mode available off-Windows — point your MCP client at");
+                    writer.WriteLine("      LacertMCP.Server.exe with LACERTE_SIMULATION=1 (live mode requires Windows + Lacerte).");
+                }
+            }
             return 0;
         }
 

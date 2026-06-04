@@ -31,7 +31,7 @@ Stack decision rationale: `DECISIONS.md` 2026-05-30 "Language/runtime stack" ent
                                     │   - Context (datapath, year, module)    │
                                     │   - CanUseNewApis branching             │
                                     │   - Read-only gate (synth 9001)         │
-                                    │   - Idempotency cache (synth 9101 reuse)│
+                                    │   - Idempotency cache (synth 9102 conflict)│
                                     │   - Dry-run snapshot/restore            │
                                     │      │                                  │
                                     │      ├─► Bridge/LacerteAccessClient.cs  │ ← live: COM/.NET
@@ -58,8 +58,8 @@ Each layer has one responsibility. Crossing layers is the most common form of dr
 | **Simulation** | `LacertMCP.Server/Session/SimulationStore.cs` + `SimulationStore.Query.cs` + `SimulationStore.Seed.cs` (three partials) + `Session/Fixtures/SeedData.cs` | In-memory implementation of the SDK for dev/tests. Seeded data. Same TAPIStatus return shape as live. | Be referenced by tools. Diverge behaviorally from live. |
 | **Schema** | `LacertMCP.Server/Schema/*.cs` + `Schema/FieldAccessMap/*.json` | Module characters table, table catalog, per-field access map (with TY-version overlays), TAPIStatus constants. | Hold runtime mutable state. |
 | **Errors** | `LacertMCP.Server/Errors/*.cs` | `LacerteSDKError` exception, status-code table, synthetic 9xxx codes, `WrapToolHandler` decorator. | Anything else. |
-| **Logging** | `LacertMCP.Server/Logging/WireLog.cs` | Structured wire-level trace of COM/ODBC calls when `LACERTE_DEBUG_WIRE=1`. PII-redacted (SSN/EIN/BankAccountNumber/RoutingNumber). | Log secrets (AppID, ticket bodies, PII fields). Be required for correctness — the logging-disabled path must behave identically. |
-| **Resilience** | `LacertMCP.Server/Resilience/AutoReconnect.cs` | Detect `NotSignedIn` / disconnect, surface synthetic 9101 with remediation, optional one-shot reconnect on idempotent reads. | Re-auth the 24h Intuit ticket inside a tool call (Boundary Invariant #8). Retry non-idempotent writes. |
+| **Logging** | `LacertMCP.Server/Logging/WireLog.cs` | Structured wire-level trace of COM/ODBC calls when `LACERTE_DEBUG_WIRE=1`. PII-redacted via two-scope `HashSet<string>` walker (disk: broad keyset incl. identity + address; wire: narrow secrets-only). See `DECISIONS.md` "WireLog redaction: HashSet walker, two scopes" and `WireLog.cs:176,222`. | Log secrets (AppID, ticket bodies, PII fields). Be required for correctness — the logging-disabled path must behave identically. |
+| **Resilience** | `LacertMCP.Server/Resilience/AutoReconnect.cs` | Detect `NotSignedIn` / disconnect; the proactive expiry probe `LacerteSessionManager.ThrowIfAuthExpired` surfaces synthetic `9007 LoginExpired` with remediation, while the reactive path (an SDK `NotSignedIn 203` slipping past the probe) is propagated unchanged. Optional one-shot reconnect on idempotent reads. | Re-auth the 24h Intuit ticket inside a tool call (Boundary Invariant #8). Retry non-idempotent writes. |
 | **Pagination** | `LacertMCP.Server/Pagination/Pagination.cs` | Stable cursor encoding for large reads. Limit/offset envelope (`rows, total, limit, offset, hasMore, nextOffset`). | Hold session state. Embed SQL. |
 | **Prompts** | `LacertMCP.Server/Prompts/WorkflowPrompts.cs` | `[McpServerPrompt]` workflow scripts registered via `WithPromptsFromAssembly()`. | Execute tools directly. Bypass the session manager. |
 | **CLI** | `LacertMCP.Cli/` (separate project) | `lacerte-mcp register`, `lacerte-mcp login`, `lacerte-mcp status`, `lacerte-mcp field-access set/list/discover`, `lacerte-mcp doctor`. | Touch the MCP server runtime — CLI runs in its own process. |
@@ -76,7 +76,7 @@ Non-negotiable unless explicitly changed via `DECISIONS.md`.
 5. **TY21+ branching is the session manager's job, not the tool's.** Tools call `session.ReadTable(...)` and the session picks the right SQL template / COM call based on cached `CanUseNewApis(year, module)`. Tools should not see the branch.
 6. **ODBC is reads-only.** All mutations go through the COM bridge. `Odbc/` exposes no `ExecuteNonQuery` surface. (See `DECISIONS.md` 2026-05-30 "ODBC is reads-only.")
 7. **The access map is consulted before every per-field write.** `assertWritable(module, table, field, year)` runs inside `LacerteSessionManager.WriteField` before any COM call. Default-refuse on `Unknown` with `force:true` escape hatch. Detail-row writes (`WriteDetail`) and whole-row `CreateClient` are deliberately outside this gate — see `DECISIONS.md` "Detail-row + whole-row writes are outside the access-map gate".
-8. **The 24h Intuit auth ticket is never refreshed inside a tool call.** Re-auth ceremonies happen only via the CLI in an interactive shell. The MCP detects expiry reactively (`NotSignedIn`) and surfaces synthetic statusCode 9101 with remediation.
+8. **The 24h Intuit auth ticket is never refreshed inside a tool call.** Re-auth ceremonies happen only via the CLI in an interactive shell. The proactive `LacerteSessionManager.ThrowIfAuthExpired` probe surfaces synthetic statusCode `9007 LoginExpired` with remediation; the reactive path (raw SDK `NotSignedIn 203` slipping past the probe) is propagated unchanged through `Resilience/AutoReconnect.cs` since `LacerteSDKError` carries a TAPIStatus and those are never transient.
 9. **Status codes are always structured.** No tool returns a raw integer; every error is `{ success: false, statusCode, statusName, severity, userMessage, remediation, context }`.
 
 ---
@@ -108,7 +108,7 @@ Non-negotiable unless explicitly changed via `DECISIONS.md`.
 ### Session lifecycle
 
 * Session is registered once at MCP startup via a silent `Register()` call (rides the 24h cache if warm).
-* If startup `Register()` returns `NotSignedIn`, the session manager marks itself expired; every tool call short-circuits to synthetic 9101 with remediation pointing to `lacerte-mcp login`.
+* If startup `Register()` returns `NotSignedIn`, the session manager marks itself expired; every tool call that touches `RequireContext` short-circuits to synthetic `9007 LoginExpired` (via `LacerteSessionManager.ThrowIfAuthExpired`) with remediation pointing to `lacerte-mcp register` / `lacerte-mcp login`.
 * Otherwise the manager holds the `ITPRegistration` reference for the lifetime of the process; stamps `registeredAt + 24h` and rejects calls past expiry without firing the Intuit dialog.
 * No `lacerte_session_disconnect` analog — `ITPRegistration` is multi-process-friendly; disconnect is implicit at process exit.
 
@@ -173,11 +173,12 @@ Environment-variable driven, resolved once in `Program.cs`. The full list lives 
 | `LACERTE_APP_NAME` | Friendly name shown in the SDK consent dialog. |
 | `LACERTE_APP_ID` | (Read-only at runtime; the source of truth is Credential Manager.) |
 | `LACERTE_DEFAULT_TAX_YEAR` | Used when a tool call omits one. |
-| `LACERTE_DATA_PATH` | Default datapath if `lacerte_set_context` not yet called. |
+| `LACERTE_DATA_PATH` | Advisory only — quoted in ODBC-error remediations and probed by `lacerte-mcp doctor`. Does NOT auto-seed session context; every session calls `lacerte_set_context`. |
 | `LACERTE_LIVE` | `1` → enable live mode. |
 | `LACERTE_SIMULATION` | `1` → force simulation regardless of platform. |
 | `LACERTE_DEBUG_WIRE` | `1` → log COM calls + SQL to `logs/`. |
 | `LACERTE_DEBUG_LOG_PATH` | Override log directory. |
+| `LACERTE_HEARTBEAT_SECONDS` | Heartbeat write cadence (sec) to `%TEMP%/lacerte-mcp-heartbeat.json`; `0` disables. Default `30`. |
 | `LACERTE_SIM_EXPIRED` | `1` → simulate an expired 24h session (testing only). |
 | `LACERTE_DATA_ROOT` | Root scanned by `lacerte_list_datapaths` when discovering `{YY}Tax\{Module}Data` folders (default `C:\Lacerte`). |
 | `LACERTE_MCP_FORCE_FILE_STORE` | `1` → forces the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json`; auto-on off-Windows. |

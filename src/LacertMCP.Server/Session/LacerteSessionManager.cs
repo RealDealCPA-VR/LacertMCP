@@ -8,6 +8,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Bridge;
@@ -74,6 +75,30 @@ namespace LacertMCP.Server.Session
         public bool IsRegistered { get; private set; }
         public DateTimeOffset? RegisteredAt { get; private set; }
         public DateTimeOffset? ExpiresAt { get; private set; }
+
+        // P16-013 — single source-of-truth for the default AppName so the
+        // server fallback can't drift from the CLI default (which is
+        // hard-coded to the same literal in Cli/Commands/RegisterCommand.cs
+        // and Cli/Commands/LoginCommand.cs). Three-way drift between the
+        // server fallback ("Lacerte MCP"), CLI default ("Operator Lacerte
+        // MCP"), and the README env-table default ("LacerteMCP") used to
+        // leave operators with opaque NotSignedIn failures when the env var
+        // was unset; the persisted Intuit consent record is tied to the
+        // AppName, so the SDK identity tuple must agree across all three.
+        internal const string DefaultAppName = "Operator Lacerte MCP";
+
+        // P16-039 — read-path stateAbbrev filter shape gate. Mirrors the
+        // write-side regex in DetailsTools._rxStateAbbrev so the same
+        // operator-friendly rejection fires whether the input came in via
+        // lacerte_detail_write or via the read tools (lacerte_table_read,
+        // lacerte_state_read, lacerte_state_subclient_read). Without this
+        // the read path used to silently match nothing on lowercase /
+        // trailing-whitespace / full-state-name input and return
+        // {count: 0} which is indistinguishable from "no rows match" —
+        // a real footgun the LLM cannot self-correct from.
+        private static readonly Regex _rxStateAbbr = new Regex(
+            @"^[A-Z]{2}$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly string? _appName;
 
@@ -307,7 +332,7 @@ namespace LacertMCP.Server.Session
             // return on a TY24 install).
             int taxYearArg = Context?.Year ?? _defaultTaxYear ?? DateTimeOffset.UtcNow.Year;
             return await WireLog.Record<int>("Register",
-                new { appName = _appName ?? "Lacerte MCP", taxYear = taxYearArg },
+                new { appName = _appName ?? DefaultAppName, taxYear = taxYearArg },
                 async () =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -336,7 +361,7 @@ namespace LacertMCP.Server.Session
                     // (P15-004), otherwise the current calendar year as a
                     // last-resort lower bound.
                     int taxYear = Context?.Year ?? _defaultTaxYear ?? DateTimeOffset.UtcNow.Year;
-                    var appName = _appName ?? "Lacerte MCP";
+                    var appName = _appName ?? DefaultAppName;
                     // F12 — wrap in AutoReconnect for transient COM retries.
                     int liveStatus = await AutoReconnect.WithRetry<int>(() =>
                         Task.FromResult(_bridge.Register(appName, appId.Value.ToString("D"), taxYear)))
@@ -444,7 +469,14 @@ namespace LacertMCP.Server.Session
                 ModeResolutionReason: _modeResolutionReason,
                 // P15-004: surface the parsed LACERTE_DEFAULT_TAX_YEAR so the
                 // operator can confirm the env var was actually picked up.
-                DefaultTaxYear: _defaultTaxYear);
+                DefaultTaxYear: _defaultTaxYear,
+                // P16-066: surface the LACERTE_DEBUG_WIRE state + resolved log
+                // path so the 9201/9203 remediation ("inspect logs/...") is
+                // actually executable — the operator can call session_status,
+                // see enabled=false + the would-be path, set the env var,
+                // restart, reproduce, and grep at the exact path.
+                DebugWireEnabled: Logging.WireLog.IsEnabled,
+                WireLogPath: Logging.WireLog.ResolvedOrWouldBeLogPath());
         }
 
         /// <summary>
@@ -712,13 +744,38 @@ namespace LacertMCP.Server.Session
                     throw new LacerteSDKError(StatusCodes.DBNotSupported, dctx);
             }
 
+            // P16-039 — trim clientNumber so a trailing-whitespace typo
+            // ('1001 ') doesn't silently match zero rows. Free-form ID
+            // (no shape regex enforced at this layer), so trim-only.
             if (!string.IsNullOrEmpty(clientNumber))
             {
-                rows = rows.Where(r => string.Equals(r.ClientNumber, clientNumber, StringComparison.OrdinalIgnoreCase));
+                var clientTrimmed = clientNumber!.Trim();
+                rows = rows.Where(r => string.Equals(r.ClientNumber, clientTrimmed, StringComparison.OrdinalIgnoreCase));
             }
+            // P16-039 — trim + shape-validate stateAbbrev so the read path
+            // matches the write path (DetailsTools.cs:214-225). Lowercase
+            // and trailing whitespace are forgiven (trim + OrdinalIgnoreCase
+            // below); full state names like "California" or "Calif" are
+            // rejected with a structured error the LLM can self-correct
+            // from in one turn, instead of silently returning {count: 0}.
+            // Reuses DetailWriteInvalid (closest existing synthetic code;
+            // a dedicated ReadFilterInvalid would be cleaner but lives in
+            // the Errors cluster).
             if (!string.IsNullOrEmpty(stateAbbrev))
             {
-                rows = rows.Where(r => string.Equals(r.StateAbbrev, stateAbbrev, StringComparison.OrdinalIgnoreCase));
+                var trimmed = stateAbbrev!.Trim();
+                if (trimmed.Length == 0 || !_rxStateAbbr.IsMatch(trimmed.ToUpperInvariant()))
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.DetailWriteInvalid,
+                        new Dictionary<string, object?>
+                        {
+                            ["field"] = "stateAbbrev",
+                            ["value"] = stateAbbrev,
+                            ["reason"] = "stateAbbrev must be a 2-letter US/territory postal code (e.g. CA, NY). For a full state name use the postal abbreviation: 'California' -> 'CA'.",
+                        });
+                }
+                rows = rows.Where(r => string.Equals(r.StateAbbrev, trimmed, StringComparison.OrdinalIgnoreCase));
             }
 
             var result = rows
@@ -933,7 +990,9 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public async Task<int> WriteField(
             int table, string clientNumber, string field, object? value,
-            int? subClientID = null, string? stateAbbrev = null,
+            // P16-054/P16-080 — canonical C# casing (subClientId, not
+            // subClientID) — matches the wire form.
+            int? subClientId = null, string? stateAbbrev = null,
             bool dryRun = false, string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
@@ -978,7 +1037,7 @@ namespace LacertMCP.Server.Session
                 // wasted work on the common no-key write path.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientID, stateAbbrev);
+                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientId, stateAbbrev);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
@@ -993,7 +1052,7 @@ namespace LacertMCP.Server.Session
                 // log. Args include the value because once we're past the gate
                 // it's authorized for the wire.
                 int result = await WireLog.Record<int>("WriteField",
-                    new { table, clientNumber, field, value, subClientID, stateAbbrev, dryRun },
+                    new { table, clientNumber, field, value, subClientId, stateAbbrev, dryRun },
                     async () =>
                 {
                     // TY21+ branching is the session manager's job (Boundary Invariant 5).
@@ -1024,7 +1083,7 @@ namespace LacertMCP.Server.Session
                                 // F12 — wrap in AutoReconnect for transient COM retries.
                                 inner = await AutoReconnect.WithRetry<int>(() =>
                                     Task.FromResult(_bridge.UpdateTaxReturn(appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                        table, clientNumber, field, value, subClientID, stateAbbrev)))
+                                        table, clientNumber, field, value, subClientId, stateAbbrev)))
                                     .ConfigureAwait(false);
                             }
                             else
@@ -1064,7 +1123,7 @@ namespace LacertMCP.Server.Session
                         Action? undo = null;
                         try
                         {
-                            inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientID, stateAbbrev, useNew, out undo);
+                            inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew, out undo);
                         }
                         finally
                         {
@@ -1073,7 +1132,7 @@ namespace LacertMCP.Server.Session
                     }
                     else
                     {
-                        inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientID, stateAbbrev, useNew);
+                        inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew);
                     }
                     return inner;
                 }).ConfigureAwait(false);
@@ -1212,10 +1271,10 @@ namespace LacertMCP.Server.Session
                 }
 
                 // Client-side validation per agent 06 §6.
-                if (string.IsNullOrEmpty(args.ClientID) || args.ClientID.Length > 8)
+                if (string.IsNullOrEmpty(args.ClientId) || args.ClientId.Length > 8)
                 {
                     throw new LacerteSDKError(SyntheticStatusCodes.ClientIDTooLong,
-                        new Dictionary<string, object?> { ["clientID"] = args.ClientID });
+                        new Dictionary<string, object?> { ["clientId"] = args.ClientId });
                 }
                 if (ctx.Year < 2018)
                 {
@@ -1274,8 +1333,8 @@ namespace LacertMCP.Server.Session
                             var bridgeResult = await AutoReconnect.WithRetry<BridgeCreateClientResult>(() =>
                                 Task.FromResult(_bridge.CreateClient(
                                     appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                    args.ClientID, args.TaxType,
-                                    args.FirstName, args.LastName, args.EmailID)))
+                                    args.ClientId, args.TaxType,
+                                    args.FirstName, args.LastName, args.EmailId)))
                                 .ConfigureAwait(false);
                             inner = new CreateClientResult(bridgeResult.Status, bridgeResult.ClientNumber);
                         }
@@ -1322,7 +1381,7 @@ namespace LacertMCP.Server.Session
             // a tool call after the +24h ticket window hits the SDK and
             // gets back the raw integer 203 NotSignedIn with no remediation
             // hint. LoginExpired (9007) carries the operator-friendly
-            // "Run lacerte_register to re-authenticate" string. The check
+            // "Run `lacerte-mcp register` to re-authenticate" string. The check
             // is free (one DateTimeOffset comparison) and turns the
             // cliff-edge 24h failure into a clean structured error.
             ThrowIfAuthExpired();
@@ -1629,8 +1688,8 @@ namespace LacertMCP.Server.Session
             undo = null;
             var simArgs = new SimulateCreateClientArgs(
                 ctx.DataPath, ctx.Year, ctx.Module,
-                args.ClientID, args.TaxType,
-                args.FirstName, args.LastName, args.EmailID);
+                args.ClientId, args.TaxType,
+                args.FirstName, args.LastName, args.EmailId);
 
             // Capture pre-state for undo BEFORE calling SimulateCreateClient so
             // a successful create can be rolled back atomically for dry-run.
@@ -1642,7 +1701,7 @@ namespace LacertMCP.Server.Session
             {
                 throw new LacerteSDKError(status, new Dictionary<string, object?>
                 {
-                    ["clientID"] = args.ClientID,
+                    ["clientId"] = args.ClientId,
                     ["taxType"] = args.TaxType,
                     ["module"] = ctx.Module.ToString(),
                 });
@@ -2112,15 +2171,21 @@ namespace LacertMCP.Server.Session
 
     /// <summary>
     /// Args for <see cref="LacerteSessionManager.CreateClient"/>. Matches the
-    /// SDK's <c>IClient(TaxType, ClientID, EmailID, FirstName, LastName)</c>
+    /// SDK's <c>IClient(TaxType, ClientId, EmailId, FirstName, LastName)</c>
     /// constructor signature.
+    /// <para>
+    /// P16-054/P16-080 — record fields renamed from ClientID/EmailID to
+    /// ClientId/EmailId so the C# casing matches the canonical wire form
+    /// (camelCase clientId/emailId) one-to-one. No SQL/DBF column mapping
+    /// crosses this seam — purely an in-process record.
+    /// </para>
     /// </summary>
     public sealed record CreateClientArgs(
-        string ClientID,
+        string ClientId,
         string TaxType,
         string? FirstName = null,
         string? LastName = null,
-        string? EmailID = null);
+        string? EmailId = null);
 
     /// <summary>
     /// Result of <see cref="LacerteSessionManager.CreateClient"/>. <c>Status</c>

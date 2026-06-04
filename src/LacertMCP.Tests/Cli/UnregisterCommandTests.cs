@@ -115,5 +115,38 @@ namespace LacertMCP.Tests.Cli
             var combined = stdout.ToString() + stderr.ToString();
             Assert.DoesNotContain(id.ToString("D"), combined);
         }
+
+        // ----- P16-082: preview body routes to stdout (refusal banner stays on stderr) -----
+
+        /// <summary>
+        /// P16-082: the unconfirmed-preview body ("Would delete AppID ... from ...")
+        /// must land on stdout so `lacerte-mcp unregister > preview.txt` actually
+        /// captures it and PowerShell doesn't paint it red as if it were a fault.
+        /// The single-line refusal banner stays on stderr alongside the exit-1 so
+        /// the "this was a refusal" signal still carries.
+        /// </summary>
+        [Fact]
+        public void Unregister_Without_Confirm_Preview_Body_Routes_To_Stdout()
+        {
+            var id = Guid.NewGuid();
+            AppIdStore.Set(id);
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = UnregisterCommand.Run(confirm: false, stdout, stderr);
+
+            Assert.Equal(1, exit);
+            // The preview body (masked AppID + storage backend + re-run hint)
+            // must be on stdout where redirection captures it.
+            var stdoutText = stdout.ToString();
+            Assert.Contains("Would delete AppID", stdoutText);
+            Assert.Contains(AppIdStore.Mask(id), stdoutText);
+            Assert.Contains("Re-run with --confirm", stdoutText);
+            // The single-line refusal banner must still be on stderr so the
+            // "this was a refusal" signal is preserved.
+            Assert.Contains("Refusing", stderr.ToString());
+            // The body lines must NOT be on stderr (they're on stdout now).
+            Assert.DoesNotContain("Would delete AppID", stderr.ToString());
+        }
     }
 }

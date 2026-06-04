@@ -78,7 +78,7 @@ These will firm up as the architecture lands. Default assumptions:
 * Tool handlers wrap their body in `WrapToolHandler.Run(...)`, which formats success/error envelopes as JSON and maps `LacerteSDKError` to consistent error shapes.
 * Session lifecycle through `LacerteSessionManager` only; tools never construct COM calls or ODBC SQL directly.
 * COM interop in `src/LacertMCP.Server/Bridge/` (`LacerteAccessClient`, `Reader`, `Writer`, `Registration`).
-* ODBC in `src/LacertMCP.Server/Odbc/` (`ConnectionPool`, `SqlTemplates`).
+* ODBC in `src/LacertMCP.Server/Odbc/` (`ConnectionStringBuilder`, `LacerteDsnReader`, `OdbcErrorMapper`, `SqlTemplates`).
 * Simulation in `src/LacertMCP.Server/Session/SimulationStore.cs` plus partial classes.
 * Schema metadata in `src/LacertMCP.Server/Schema/` (`Modules`, `Tables`, `FieldAccess`) — treated as read-only.
 * TAPIStatus mapping in `src/LacertMCP.Server/Errors/StatusCodes.cs`; tools never expose raw integers.

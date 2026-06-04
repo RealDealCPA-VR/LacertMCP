@@ -4,6 +4,49 @@ Log meaningful technical tradeoffs here. Every entry: **what was chosen**, **why
 
 ---
 
+## 2026-05-30 — Cross-tool naming conventions (X_naming_xtool cluster, P16 preflight)
+
+**Chosen:** Single canonical name for every tool parameter, response field, error-context key, and prompt name on the MCP wire surface. v0.1.0 pre-release breaking change (no installed user base to migrate).
+
+Wire conventions:
+- **Tax year** → `taxYear` on every input parameter, response field, and error-context key. Replaces `year` in MetadataTools.LacerteFieldAccessMap, FieldWriteBulkTools.LacerteFieldWriteBulk preflight, SessionTools.LacerteSessionStatus context + LacerteSetContext response + LacerteListDatapaths per-row shape. Error-context keys `expectedYear` / `actualYear` → `expectedTaxYear` / `actualTaxYear`.
+- **State abbreviation** → `stateAbbrev` on every wire parameter. Replaces `stateAbbr` in DetailsTools.LacerteDetailWrite (model field `DetailRow.StateAbbr` stays — maps to the DBF column).
+- **Field name** → single-write tools use `field`; bulk-write's `BulkWriteEntry` renames `FieldName` → `Field`. One canonical name across the write surface so an LLM refactoring single → bulk doesn't fail every row with empty-field errors.
+- **Module character** → typed as `string` (length-1) on every tool that accepts it. MetadataTools.LacerteFieldAccessMap previously typed `char module` (JSON binding trap — clients send `"I"` not `'I'`); aligned with the existing SessionTools.SetContext + CanUseNewApis pattern.
+- **Identity acronyms** → camelCase with `Id` mixed-case suffix (Microsoft Framework Design Guidelines): `clientId`, `emailId`, `subClientId`. Replaces ALL-CAPS suffix `clientID`, `emailID`, `subClientID` on every wire parameter, response envelope field, error-context key, and ripples to `CreateClientArgs` / `SimulateCreateClientArgs` / `BridgeInputValidation` / `ILacerteBridge` / `Writer` / `LacerteAccessClient` for internal consistency.
+
+Response envelope conventions:
+- **Canonical collection key** → `rows` for tabular reads (matches `Pagination.Page<T>().Rows`). Domain aliases (`clients`, `forms`, `subclients`, `states`, `stateSubclients`, `statuses`, `efStatuses`, `modules`, `datapaths`, `codes`) retained as v0.1 back-compat siblings; new consumers target `rows`. Removed in v0.2 per pagination cleanup window.
+- **Inner `success` removed** → SchemaReloadTools.LacerteReloadSchema no longer returns `{success: true, ...}` inside `result`. WrapToolHandler's outer envelope already supplies `success`; the inner duplicate created a `response.success` / `response.result.success` ambiguity.
+- **Error envelope `origin`** → wire-envelope error now surfaces `origin: "sdk"` or `"synthetic"` derived from `LacerteSDKError.Origin` (P15-037 was documented but the code never landed; P16-053 finishes the landing). Matches the `originGroup` column added to `lacerte_return_codes` so consumers can filter `originGroup == envelope.origin`.
+
+Tool-method / prompt-name alignment:
+- **`lacerte_bulk_field_update`** prompt renamed to **`lacerte_field_write_bulk`** to match the tool method name. The noun-first family (`lacerte_field_write` + `lacerte_field_write_bulk`) is canonical; verb-first names are legacy.
+
+Documentation:
+- **Remediation strings** referencing the phantom MCP tool `lacerte_register` replaced with `lacerte-mcp register` (CLI command, backticked). Affects SyntheticStatusCodes (AppNotRegistered/LoginExpired/ReAuthRequired) + StatusCodes (ConsentDenied/RegVersionBlocked/NotSignedIn). A regression test in `StatusCodesTests.Remediations_NeverNameNonexistentMcpTool_LacerteRegister_P16_011` pins the invariant.
+- **`lacerte_client_read` description** corrected — it returns `{ clientNumber, found, client }` (envelope is never null, check `found`), not "null if no such client".
+
+Optional-default surface:
+- **`LacerteDetailWrite`** — the seven row-key segments (`prefix`, `suffix`, `stateAbbrev`, `cityAbbr`, `source`, `tsj`, `importSrc`) now default to `""`. Only `clientNumber`, `series`, `code`, `amount`, `description` are required. The W-2 happy path drops from 12 args to 5. Reorder is a breaking change for positional callers, but MCP wire calls are JSON-named so no wire callers break; in-repo test fixtures already used named arguments.
+
+**Why:** Round-3 audit P16 surfaced the cross-tool drift as one of the dominant friction sources for the LLM-facing surface — an LLM learning `taxYear` from `lacerte_set_context` then guessing `year` for `lacerte_field_access_map` produces a binding-error retry loop with no actionable hint. Same pattern repeated across `stateAbbr/stateAbbrev`, `field/fieldName`, `clientID/clientId`. v0.1.0 has no installed user base — the cost of fixing now is just code churn; the cost of preserving drift is every future LLM interaction.
+
+**Alternatives rejected:**
+- **Add input aliases** (accept both `year` and `taxYear`): MCP tool schemas don't support param aliases without a custom binder; an LLM that hits "year not allowed; did you mean taxYear?" learns the right name on retry; the alias mechanism would add binding complexity for marginal LLM benefit.
+- **Defer to v0.2**: nothing forces v0.2 to land sooner than now and the cluster is already cross-cutting — punting compounds the migration cost when more tools / consumers land in the interim.
+- **Keep ALL-CAPS suffix for SDK-mirroring identifiers**: `ClientID` matches the Intuit C# SDK signature but the MCP wire is its own contract — every other camelCase param uses Microsoft's `Id` convention and the inconsistency was the bug.
+
+**Downstream:**
+- Regression suite gains `NamingConventionsTests` with reflection-driven sentinels — any future tool with `int year` / `int? year` / `string clientID` / `char module` / `string FieldName` will trip the build.
+- README tool tables updated to surface the canonical param names + the new `lacerte_field_write_bulk` and `lacerte_reload_schema` rows; prompts table updated for `lacerte_field_write_bulk` rename.
+- WireLog redaction keysets continue to scrub email-bearing values — comparer is case-insensitive so `emailId` matches the existing `EmailID` entry; no key list update needed.
+- Internal sim helper `SimulationStore.SimulateFieldWrite(subClientID:)` keeps its parameter name for now — it's not on the wire and the renaming surface stops at the bridge boundary.
+
+**Source:** `audit-findings-r3.json` cluster `X_naming_xtool` (P16-008, P16-011, P16-024, P16-025, P16-026, P16-027, P16-045, P16-052, P16-053, P16-054, P16-069, P16-070, P16-071, P16-079, P16-080).
+
+---
+
 ## 2026-05-30 — Project bootstrap & operating-system pattern adoption
 
 **Chosen:** Mirror the operating-system pattern from the sibling `Quickbooks MCP Desktop` project — `HANDOFF.md` + `Todo.md` + `ARCHITECTURE.md` + `DECISIONS.md` + `REQUIREMENTS.md` + `REGRESSION_CHECKLIST.md` + `ACCEPTANCE_CRITERIA.md` + `CLAUDE.md`.
@@ -197,6 +240,8 @@ Log meaningful technical tradeoffs here. Every entry: **what was chosen**, **why
 ---
 
 ## 2026-05-30 — WireLog format + PII redaction policy
+
+> **Superseded by:** "2026-05-30 — WireLog redaction: HashSet walker, two scopes (P15-001/P15-006 supersedes prior single-regex / 4-field policy)" — see entry appended at the bottom of this file. The HOW-IT-WORKS prose below describes the pre-P15-001 design (single regex, four fields, FirstName/LastName/Address/EmailID NOT redacted). The current implementation is a `JsonNode` walker over two `HashSet<string>` keysets (disk + wire), and identity + address fields ARE redacted on disk scope. Do NOT edit `WireLog.cs:62-64` to add a sensitive field — those lines are XML doc comments now; the keysets live at `WireLog.cs:176` (`_diskRedactionKeys`) and `WireLog.cs:222` (`_wireRedactionKeys`).
 
 **Chosen:** Debug wire log is **one JSON object per line** with the shape `{ts, op, args, durationMs, result | error}`, written to `logs/lacerte-YYYYMMDD.log` (dir overrideable via `LACERTE_DEBUG_LOG_PATH`), activated only when `LACERTE_DEBUG_WIRE=1`. Before every line hits disk, a single compiled regex in `src/LacertMCP.Server/Logging/WireLog.cs` (line 62-64) redacts the values of four field names: **`SSN`, `EIN`, `BankAccountNumber`, `RoutingNumber`** — case-insensitive, covering string / numeric / boolean / null literal forms. Operationally needed but lower-sensitivity fields (`FirstName`, `LastName`, `Address`, `EmailID`, dollar amounts, ClientNumber, dataPath) are **intentionally NOT redacted** — they are required to triage a wire trace and the log file is local-only with a user-only ACL implied by `%CWD%/logs/`.
 
@@ -466,3 +511,27 @@ Defense-in-depth: higher tool-layer gates (`DetailsTools.ValidateDetailWrite`, `
 - BridgeInputValidation throws `LacerteSDKError` (the bridge boundary's normal error type) so the existing `WrapToolHandler` envelope path surfaces validation failures with the standard `{success: false, statusCode, ...}` shape — no special handling needed at the tool layer.
 
 **Source:** `audit-findings-r2.json` P15-003 (P14-050 invariant documentation); `src/LacertMCP.Server/Bridge/BridgeInputValidation.cs`; `src/LacertMCP.Server/Bridge/Writer.cs:41, 94, 156`; `src/LacertMCP.Server/Bridge/Reader.cs:43`.
+
+---
+
+## 2026-05-30 — WireLog redaction: HashSet walker, two scopes (P15-001 / P15-006 supersedes prior single-regex / 4-field policy)
+
+**Chosen:** WireLog redaction is **NOT** a single regex over four field names. It is a `JsonNode` walker (`RedactNode` / `ScrubFieldValuePairs` in `src/LacertMCP.Server/Logging/WireLog.cs`) over **two** `HashSet<string>` keysets selected by a `RedactionScope` enum:
+
+- **`_diskRedactionKeys`** at `WireLog.cs:176` — BROAD keyset (~25 keys) used for the on-disk debug log via `WireLog.WriteRecord`. Covers true secrets PLUS identity (`FirstName`, `LastName`, `MiddleName`), address (`Address1`, `Address2`, `StreetAddress`, `City`, `Zip`, `ZipCode`), free-form notes (`Description`), and error-context echoes (`rawError`, `reason`, `odbcMessage`, `message`). Suitable for an archived log that may be attached to a bug report.
+- **`_wireRedactionKeys`** at `WireLog.cs:222` — NARROW keyset (~17 keys) used by `WrapToolHandler` for the MCP wire envelope. Covers ONLY true secrets — `BankAccountNumber`, `RoutingNumber`, every `SSN`/`TIN`/`EIN` variant (`SSN`/`TaxpayerSSN`/`SpouseSSN`/`DependentSSN`/`TIN`/`ITIN`/`PTIN`/`EIN`/`EmployerEIN`/`FederalID`/`FedEIN`), `DateOfBirth`/`DOB`/`BirthDate`, `EmailID`/`Email`, all phone variants, and `odbcMessage`. `reason` / `rawError` / `Description` / `City` / `Zip` pass through on the wire so the LLM consumer still sees actionable diagnostics and operator-facing detail rows.
+- **`_piiFieldCodes`** at `WireLog.cs:262` — Lacerte DATA1-Individual field codes (`C1_14`, `C1_15`, `C1_19`, `C1_21`, `C1_27`, `C1_28`, `C1_29`, `C1_32`, `C1_71`, `C1_72`). Consulted in BOTH passes: as a KEY name in `RedactNode` (catches the ODBC dict-row shape `{"C1_15":"111-22-3333"}`) and as the VALUE of a sibling `field` key in `ScrubFieldValuePairs` (catches the WriteField payload `{"field":"C1_15","value":"111-22-3333"}`).
+- **Fallback regex** at `WireLog.cs:285` — fires ONLY when input fails `JsonNode.Parse` (malformed JSON). Mirrors the broad disk-scope keyset plus the PII field codes. Not the primary mechanism.
+
+**Why:** A `HashSet`-keyed `JsonNode` walk covers nested objects, arrays, and dict-row shapes the regex couldn't reach without fragile pattern accretion (P14-018 / P14-019 / P15-018 / P15-019 series). Splitting wire from disk (P15-001) lets the LLM consumer see error prose without seeing taxpayer identity, while the on-disk log — which may leave the host — gets the wider scrub. Adding identity + address keys to the disk scope (P15-006) was the foundational round-2 fix; the prior 4-field policy was insufficient because Lacerte responses inline `FirstName`/`LastName`/`Address` in routine read paths.
+
+**Alternatives rejected:**
+- **Single keyset for both scopes** (the pre-P15-001 design): forces a choice between "scrub the LLM-facing error prose" and "leak taxpayer identity to disk." P14-018 / P14-019 collapsed to one set and immediately re-introduced the wire-side prose loss; P15-001 split them back out.
+- **Regex-only redactor over serialized JSON** (the pre-P14-018 design): cannot reach the ODBC dict-row shape (`{"C1_15": ...}` keyed by raw column name) or the WriteField pattern (`{"field": "C1_15", "value": ...}`) where the secret is keyed by a name carrying no PII semantics. The walker handles those; regex remains only as a malformed-JSON fallback.
+
+**Downstream:**
+- **Adding a new sensitive field**: pick the correct scope (or both), append to `_diskRedactionKeys` (`WireLog.cs:176`) and/or `_wireRedactionKeys` (`WireLog.cs:222`), add the field name to the fallback `_redactRegex` alternation (`WireLog.cs:285`) if disk-scope, and add a test under `src/LacertMCP.Tests/Logging/WireLogRedactionTests.cs`. Do **NOT** add a new regex. Do **NOT** edit `WireLog.cs:62-64` — those lines are XML doc comments now (the line numbers in the superseded entry above are stale).
+- **Adding a new PII Lacerte field code** (e.g. a future `C1_NN` that holds an SSN/DOB/etc.): append to `_piiFieldCodes` (`WireLog.cs:262`) and to the fallback regex alternation so BOTH the dict-row shape AND the WriteField shape are scrubbed.
+- **Line-number drift policy**: this entry cites line ranges with a member-name anchor (`_diskRedactionKeys at line 176`) rather than a bare line range so future refactors that shift code by ±20 lines don't break the citation the way the superseded entry's bare `line 62-64` reference broke.
+
+**Source:** `audit-findings-r3.json` P16-034; `src/LacertMCP.Server/Logging/WireLog.cs:176, 222, 262, 285`; supersedes the 2026-05-30 "WireLog format + PII redaction policy" entry above; round-2 work cross-references P14-018 / P14-019 / P15-001 / P15-006 / P15-017 / P15-018 / P15-019.

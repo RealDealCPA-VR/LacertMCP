@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -48,11 +48,11 @@ namespace LacertMCP.Tests.Tools
             for (int i = 0; i < 3; i++)
             {
                 var args = new CreateClientArgs(
-                    ClientID: $"BLK{i}",
+                    ClientId: $"BLK{i}",
                     TaxType: "Individual",
                     FirstName: $"Bulk{i}",
                     LastName: $"Target{i}",
-                    EmailID: $"bulk{i}@example.com");
+                    EmailId: $"bulk{i}@example.com");
                 var result = await mgr.CreateClient(args);
                 Assert.Equal(StatusCodes.Success, result.Status);
                 Assert.NotNull(result.ClientNumber);
@@ -61,7 +61,7 @@ namespace LacertMCP.Tests.Tools
             return roster;
         }
 
-        // (a) Happy-path 5-row bulk-update — every row writes to the writable
+        // (a) Happy-path 5-row bulk-update â€” every row writes to the writable
         //     field exposed by the AccessMapTestFixture; envelope aggregates
         //     to {totalCount:5, successCount:5, errorCount:0}.
         [Fact]
@@ -74,7 +74,7 @@ namespace LacertMCP.Tests.Tools
             var entries = clients.Select(cn => new FieldWriteBulkTools.BulkWriteEntry
             {
                 ClientNumber = cn,
-                FieldName = AccessMapTestFixture.WritableField,
+                Field = AccessMapTestFixture.WritableField,
                 Value = $"bulk-value-{cn}",
             }).ToArray();
 
@@ -104,8 +104,8 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal($"bulk-value-{clients[0]}", v);
         }
 
-        // (b) Inject a failure on row 3 (write to a known ReadOnly field —
-        //     C1_0 is universally ReadOnly per spec §2). Default
+        // (b) Inject a failure on row 3 (write to a known ReadOnly field â€”
+        //     C1_0 is universally ReadOnly per spec Â§2). Default
         //     continueOnError=false: rows 0-1 succeed, row 2 fails, rows 3-4
         //     are marked skipped without invoking WriteField.
         [Fact]
@@ -117,12 +117,12 @@ namespace LacertMCP.Tests.Tools
             var clients = await Seed5IndividualClients(mgr);
             var entries = new FieldWriteBulkTools.BulkWriteEntry[]
             {
-                new() { ClientNumber = clients[0], FieldName = AccessMapTestFixture.WritableField, Value = "ok-0" },
-                new() { ClientNumber = clients[1], FieldName = AccessMapTestFixture.WritableField, Value = "ok-1" },
-                // C1_0 is universally ReadOnly — writes throw ExposedForRead (8).
-                new() { ClientNumber = clients[2], FieldName = "C1_0", Value = "will-fail" },
-                new() { ClientNumber = clients[3], FieldName = AccessMapTestFixture.WritableField, Value = "should-skip-3" },
-                new() { ClientNumber = clients[4], FieldName = AccessMapTestFixture.WritableField, Value = "should-skip-4" },
+                new() { ClientNumber = clients[0], Field = AccessMapTestFixture.WritableField, Value = "ok-0" },
+                new() { ClientNumber = clients[1], Field = AccessMapTestFixture.WritableField, Value = "ok-1" },
+                // C1_0 is universally ReadOnly â€” writes throw ExposedForRead (8).
+                new() { ClientNumber = clients[2], Field = "C1_0", Value = "will-fail" },
+                new() { ClientNumber = clients[3], Field = AccessMapTestFixture.WritableField, Value = "should-skip-3" },
+                new() { ClientNumber = clients[4], Field = AccessMapTestFixture.WritableField, Value = "should-skip-4" },
             };
 
             var json = await tool.LacerteFieldWriteBulk(
@@ -152,7 +152,7 @@ namespace LacertMCP.Tests.Tools
             Assert.NotEqual("should-skip-3", v3);
         }
 
-        // (c) Same payload as (b) but continueOnError=true — rows 0/1/3/4
+        // (c) Same payload as (b) but continueOnError=true â€” rows 0/1/3/4
         //     succeed, row 2 still fails. Aggregates to {success:4, error:1}.
         [Fact]
         public async Task BulkWrite_ContinueOnError_KeepsGoingPastFailure()
@@ -163,11 +163,11 @@ namespace LacertMCP.Tests.Tools
             var clients = await Seed5IndividualClients(mgr);
             var entries = new FieldWriteBulkTools.BulkWriteEntry[]
             {
-                new() { ClientNumber = clients[0], FieldName = AccessMapTestFixture.WritableField, Value = "ok-0" },
-                new() { ClientNumber = clients[1], FieldName = AccessMapTestFixture.WritableField, Value = "ok-1" },
-                new() { ClientNumber = clients[2], FieldName = "C1_0", Value = "will-fail" },
-                new() { ClientNumber = clients[3], FieldName = AccessMapTestFixture.WritableField, Value = "ok-3" },
-                new() { ClientNumber = clients[4], FieldName = AccessMapTestFixture.WritableField, Value = "ok-4" },
+                new() { ClientNumber = clients[0], Field = AccessMapTestFixture.WritableField, Value = "ok-0" },
+                new() { ClientNumber = clients[1], Field = AccessMapTestFixture.WritableField, Value = "ok-1" },
+                new() { ClientNumber = clients[2], Field = "C1_0", Value = "will-fail" },
+                new() { ClientNumber = clients[3], Field = AccessMapTestFixture.WritableField, Value = "ok-3" },
+                new() { ClientNumber = clients[4], Field = AccessMapTestFixture.WritableField, Value = "ok-4" },
             };
 
             var json = await tool.LacerteFieldWriteBulk(
@@ -186,14 +186,14 @@ namespace LacertMCP.Tests.Tools
             Assert.True(perItem[0].GetProperty("success").GetBoolean());
             Assert.True(perItem[1].GetProperty("success").GetBoolean());
             Assert.False(perItem[2].GetProperty("success").GetBoolean());
-            // Critically, rows 3 and 4 must succeed — NOT be skipped.
+            // Critically, rows 3 and 4 must succeed â€” NOT be skipped.
             Assert.True(perItem[3].GetProperty("success").GetBoolean());
             Assert.True(perItem[4].GetProperty("success").GetBoolean());
         }
 
         // (d) Replay-safety: invoke twice with the same idempotencyKey prefix
         //     and assert the second call returns the same statusCodes per row
-        //     (no double-write — verify by changing the persisted sentinel
+        //     (no double-write â€” verify by changing the persisted sentinel
         //     between calls and asserting the value did NOT change on replay).
         [Fact]
         public async Task BulkWrite_IdempotencyPrefix_ReplaysCachedResultsPerRow()
@@ -205,7 +205,7 @@ namespace LacertMCP.Tests.Tools
             var entries = clients.Take(3).Select(cn => new FieldWriteBulkTools.BulkWriteEntry
             {
                 ClientNumber = cn,
-                FieldName = AccessMapTestFixture.WritableField,
+                Field = AccessMapTestFixture.WritableField,
                 Value = $"first-{cn}",
             }).ToArray();
 
@@ -236,17 +236,17 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(3, root2.GetProperty("result").GetProperty("successCount").GetInt32());
             Assert.Equal(0, root2.GetProperty("result").GetProperty("errorCount").GetInt32());
 
-            // Sentinel still intact — the replay returned cached results
+            // Sentinel still intact â€” the replay returned cached results
             // rather than re-issuing the write with a different value.
             var rowAfter = await mgr.ReadClient(clients[0]);
             rowAfter!.TryGetValue(AccessMapTestFixture.WritableField, out var vAfter);
             Assert.Equal($"first-{clients[0]}", vAfter);
 
-            // Different payload + same key → per-row IdempotencyConflict (9102).
+            // Different payload + same key â†’ per-row IdempotencyConflict (9102).
             var conflictEntries = clients.Take(3).Select(cn => new FieldWriteBulkTools.BulkWriteEntry
             {
                 ClientNumber = cn,
-                FieldName = AccessMapTestFixture.WritableField,
+                Field = AccessMapTestFixture.WritableField,
                 Value = $"second-{cn}",
             }).ToArray();
 
@@ -269,7 +269,7 @@ namespace LacertMCP.Tests.Tools
             }
         }
 
-        // (e) Dry-run — all 5 rows return Success but no value persists.
+        // (e) Dry-run â€” all 5 rows return Success but no value persists.
         [Fact]
         public async Task BulkWrite_DryRun_DoesNotPersist()
         {
@@ -283,7 +283,7 @@ namespace LacertMCP.Tests.Tools
             var seedEntries = clients.Select(cn => new FieldWriteBulkTools.BulkWriteEntry
             {
                 ClientNumber = cn,
-                FieldName = AccessMapTestFixture.WritableField,
+                Field = AccessMapTestFixture.WritableField,
                 Value = "sentinel-before-dryrun",
             }).ToArray();
             var seedJson = await tool.LacerteFieldWriteBulk(
@@ -291,11 +291,11 @@ namespace LacertMCP.Tests.Tools
                 entries: seedEntries);
             Assert.True(Parse(seedJson).GetProperty("success").GetBoolean());
 
-            // Dry-run with a DIFFERENT value — must not persist.
+            // Dry-run with a DIFFERENT value â€” must not persist.
             var dryEntries = clients.Select(cn => new FieldWriteBulkTools.BulkWriteEntry
             {
                 ClientNumber = cn,
-                FieldName = AccessMapTestFixture.WritableField,
+                Field = AccessMapTestFixture.WritableField,
                 Value = "dry-only",
             }).ToArray();
             var json = await tool.LacerteFieldWriteBulk(
@@ -318,6 +318,8 @@ namespace LacertMCP.Tests.Tools
         }
 
         // (f) Pre-flight: year mismatch fails before any row runs.
+        // P16-063 — the mismatch case throws 9016 ContextMismatch (NOT 9009
+        // ContextNotSet) so the operator-facing remediation tells the truth.
         [Fact]
         public async Task BulkWrite_YearMismatch_ThrowsBeforeIterating()
         {
@@ -325,21 +327,32 @@ namespace LacertMCP.Tests.Tools
 
             var entries = new FieldWriteBulkTools.BulkWriteEntry[]
             {
-                new() { ClientNumber = "1001", FieldName = "C1_15", Value = "x" },
+                new() { ClientNumber = "1001", Field = "C1_15", Value = "x" },
             };
 
             var json = await tool.LacerteFieldWriteBulk(
                 table: 1,
                 entries: entries,
-                year: 2023); // wrong year
+                taxYear: 2023); // wrong year
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
-            Assert.Equal(SyntheticStatusCodes.ContextNotSet,
+            Assert.Equal(SyntheticStatusCodes.ContextMismatch,
                 root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("ContextMismatch",
+                root.GetProperty("statusName").GetString());
+            // Remediation must NOT lie by telling the operator to call
+            // lacerte_set_context "first" — context IS set.
+            var remediation = root.GetProperty("remediation").GetString();
+            Assert.DoesNotContain("Call lacerte_set_context first", remediation);
+            // Carried context must surface the expected/actual values.
+            var ctx = root.GetProperty("context");
+            Assert.Equal(2023, ctx.GetProperty("expectedTaxYear").GetInt32());
+            Assert.Equal(2024, ctx.GetProperty("actualTaxYear").GetInt32());
         }
 
         // (g) Pre-flight: readOnly mismatch fails before any row runs.
+        // P16-063 — same 9016 ContextMismatch treatment as the year branch.
         [Fact]
         public async Task BulkWrite_ReadOnlyMismatch_ThrowsBeforeIterating()
         {
@@ -347,7 +360,7 @@ namespace LacertMCP.Tests.Tools
 
             var entries = new FieldWriteBulkTools.BulkWriteEntry[]
             {
-                new() { ClientNumber = "1001", FieldName = "C1_15", Value = "x" },
+                new() { ClientNumber = "1001", Field = "C1_15", Value = "x" },
             };
 
             var json = await tool.LacerteFieldWriteBulk(
@@ -357,8 +370,11 @@ namespace LacertMCP.Tests.Tools
 
             var root = Parse(json);
             Assert.False(root.GetProperty("success").GetBoolean());
-            Assert.Equal(SyntheticStatusCodes.ContextNotSet,
+            Assert.Equal(SyntheticStatusCodes.ContextMismatch,
                 root.GetProperty("statusCode").GetInt32());
+            var ctx = root.GetProperty("context");
+            Assert.True(ctx.GetProperty("expectedReadOnly").GetBoolean());
+            Assert.False(ctx.GetProperty("actualReadOnly").GetBoolean());
         }
 
         // (h) Pre-flight: missing context.
@@ -370,7 +386,7 @@ namespace LacertMCP.Tests.Tools
 
             var entries = new FieldWriteBulkTools.BulkWriteEntry[]
             {
-                new() { ClientNumber = "1001", FieldName = "C1_15", Value = "x" },
+                new() { ClientNumber = "1001", Field = "C1_15", Value = "x" },
             };
 
             var json = await tool.LacerteFieldWriteBulk(
@@ -383,7 +399,7 @@ namespace LacertMCP.Tests.Tools
                 root.GetProperty("statusCode").GetInt32());
         }
 
-        // (i) Empty array → no-op envelope.
+        // (i) Empty array â†’ no-op envelope.
         [Fact]
         public async Task BulkWrite_EmptyArray_ReturnsZeroCountEnvelope()
         {
@@ -400,6 +416,98 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(0, result.GetProperty("successCount").GetInt32());
             Assert.Equal(0, result.GetProperty("errorCount").GetInt32());
             Assert.Equal(0, result.GetProperty("perItem").GetArrayLength());
+            // P16-064 — successful envelopes do NOT carry a recoveryHint
+            // (errorCount==0 means there is nothing to recover from).
+            Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                result.GetProperty("recoveryHint").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                result.GetProperty("firstFailureIndex").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                result.GetProperty("firstFailure").ValueKind);
+        }
+
+        // (j) P16-064 — envelope hoists firstFailureIndex + firstFailure and
+        //     emits a recoveryHint with canResumeViaSameBatch=true when an
+        //     idempotencyKey was supplied. Recovery story tells the LLM to
+        //     resubmit the SAME entries with the SAME key.
+        [Fact]
+        public async Task BulkWrite_StopOnError_HoistsFirstFailureAndEmitsRecoveryHint()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var clients = await Seed5IndividualClients(mgr);
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = clients[0], Field = AccessMapTestFixture.WritableField, Value = "ok-0" },
+                new() { ClientNumber = clients[1], Field = AccessMapTestFixture.WritableField, Value = "ok-1" },
+                new() { ClientNumber = clients[2], Field = "C1_0", Value = "will-fail" },
+                new() { ClientNumber = clients[3], Field = AccessMapTestFixture.WritableField, Value = "skip-3" },
+                new() { ClientNumber = clients[4], Field = AccessMapTestFixture.WritableField, Value = "skip-4" },
+            };
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries,
+                idempotencyKey: "recovery-test-batch-A");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean());
+            var result = root.GetProperty("result");
+
+            // firstFailureIndex points to row 2 (the first non-success row).
+            Assert.Equal(2, result.GetProperty("firstFailureIndex").GetInt32());
+
+            // firstFailure carries a hoisted copy of perItem[2].
+            var firstFailure = result.GetProperty("firstFailure");
+            Assert.Equal(2, firstFailure.GetProperty("index").GetInt32());
+            Assert.Equal(clients[2], firstFailure.GetProperty("clientNumber").GetString());
+            Assert.False(firstFailure.GetProperty("success").GetBoolean());
+
+            // skippedCount tracks the trailing skipped rows.
+            Assert.Equal(2, result.GetProperty("skippedCount").GetInt32());
+
+            // recoveryHint says safe-resume IS possible (idempotencyKey + !dryRun).
+            var hint = result.GetProperty("recoveryHint");
+            Assert.True(hint.GetProperty("canResumeViaSameBatch").GetBoolean());
+            Assert.Equal("recovery-test-batch-A",
+                hint.GetProperty("idempotencyKeyPrefix").GetString());
+            Assert.Equal("{prefix}-{clientNumber}-{field}",
+                hint.GetProperty("perRowKeyShape").GetString());
+            // replayedRowsCount = successCount (rows that already landed).
+            Assert.Equal(2, hint.GetProperty("replayedRowsCount").GetInt32());
+            // retryRowsCount = errorCount + skippedCount (rows to re-execute).
+            Assert.Equal(3, hint.GetProperty("retryRowsCount").GetInt32());
+        }
+
+        // (k) P16-064 — without an idempotencyKey, the recoveryHint correctly
+        //     reports canResumeViaSameBatch=false (a blind resubmit would
+        //     re-execute already-succeeded rows).
+        [Fact]
+        public async Task BulkWrite_FailureWithoutIdempotencyKey_RecoveryHintFlagsNoResume()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var clients = await Seed5IndividualClients(mgr);
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = clients[0], Field = AccessMapTestFixture.WritableField, Value = "ok-0" },
+                new() { ClientNumber = clients[1], Field = "C1_0", Value = "will-fail" },
+            };
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries);
+
+            var root = Parse(json);
+            var result = root.GetProperty("result");
+            Assert.Equal(1, result.GetProperty("firstFailureIndex").GetInt32());
+
+            var hint = result.GetProperty("recoveryHint");
+            Assert.False(hint.GetProperty("canResumeViaSameBatch").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                hint.GetProperty("idempotencyKeyPrefix").ValueKind);
         }
     }
 }

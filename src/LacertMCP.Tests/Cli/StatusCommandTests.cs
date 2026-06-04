@@ -160,5 +160,73 @@ namespace LacertMCP.Tests.Cli
             using var doc = JsonDocument.Parse(sw.ToString());
             Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
         }
+
+        // ----- P16-041: self-curing "next step" hint when unregistered -----
+
+        /// <summary>
+        /// P16-041: with no AppID persisted, the human output must include a
+        /// "Next:" line pointing at either `lacerte-mcp register` (Windows) or
+        /// `LACERTE_SIMULATION=1` (off-Windows) so the operator doesn't have to
+        /// context-switch to README/doctor to know what to do next. Skip the
+        /// hint in the --json path (the JSON shape is the contract).
+        /// </summary>
+        [Fact]
+        public void Status_Unregistered_Default_Output_Includes_Next_Step_Hint()
+        {
+            // Ensure no AppID is persisted (the fixture sets up an isolated APPDATA).
+            AppIdStore.Reset();
+
+            var sw = new StringWriter();
+            StatusCommand.Run(showFull: false, asJson: false, sw);
+            var output = sw.ToString();
+
+            Assert.Contains("Next:", output);
+            // One of the two branches must fire.
+            Assert.True(
+                output.Contains("lacerte-mcp register") || output.Contains("LACERTE_SIMULATION=1"),
+                "Expected the Next: line to mention `lacerte-mcp register` (Windows) or `LACERTE_SIMULATION=1` (off-Windows).");
+        }
+
+        /// <summary>
+        /// P16-041: the --json path must NOT contain the "Next:" hint — JSON
+        /// consumers have the structured `registered:false` already and the
+        /// shape is contract-pinned by P15-026.
+        /// </summary>
+        [Fact]
+        public void Status_Unregistered_Json_Output_Does_Not_Include_Next_Step_Hint()
+        {
+            AppIdStore.Reset();
+
+            var sw = new StringWriter();
+            StatusCommand.Run(showFull: false, asJson: true, sw);
+            var output = sw.ToString();
+
+            Assert.DoesNotContain("Next:", output);
+            // Sanity: must still be parseable JSON.
+            using var doc = JsonDocument.Parse(output);
+            Assert.False(doc.RootElement.GetProperty("registered").GetBoolean());
+        }
+
+        // ----- P16-068: UnsafeRelaxedJsonEscaping pins `+` in buildVersion -----
+
+        /// <summary>
+        /// P16-068: the JSON encoder must NOT escape `+` (used in buildVersion
+        /// `"0.1.0+abc1234"`) — the default HTML-safe encoder turned it into
+        /// `+` which makes the build hash unreadable when an operator
+        /// pastes the JSON into a bug report.
+        /// </summary>
+        [Fact]
+        public void Status_Json_BuildVersion_Plus_Sign_NotEscaped()
+        {
+            var sw = new StringWriter();
+            StatusCommand.Run(showFull: false, asJson: true, sw);
+            var output = sw.ToString();
+
+            // The literal `+` (escaped form of `+`) must not appear.
+            Assert.DoesNotContain("\\u002B", output);
+            // We don't assert presence of `+` itself because the build hash
+            // may not always be appended (SourceRevisionId may be empty in some
+            // dev builds), but the absence of the escape is the load-bearing assert.
+        }
     }
 }

@@ -492,6 +492,17 @@ namespace LacertMCP.Server.Session
         {
             if (args == null) throw new ArgumentNullException(nameof(args));
 
+            // P16-038 — uppercase-normalize ClientId at sim entry so direct
+            // sim callers (integration tests, anything that bypasses the
+            // CreateClientTools layer) match the bridge's case-sensitive
+            // ClientNumberPattern (BridgeInputValidation.cs:36). The tool
+            // layer already normalizes; this keeps the sim/live observational
+            // equivalence even when sim is invoked without going through
+            // the tool first. Two-mode discipline (CLAUDE.md §"Two-mode
+            // discipline") requires sim and live to agree on the happy path.
+            if (!string.IsNullOrEmpty(args.ClientId))
+                args = args with { ClientId = args.ClientId.ToUpperInvariant() };
+
             // 1. NotSignedIn — sim equivalent of the live registration latch.
             if (System.Threading.Interlocked.CompareExchange(ref _sessionExpired, 0, 0) == 1)
                 return (StatusCodes.NotSignedIn, null);
@@ -501,25 +512,30 @@ namespace LacertMCP.Server.Session
             // 2. Year guard.
             if (args.Year < 2018) return (StatusCodes.InValidTaxYear, null);
 
-            // 3. ClientID length cap.
-            if (string.IsNullOrEmpty(args.ClientID) || args.ClientID.Length > 8)
+            // 3. ClientId length cap.
+            if (string.IsNullOrEmpty(args.ClientId) || args.ClientId.Length > 8)
                 return (StatusCodes.LengthExceeded, null);
 
-            // 4. ClientID character whitelist.
-            if (!_rxClientId.IsMatch(args.ClientID))
+            // 4. ClientId character whitelist.
+            if (!_rxClientId.IsMatch(args.ClientId))
                 return (StatusCodes.InValidClientName, null);
 
             // 5. TaxType ↔ Module match.
             if (!ModuleAcceptsTaxType(args.Module, args.TaxType))
                 return (StatusCodes.TaxModuleMismatch, null);
 
-            // 6. Duplicate-ClientID check (case-insensitive).
+            // 6. Duplicate-ClientId check (case-insensitive). The legacy
+            // sim store keeps "ClientID" as the persisted dict key because
+            // existing tests + seed data rely on that exact column name —
+            // changing it would ripple into SimulationStore.Query / seed
+            // fixtures with no wire-visible benefit (it's an internal sim
+            // bookkeeping field, never serialized through the MCP envelope).
             var store = GetOrAddModule(args.DataPath, args.Year, args.Module);
             foreach (var existing in store.Clients.Values)
             {
                 if (existing.Fields.TryGetValue("ClientID", out var idObj)
                     && idObj is string id
-                    && string.Equals(id, args.ClientID, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(id, args.ClientId, StringComparison.OrdinalIgnoreCase))
                 {
                     return (StatusCodes.DuplicateClient, null);
                 }
@@ -536,8 +552,8 @@ namespace LacertMCP.Server.Session
                     ["C1_0"] = clientNumber,
                     ["C1_1"] = args.FirstName ?? "",
                     ["C1_2"] = args.LastName ?? "",
-                    ["C1_3"] = args.EmailID ?? "",
-                    ["ClientID"] = args.ClientID,
+                    ["C1_3"] = args.EmailId ?? "",
+                    ["ClientID"] = args.ClientId,
                 },
             };
             store.Clients[clientNumber] = row;

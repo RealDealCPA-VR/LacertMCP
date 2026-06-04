@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -17,7 +17,7 @@ namespace LacertMCP.Tests.Session
     ///   <item><description>Pre-context guard on every chokepoint.</description></item>
     ///   <item><description>Synchronous read-only gate firing before any other write logic.</description></item>
     ///   <item><description>TY21+ <c>CanUseNewApis</c> branch + per-pair cache.</description></item>
-    ///   <item><description>Idempotency cache state machine — miss / hit-same / hit-conflict.</description></item>
+    ///   <item><description>Idempotency cache state machine â€” miss / hit-same / hit-conflict.</description></item>
     ///   <item><description>Dry-run snapshot/execute/restore round-trips.</description></item>
     ///   <item><description><c>SessionStatus</c> snapshot coherence.</description></item>
     /// </list>
@@ -30,14 +30,14 @@ namespace LacertMCP.Tests.Session
 
         private static LacerteSessionManager NewSimManager()
         {
-            // Explicit empty env → guaranteed sim mode regardless of host shell.
+            // Explicit empty env â†’ guaranteed sim mode regardless of host shell.
             return new LacerteSessionManager(new Dictionary<string, string?>());
         }
 
         private static LacerteSessionManager NewSimManagerWithContext(bool readOnly = false)
         {
             var mgr = NewSimManager();
-            // P15-050 — manager-side RequireRegistered gate now fires on
+            // P15-050 â€” manager-side RequireRegistered gate now fires on
             // every read/write chokepoint, matching the live SDK's
             // NotSignedIn rejection. Register first so the existing tests
             // (which exercise read-only / idempotency / dry-run semantics,
@@ -181,7 +181,7 @@ namespace LacertMCP.Tests.Session
         {
             // Follow-up F3: Unknown-field path now emits 9012 UnknownFieldAccess
             // (distinct from 9001 FieldIsReadOnly). The session is NOT read-only,
-            // so we land in the access-map gate which sees an empty map → Unknown.
+            // so we land in the access-map gate which sees an empty map â†’ Unknown.
             var mgr = NewSimManagerWithContext();
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteField(1, "1001", "C1_NotInMap", "x"));
@@ -236,7 +236,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // Reads — happy path against seed data
+        // Reads â€” happy path against seed data
         // =================================================================
 
         [Fact]
@@ -273,27 +273,27 @@ namespace LacertMCP.Tests.Session
         {
             var mgr = NewSimManagerWithContext();
 
-            // First call — executes, returns Success, caches.
+            // First call â€” executes, returns Success, caches.
             // C1_1 (FirstName on individual). The seeded BROW row exists.
             // Pass force-equivalent by using a field that resolves to Unknown
-            // is NOT what we want here — we need a writable path. Use a
-            // standard field that doesn't appear in the access map → Unknown
-            // → 9001, which is NOT what we want. Instead use the universal
-            // C1_0 rule which is ReadOnly → throws ExposedForRead. Neither
+            // is NOT what we want here â€” we need a writable path. Use a
+            // standard field that doesn't appear in the access map â†’ Unknown
+            // â†’ 9001, which is NOT what we want. Instead use the universal
+            // C1_0 rule which is ReadOnly â†’ throws ExposedForRead. Neither
             // is writable in default map (it's empty). Workaround: assert
             // that the FIRST call AND a replay both raise the SAME access
             // error AND the second one isn't doubly-executed by checking the
             // idempotency cache short-circuits on the second attempt.
             //
             // Simpler: use a writable scenario by exercising WriteDetail
-            // (which doesn't run AssertWritable) — that's a clean idempotent
+            // (which doesn't run AssertWritable) â€” that's a clean idempotent
             // happy-path proof.
 
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
             var result1 = await mgr.WriteDetail("1001", row, idempotencyKey: "k1");
             Assert.Equal(StatusCodes.Success, result1);
 
-            // Second call with same key + same payload — short-circuits to
+            // Second call with same key + same payload â€” short-circuits to
             // cached result. Observable signal: no second append. We baselined
             // the BROW seed at 3 detail rows; after one append it's 4 and
             // should STAY 4 across the replay.
@@ -309,7 +309,7 @@ namespace LacertMCP.Tests.Session
         {
             var mgr = NewSimManagerWithContext();
             var row1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
-            var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second — different payload");
+            var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second â€” different payload");
 
             await mgr.WriteDetail("1001", row1, idempotencyKey: "k2");
 
@@ -340,7 +340,7 @@ namespace LacertMCP.Tests.Session
         public async Task CreateClient_DryRun_DoesNotPersistNewClient()
         {
             var mgr = NewSimManagerWithContext();
-            // P14-030 — ApplySimCreateClient now delegates to
+            // P14-030 â€” ApplySimCreateClient now delegates to
             // SimulationStore.SimulateCreateClient which enforces the
             // NotSignedIn gate. Register first so the create succeeds.
             await mgr.Register();
@@ -348,11 +348,11 @@ namespace LacertMCP.Tests.Session
             var beforeCount = beforeList.Count;
 
             var result = await mgr.CreateClient(new CreateClientArgs(
-                ClientID: "DRY",
+                ClientId: "DRY",
                 TaxType: "Individual",
                 FirstName: "Dry",
                 LastName: "Run",
-                EmailID: "dry@example.com"), dryRun: true);
+                EmailId: "dry@example.com"), dryRun: true);
             Assert.Equal(StatusCodes.Success, result.Status);
 
             var afterList = await mgr.ListClients(limit: 1000);
@@ -360,7 +360,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // -----------------------------------------------------------------
-        // P15-059 — defense-in-depth: a direct CreateClient caller that
+        // P15-059 â€” defense-in-depth: a direct CreateClient caller that
         // bypasses CreateClientTools must also have its colloquial
         // form-number alias canonicalized before reaching the bridge/sim,
         // so the manager itself is a safe write boundary.
@@ -374,11 +374,11 @@ namespace LacertMCP.Tests.Session
         {
             var mgr = NewSimManagerWithContext();
             var result = await mgr.CreateClient(new CreateClientArgs(
-                ClientID: "DIRECT1",
+                ClientId: "DIRECT1",
                 TaxType: taxType,
                 FirstName: "Di",
                 LastName: "Rect",
-                EmailID: "d@example.com"));
+                EmailId: "d@example.com"));
             Assert.Equal(StatusCodes.Success, result.Status);
             Assert.False(string.IsNullOrWhiteSpace(result.ClientNumber));
         }
@@ -386,18 +386,18 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task CreateClient_DirectCaller_UnknownAliasStillReturnsTaxModuleMismatch()
         {
-            // Canonicalization returns null for unknown aliases — the
+            // Canonicalization returns null for unknown aliases â€” the
             // manager leaves args.TaxType untouched so the existing sim
             // TaxModuleMismatch gate still fires with the operator's
             // original value (preserves the legacy error shape).
             var mgr = NewSimManagerWithContext();
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.CreateClient(new CreateClientArgs(
-                    ClientID: "DIRBOG",
+                    ClientId: "DIRBOG",
                     TaxType: "Bogus",
                     FirstName: "Di",
                     LastName: "Rect",
-                    EmailID: "d@example.com")));
+                    EmailId: "d@example.com")));
             Assert.Equal(StatusCodes.TaxModuleMismatch, ex.StatusCode);
             // Context surfaces the original operator-supplied value so
             // the diagnostic still points at what the operator typed.
@@ -441,7 +441,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // F14 — Edition cache surfaces in SessionStatus
+        // F14 â€” Edition cache surfaces in SessionStatus
         // =================================================================
 
         [Fact]
@@ -464,7 +464,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-004 — LACERTE_DEFAULT_TAX_YEAR env wiring
+        // P15-004 â€” LACERTE_DEFAULT_TAX_YEAR env wiring
         // =================================================================
 
         [Fact]
@@ -501,7 +501,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-030 — ModeResolutionReason surfaced when env is ambiguous
+        // P15-030 â€” ModeResolutionReason surfaced when env is ambiguous
         // =================================================================
 
         [Fact]
@@ -530,7 +530,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-042 / P15-070 — Register clears derived caches
+        // P15-042 / P15-070 â€” Register clears derived caches
         // =================================================================
 
         [Fact]
@@ -542,10 +542,10 @@ namespace LacertMCP.Tests.Session
             // Populate the cache via a CanUseNewApis read.
             _ = mgr.CanUseNewApis(2024, 'I');
             // Second Register must clear the cache so re-auth refreshes
-            // probe answers (defensive — sim returns the same answer, but the
+            // probe answers (defensive â€” sim returns the same answer, but the
             // clear-on-re-Register contract must hold).
             await mgr.Register();
-            // Re-probing after the clear is the observable proof — we use
+            // Re-probing after the clear is the observable proof â€” we use
             // SessionStatus.Edition (cleared by the same code path) since
             // _newApisCache has no public count surface. Edition gets re-built
             // and remains the sim sentinel.
@@ -556,7 +556,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-043 — proactive 24h auth-expiry probe
+        // P15-043 â€” proactive 24h auth-expiry probe
         // =================================================================
 
         [Fact]
@@ -585,7 +585,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public void SessionStatus_AfterExpiry_DoesNotThrow()
         {
-            // SessionStatus is the operator's escape hatch — must NEVER gate
+            // SessionStatus is the operator's escape hatch â€” must NEVER gate
             // on auth (operators need to be able to read state when expired
             // so they know to re-Register). RequireContext is the gate; this
             // bypasses it.
@@ -596,7 +596,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-050 — RequireRegistered gate
+        // P15-050 â€” RequireRegistered gate
         // =================================================================
 
         [Fact]
@@ -604,7 +604,7 @@ namespace LacertMCP.Tests.Session
         {
             var mgr = NewSimManager();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
-            // No Register call — RequireRegistered must fire.
+            // No Register call â€” RequireRegistered must fire.
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>
                 mgr.WriteField(1, "1001", "C1_1", "x"));
             Assert.Equal(StatusCodes.NotSignedIn, ex.StatusCode);
@@ -630,7 +630,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-077 — TaxYear upper-bound gate
+        // P15-077 â€” TaxYear upper-bound gate
         // =================================================================
 
         [Fact]
@@ -658,7 +658,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-016 / P15-074 — idempotency conflict context
+        // P15-016 / P15-074 â€” idempotency conflict context
         // =================================================================
 
         [Fact]
@@ -673,7 +673,7 @@ namespace LacertMCP.Tests.Session
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>
                 mgr.WriteDetail("1001", row2, idempotencyKey: "k-conflict-ts"));
             Assert.Equal(SyntheticStatusCodes.IdempotencyConflict, ex.StatusCode);
-            // P15-016 — operator sees BOTH timestamps so the duplicate-key
+            // P15-016 â€” operator sees BOTH timestamps so the duplicate-key
             // collision is post-hoc traceable.
             Assert.NotNull(ex.Context["existingEntryCreatedAt"]);
             Assert.NotNull(ex.Context["existingEntryAgeMs"]);
@@ -682,7 +682,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-021 — concurrency tests for ExecuteWithIdempotencyLock
+        // P15-021 â€” concurrency tests for ExecuteWithIdempotencyLock
         // =================================================================
 
         [Fact]
@@ -692,7 +692,7 @@ namespace LacertMCP.Tests.Session
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "concurrent");
             var before = (await mgr.ReadDetail("1001")).Count;
 
-            // 50 parallel writes with the same key — only ONE must actually
+            // 50 parallel writes with the same key â€” only ONE must actually
             // append; the other 49 hit the cache. Without the per-key
             // SemaphoreSlim (P14-005) two or more TryReplay misses could
             // race the StoreIdempotent and both append.
@@ -707,7 +707,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-012 / P15-055 — idempotency lock map bounded
+        // P15-012 / P15-055 â€” idempotency lock map bounded
         // =================================================================
 
         [Fact]
@@ -727,7 +727,7 @@ namespace LacertMCP.Tests.Session
         }
 
         // =================================================================
-        // P15-062 — TTL + cap-eviction tests
+        // P15-062 â€” TTL + cap-eviction tests
         // =================================================================
 
         [Fact]
@@ -745,7 +745,7 @@ namespace LacertMCP.Tests.Session
 
             // Force the entry past TTL via the internal test seam.
             mgr.ForceExpireIdempotencyEntryForTest("ttl1");
-            // Same key + same payload — entry is evicted, body re-executes,
+            // Same key + same payload â€” entry is evicted, body re-executes,
             // a SECOND append lands.
             await mgr.WriteDetail("1001", row, idempotencyKey: "ttl1");
             var after = (await mgr.ReadDetail("1001")).Count;
@@ -755,7 +755,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task Idempotency_WithinTtlWindow_ReplaysCache()
         {
-            // P15-060 — pin the absolute-TTL semantic: an entry backdated to
+            // P15-060 â€” pin the absolute-TTL semantic: an entry backdated to
             // 23h59m ago is INSIDE the 24h window and must STILL replay
             // (no re-execute). Pairs with Idempotency_ExpiredEntry_ReExecutes
             // (which pins the boundary on the other side at 24h01m) so the
@@ -766,12 +766,12 @@ namespace LacertMCP.Tests.Session
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "ttlinside");
             var before = (await mgr.ReadDetail("1001")).Count;
 
-            // First write — establishes the cache entry.
+            // First write â€” establishes the cache entry.
             await mgr.WriteDetail("1001", row, idempotencyKey: "ttl-inside-1");
             var mid = (await mgr.ReadDetail("1001")).Count;
             Assert.Equal(before + 1, mid);
 
-            // Backdate to 23h59m — still strictly under the 24h TTL.
+            // Backdate to 23h59m â€” still strictly under the 24h TTL.
             Assert.True(mgr.TryGetIdempotencyEntryForTest("ttl-inside-1", out var entry));
             mgr.SeedIdempotencyEntryForTest("ttl-inside-1",
                 DateTimeOffset.UtcNow - LacerteSessionManager.IdempotencyTtl + TimeSpan.FromMinutes(1));
@@ -809,6 +809,150 @@ namespace LacertMCP.Tests.Session
             // the cap, proving the eviction ran.
             Assert.True(mgr.IdempotencyCacheCount <= LacerteSessionManager.IdempotencyCacheMaxEntries,
                 $"cache count {mgr.IdempotencyCacheCount} should be <= cap {LacerteSessionManager.IdempotencyCacheMaxEntries}");
+        }
+
+        // =================================================================
+        // P16-013 — AppName default (single source-of-truth)
+        // =================================================================
+
+        [Fact]
+        public void DefaultAppName_IsOperatorLacerteMcp()
+        {
+            // The const must literally equal the CLI default in
+            // RegisterCommand.cs / LoginCommand.cs so the env var the server
+            // reads is the same one the CLI defaults from. Three-way drift
+            // between server/CLI/README defaults used to produce silent
+            // NotSignedIn failures because Intuit ties consent to AppName.
+            Assert.Equal("Operator Lacerte MCP", LacerteSessionManager.DefaultAppName);
+        }
+
+        [Fact]
+        public void SessionStatus_WhenAppNameEnvUnset_AppNameIsNull()
+        {
+            // With LACERTE_APP_NAME unset, the snapshot shows null (so a
+            // doctor probe can distinguish "fell back to the constant" from
+            // "operator explicitly set the env"). The wire-side fallback
+            // to DefaultAppName happens only at Register() / log emission.
+            var mgr = NewSimManager();
+            var snap = mgr.SessionStatus();
+            Assert.Null(snap.AppName);
+        }
+
+        [Fact]
+        public void SessionStatus_WhenAppNameEnvSet_AppNameEchoed()
+        {
+            var env = new Dictionary<string, string?>
+            {
+                ["LACERTE_APP_NAME"] = "Custom App",
+            };
+            var mgr = new LacerteSessionManager(env);
+            var snap = mgr.SessionStatus();
+            Assert.Equal("Custom App", snap.AppName);
+        }
+
+        // =================================================================
+        // P16-039 — stateAbbrev read-filter validation
+        // =================================================================
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevLowercase_StillMatches()
+        {
+            // Back-compat: OrdinalIgnoreCase preserved post-trim. Lowercase
+            // input is forgiving — the regex normalises via ToUpperInvariant
+            // before shape-checking.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var rows = await mgr.ReadTable(3, "1001", "ca");
+            Assert.NotNull(rows);
+            // ACME has CA + NY rows seeded; filter should yield exactly the CA row.
+            Assert.Single(rows);
+        }
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevTrailingWhitespace_TrimmedAndMatches()
+        {
+            // The classic typo case: 'CA ' silently returned zero rows
+            // before P16-039. After: trim makes it the same as 'CA'.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var rows = await mgr.ReadTable(3, "1001", "CA ");
+            Assert.Single(rows);
+        }
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevFullName_ThrowsStructuredError()
+        {
+            // The trust-eroding case: 'California' silently returned zero
+            // rows before P16-039. After: structured error the LLM can
+            // self-correct from in one turn.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.ReadTable(3, "1001", "California"));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal("stateAbbrev", ex.Context["field"]?.ToString());
+            Assert.Equal("California", ex.Context["value"]?.ToString());
+            // Remediation must mention the postal abbreviation hint.
+            var reason = ex.Context["reason"]?.ToString() ?? "";
+            Assert.Contains("CA", reason);
+        }
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevSingleLetter_ThrowsStructuredError()
+        {
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.ReadTable(3, "1001", "C"));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevWithDigits_ThrowsStructuredError()
+        {
+            // Defends the regex: '1A' would have matched the StateAbbrev
+            // dictionary with OrdinalIgnoreCase against no rows silently;
+            // post-fix it's a structured error.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.ReadTable(3, "1001", "1A"));
+            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+        }
+
+        [Fact]
+        public async Task ReadTable_ClientNumberTrailingWhitespace_TrimmedAndMatches()
+        {
+            // Bonus polish — '1001 ' typo no longer silently returns 0 rows.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var rows = await mgr.ReadTable(3, "1001 ", null);
+            // ACME (1001) has 2 state rows seeded (CA, NY).
+            Assert.Equal(2, rows.Count);
+        }
+
+        [Fact]
+        public async Task ReadTable_StateAbbrevOmitted_ReturnsAllRows()
+        {
+            // Null stateAbbrev bypasses the gate entirely; back-compat.
+            var mgr = NewSimManager();
+            mgr.Register().GetAwaiter().GetResult();
+            mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+
+            var rows = await mgr.ReadTable(3, "1001", null);
+            Assert.Equal(2, rows.Count);
         }
     }
 }

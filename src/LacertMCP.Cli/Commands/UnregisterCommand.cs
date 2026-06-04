@@ -68,11 +68,17 @@ namespace LacertMCP.Cli.Commands
 
             if (!confirm)
             {
+                // P16-082: stderr-for-non-errors is a POSIX foot-gun on a documented
+                // preview workflow. Keep only the one-line refusal banner on stderr
+                // (so PowerShell's red diagnostic coloring still flags the exit-1
+                // state), and route the preview body to stdout so it's redirectable
+                // (`lacerte-mcp unregister > preview.txt`), pipeable (`| clip`), and
+                // doesn't look like a fault to a non-shell-expert tax-pro operator.
                 stderr.WriteLine("Refusing to wipe the persisted AppID without --confirm.");
-                stderr.WriteLine($"  Would delete AppID {AppIdStore.Mask(existing.Value)} from {backend}.");
-                stderr.WriteLine("  Re-run with --confirm to proceed. After unregister you'll need");
-                stderr.WriteLine("  `lacerte-mcp register` to mint a fresh GUID (forces a new Intuit");
-                stderr.WriteLine("  consent ceremony on Windows + live SDK).");
+                stdout.WriteLine($"  Would delete AppID {AppIdStore.Mask(existing.Value)} from {backend}.");
+                stdout.WriteLine("  Re-run with --confirm to proceed. After unregister you'll need");
+                stdout.WriteLine("  `lacerte-mcp register` to mint a fresh GUID (forces a new Intuit");
+                stdout.WriteLine("  consent ceremony on Windows + live SDK).");
                 return 1;
             }
 

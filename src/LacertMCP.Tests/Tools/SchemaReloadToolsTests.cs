@@ -52,7 +52,10 @@ namespace LacertMCP.Tests.Tools
             var result = root.GetProperty("result");
 
             // Contract: every required field exists and is correctly typed.
-            Assert.True(result.GetProperty("success").GetBoolean());
+            // P16-070: inner `success` removed — WrapToolHandler's outer
+            // envelope already supplies it.
+            Assert.False(result.TryGetProperty("success", out _),
+                "Inner `success` field must be absent — the outer envelope owns that key (P16-070).");
             Assert.Equal(JsonValueKind.Number, result.GetProperty("modulesReloaded").ValueKind);
             Assert.Equal(JsonValueKind.Number, result.GetProperty("overlaysReloaded").ValueKind);
             Assert.Equal(JsonValueKind.String, result.GetProperty("schemaRoot").ValueKind);

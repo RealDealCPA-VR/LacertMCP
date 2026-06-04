@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -12,8 +12,8 @@ using Xunit;
 namespace LacertMCP.Tests.Logging
 {
     /// <summary>
-    /// F11 integration test — wires <see cref="WireLog"/> on via
-    /// <c>EnableForTests</c>, drives the full <c>ListClients → WriteField →
+    /// F11 integration test â€” wires <see cref="WireLog"/> on via
+    /// <c>EnableForTests</c>, drives the full <c>ListClients â†’ WriteField â†’
     /// CreateClient</c> sequence through the session manager in sim mode, then
     /// asserts the on-disk log file contains the right ops with redacted args.
     /// Exercises every WireLog wrap added under F11 except the live-only
@@ -26,7 +26,7 @@ namespace LacertMCP.Tests.Logging
         // -----------------------------------------------------------------
         // Access-map seed: WriteField runs AssertWritable BEFORE WireLog
         // records, so we need at least one ReadWrite entry to reach the
-        // recorded sim write. Uses the shared in-memory helper —
+        // recorded sim write. Uses the shared in-memory helper â€”
         // additive-only, race-safe with the on-disk Tools/* tests via
         // [Collection(AccessMapMutationCollection.Name)].
         // -----------------------------------------------------------------
@@ -51,15 +51,15 @@ namespace LacertMCP.Tests.Logging
 
                 var mgr = new LacerteSessionManager(new Dictionary<string, string?>());
                 mgr.SetContext(SeedData.DataPathIData2024, 2024, WritableModule);
-                // P14-030 — CreateClient delegates to SimulateCreateClient which
+                // P14-030 â€” CreateClient delegates to SimulateCreateClient which
                 // requires Register first (NotSignedIn gate).
                 await mgr.Register();
 
-                // 1) ListClients — should write op="ListClients".
+                // 1) ListClients â€” should write op="ListClients".
                 var clients = await mgr.ListClients(limit: 100);
                 Assert.NotEmpty(clients);
 
-                // 2) WriteField — write a value that contains an "SSN" key
+                // 2) WriteField â€” write a value that contains an "SSN" key
                 //    inside the value object would be ideal, but the value is
                 //    a flat string here; the redaction surface for WriteField
                 //    args is the value itself. Use a string value to keep the
@@ -71,7 +71,7 @@ namespace LacertMCP.Tests.Logging
                     value: "wire-log-int-test");
                 Assert.Equal(StatusCodes.Success, writeRc);
 
-                // 3) CreateClient — args.EmailID is logged; the redaction
+                // 3) CreateClient â€” args.EmailID is logged; the redaction
                 //    layer redacts SSN/EIN/BankAccountNumber/RoutingNumber, so
                 //    pass an SSN field on the args object via field name to
                 //    show the redaction works. CreateClientArgs has no SSN
@@ -79,11 +79,11 @@ namespace LacertMCP.Tests.Logging
                 //    and assert no plain-text "***" sentinels are missing for
                 //    a separately-written-record with secret args.
                 var createResult = await mgr.CreateClient(new CreateClientArgs(
-                    ClientID: "WLOG",
+                    ClientId: "WLOG",
                     TaxType: "Individual",
                     FirstName: "Wire",
                     LastName: "Log",
-                    EmailID: "wirelog@example.com"));
+                    EmailId: "wirelog@example.com"));
                 Assert.Equal(StatusCodes.Success, createResult.Status);
 
                 // Assert: the logfile(s) exist and contain one line per op.

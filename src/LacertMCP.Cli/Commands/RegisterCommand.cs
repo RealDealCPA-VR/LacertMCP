@@ -48,10 +48,15 @@ namespace LacertMCP.Cli.Commands
         {
             var existing = AppIdStore.Get();
             Guid appId;
+            // P16-022: track whether this invocation actually minted a fresh GUID so
+            // the downstream [partial] stderr line in InvokeLiveRegister can be honest
+            // about which path fired ("AppID minted" vs "Existing AppID re-used").
+            bool wasJustMinted;
 
             if (existing.HasValue && !reset)
             {
                 appId = existing.Value;
+                wasJustMinted = false;
                 Console.WriteLine("AppID already minted — re-using existing GUID.");
                 // Re-use path: print only the masked form. The operator already saw the full GUID
                 // once at original-mint time (the new-mint branch below) and was told to back it up.
@@ -59,11 +64,15 @@ namespace LacertMCP.Cli.Commands
                 Console.WriteLine($"  AppID  : {AppIdStore.Mask(appId)}");
                 Console.WriteLine($"  AppName: {appName}");
                 Console.WriteLine($"  TaxYear: {taxYear}");
-                Console.WriteLine();
-                Console.WriteLine("Pass --reset to mint a new one (this forces a fresh Intuit consent dialog).");
+                // P16-022: dropped the "Pass --reset to mint a new one" stdout hint that
+                // previously dangled here — discoverable via --help, and on the re-use
+                // path its juxtaposition with the immediately-following stderr [partial]
+                // block created a "what do I actually do?" moment. If the operator
+                // intended to re-do the ceremony, the [partial] block now says so.
             }
             else
             {
+                wasJustMinted = true;
                 if (reset && existing.HasValue)
                 {
                     // Print the OLD GUID in masked form only — the operator's confirmation that we're
@@ -85,10 +94,10 @@ namespace LacertMCP.Cli.Commands
             }
 
             Console.WriteLine();
-            return InvokeLiveRegister(appName, appId, taxYear);
+            return InvokeLiveRegister(appName, appId, taxYear, wasJustMinted);
         }
 
-        private static int InvokeLiveRegister(string appName, Guid appId, int taxYear)
+        private static int InvokeLiveRegister(string appName, Guid appId, int taxYear, bool wasJustMinted)
         {
             if (Environment.OSVersion.Platform != PlatformID.Win32NT)
             {
@@ -101,16 +110,32 @@ namespace LacertMCP.Cli.Commands
                 return 0;
             }
 
-            // P15-028: On Windows the operator reasonably expects ITPRegistration.Register()
-            // to fire. It doesn't yet (Phase 9 task #63). Returning 0 here makes the silent
-            // no-op look like success to any `if ($LASTEXITCODE -eq 0)` wrapper, and the
-            // operator only discovers the failure 24h later when tools start returning
-            // NotSignedIn (9101). Route the "partial" message to stderr and return exit 3
-            // so wrapping scripts can distinguish "AppID minted, consent skipped" from
-            // "fully complete".
-            Console.Error.WriteLine("[partial] AppID minted, but the Intuit consent ceremony is not yet wired into the CLI (Phase 9 task #63).");
-            Console.Error.WriteLine("          First MCP tool call will return NotSignedIn (9101) until Phase 9 ships and you re-run `lacerte-mcp register`.");
+            // P15-028 / P16-022 / P16-004: On Windows the operator reasonably expects
+            // ITPRegistration.Register() to fire. It doesn't yet (Phase 9 task #63).
+            // Returning 0 here makes the silent no-op look like success to any
+            // `if ($LASTEXITCODE -eq 0)` wrapper, and the operator only discovers the
+            // failure 24h later when tools start returning LoginExpired (9007) via the
+            // ThrowIfAuthExpired probe. Route the "partial" message to stderr and
+            // return exit 3 so wrapping scripts can distinguish "AppID minted, consent
+            // skipped" from "fully complete". P16-022: differentiate the message based
+            // on whether we just minted vs re-used so the stderr line is honest.
+            // PHASE-9-CLEANUP: when Phase 9 task #63 lands and ITPRegistration.Register()
+            // fires, delete the [partial] stderr block + the wasJustMinted branch and
+            // return 0.
+            if (wasJustMinted)
+            {
+                Console.Error.WriteLine("[partial] AppID minted, but the Intuit consent ceremony is not yet wired into the CLI (Phase 9 task #63).");
+            }
+            else
+            {
+                Console.Error.WriteLine("[partial] Existing AppID re-used; the Intuit consent ceremony still is not wired into the CLI (Phase 9 task #63). Nothing changed on this run.");
+            }
+            Console.Error.WriteLine("          First MCP tool call will return LoginExpired (9007) once Phase 9 ships and the existing 24h ticket lapses; until then a freshly-minted AppID will return AppNotRegistered (9006) on every call.");
             Console.Error.WriteLine("          Track progress: Todo.md Phase 9 #63 (Bridge/Registration.cs).");
+            if (!wasJustMinted)
+            {
+                Console.Error.WriteLine("          If you intended to re-do the Intuit consent ceremony, re-run with --reset.");
+            }
             return 3;
         }
     }

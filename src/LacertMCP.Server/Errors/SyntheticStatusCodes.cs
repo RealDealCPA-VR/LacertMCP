@@ -38,7 +38,12 @@ namespace LacertMCP.Server.Errors
         // 9001 means "ReadOnly/Hidden/NotExposed/ReadOnly-session" — the field
         // is known and is intentionally non-writable. 9012 means "we have no
         // entry for this field" — the operator can populate the map with
-        // `lacerte-mcp field-access discover` or override with force:true.
+        // `LacertMCP.FieldAccessDumper.exe` then call the `lacerte_reload_schema`
+        // MCP tool, or call `lacerte_field_access_map` to see what IS writable.
+        // P16-001/P16-016: previous remediation pointed at the deprecated
+        // `lacerte-mcp field-access discover` CLI verb (now exits 3) and at a
+        // `force:true` parameter that is not exposed on any MCP tool — both
+        // dead-ends. The new text routes to working surfaces only.
         public const int UnknownFieldAccess = 9012;
 
         // 9013 — dataPath failed PathValidation in SetContext. Distinct from
@@ -70,6 +75,37 @@ namespace LacertMCP.Server.Errors
         // (otherwise int 42 vs JsonElement(42) would hash differently and
         // silently break replay). Context includes {field, clrType, reason}.
         public const int FieldWriteInvalid = 9015;
+
+        // 9016 — caller-supplied assertion (year or readOnly) does NOT
+        // match the active session context. Distinct from 9009 ContextNotSet
+        // (which means context is missing entirely): context IS set, just
+        // for a different year/readOnly value than the caller expected.
+        // P16-063: lacerte_field_write_bulk's preflight previously reused
+        // 9009 for the mismatch case, but 9009's canonical remediation
+        // ("Call lacerte_set_context first") actively misleads the operator
+        // when context is already set — they call session_status, see a
+        // non-null context, and get stuck. 9016 has a remediation that
+        // names the mismatch and tells the operator to either fix the
+        // context OR drop the mismatching assertion from the tool call.
+        // Context includes {reason, expectedTaxYear/actualTaxYear} or
+        // {reason, expectedReadOnly/actualReadOnly}.
+        public const int ContextMismatch = 9016;
+
+        // 9017 — a tool-layer argument failed validation. Distinct from 9013
+        // InvalidDataPath (strictly about the SetContext dataPath surface),
+        // 9008 DetailWriteInvalid (Series/Code/Amount shape on detail rows),
+        // and 9015 FieldWriteInvalid (non-scalar `value` on lacerte_field_write).
+        // 9017 covers any other per-argument parse/range/format failure
+        // (e.g. sinceUtc ISO-8601 parse, statusFilter enum set). The context
+        // dict carries {argument, value, reason} so the tool layer can render
+        // the specific rejection without the LLM mis-rerouting to a different
+        // tool. P16-044/P16-048: previously EFileTools borrowed 9013 for a
+        // sinceUtc parse failure, which made the wire envelope suggest a path
+        // problem (and the LLM would rerun lacerte_set_context instead of
+        // fixing the date string). New tools doing per-argument validation
+        // should reuse 9017 with the {argument, value, reason} shape rather
+        // than reaching for whatever code is handy.
+        public const int InvalidArgument = 9017;
 
         // ---- 9100–9199: auth lifecycle ----
         // 9101 reserved for the architecture-doc cross-reference (re-auth surfacing path).
@@ -141,14 +177,14 @@ namespace LacertMCP.Server.Errors
             [AppNotRegistered] = new StatusInfo(
                 "AppNotRegistered",
                 Severity.Error,
-                "Any tool other than lacerte_register was called before a successful Register() landed.",
-                "Run lacerte_register once to grant consent and sign in."),
+                "A read/write tool was called before the operator ran the `lacerte-mcp register` CLI command. Registration cannot be performed through MCP — it requires interactive consent against the local Lacerte install.",
+                "Ask the operator to run the shell command `lacerte-mcp register` once on the Lacerte box (this is a CLI command, not an MCP tool) to open the Intuit consent dialog, then restart the MCP server in your host (Claude Desktop / Cursor / Windsurf)."),
 
             [LoginExpired] = new StatusInfo(
                 "LoginExpired",
                 Severity.Error,
-                "Cached session manager detects the 24h Intuit login window has lapsed.",
-                "Run lacerte_register to re-authenticate (consent is one-time; only the sign-in needs refresh)."),
+                "The 24h Intuit auth ticket lapsed; the one-time consent is still valid — only the sign-in needs to refresh.",
+                "Ask the operator to run the shell command `lacerte-mcp login` on the Lacerte box (this is a CLI command, not an MCP tool) to refresh the auth ticket, then restart the MCP server. Use `lacerte-mcp register` only if `login` reports the AppID was never registered."),
 
             [DetailWriteInvalid] = new StatusInfo(
                 "DetailWriteInvalid",
@@ -160,13 +196,13 @@ namespace LacertMCP.Server.Errors
                 "ContextNotSet",
                 Severity.Error,
                 "A read/write tool was called before lacerte_set_context provided Datapath + TaxYear + ReturnType.",
-                "Call lacerte_set_context first."),
+                "First call `lacerte_list_datapaths` to discover available (path, year, module) triples, then `lacerte_list_modules` for the module catalog (I/C/P/S/F/R/T/N/B), then `lacerte_set_context(dataPath, taxYear, module)` with the chosen triple. In simulation mode the canonical seeded paths are `C:\\Lacerte\\20Tax\\IData` (TY20 individual), `C:\\Lacerte\\24Tax\\IData` (TY24 individual), `C:\\Lacerte\\24Tax\\CData` (TY24 corp), and `C:\\Lacerte\\24Tax\\PData` (TY24 partnership)."),
 
             [UnknownFieldAccess] = new StatusInfo(
                 "UnknownFieldAccess",
                 Severity.Error,
-                "Field not in access map.",
-                "Run `lacerte-mcp field-access discover` to populate the map, or pass force:true to override."),
+                "Field not in access map — the per-module shard has no entry for this (module, table, field). The v1 base shards ship empty for many modules.",
+                "To recover in-session: call `lacerte_field_access_map(module, table, taxYear)` to see what IS writable for this slot — if the field is genuinely supported but uncataloged, pick a mapped field. To permanently populate the map: run `LacertMCP.FieldAccessDumper.exe --module <I|C|P|S|F|R|T|N|B> --table <1..7>` on a Windows + live-Lacerte box, then call the `lacerte_reload_schema` MCP tool so the new shards take effect without restarting (restart would invalidate the 24h Intuit auth ticket)."),
 
             [InvalidDataPath] = new StatusInfo(
                 "InvalidDataPath",
@@ -186,11 +222,23 @@ namespace LacertMCP.Server.Errors
                 "lacerte_field_write 'value' was not a JSON-serializable scalar (string, number, bool, or null). Arrays, objects, and arbitrary CLR types are rejected at the session chokepoint before any wire call.",
                 "Pass a scalar value — a string, number, bool, or null. Use lacerte_detail_write for multi-field row payloads."),
 
+            [ContextMismatch] = new StatusInfo(
+                "ContextMismatch",
+                Severity.Error,
+                "The active session context does not match a caller-supplied assertion (taxYear or readOnly).",
+                "Re-call lacerte_set_context with the correct taxYear/readOnly, OR remove the mismatching assertion from your tool call. Do NOT just re-call set_context with the same values — that's the value you asserted against. Inspect context.expectedTaxYear/actualTaxYear (or expectedReadOnly/actualReadOnly) to see exactly what diverged."),
+
+            [InvalidArgument] = new StatusInfo(
+                "InvalidArgument",
+                Severity.Error,
+                "A tool argument failed validation. See context.reason for the specific failure.",
+                "Re-call the tool with the argument value corrected per the reason field; do NOT change unrelated state (context, registration, etc.). This is a caller-input bug — not a Lacerte / data-path / context problem."),
+
             [ReAuthRequired] = new StatusInfo(
                 "ReAuthRequired",
                 Severity.Error,
                 "The 24h Intuit auth ticket expired and was reactively detected (NotSignedIn).",
-                "Run lacerte-mcp login (or lacerte_register) to refresh the auth ticket."),
+                "Ask the operator to run the shell command `lacerte-mcp login` on the Lacerte box (this is a CLI command, not an MCP tool) to refresh the auth ticket, then restart the MCP server. Fall back to `lacerte-mcp register` only if `login` reports the AppID is unknown."),
 
             [IdempotencyConflict] = new StatusInfo(
                 "IdempotencyConflict",
@@ -202,13 +250,13 @@ namespace LacertMCP.Server.Errors
                 "InvalidAppId",
                 Severity.Error,
                 "The supplied AppID is malformed or oversized (failed bridge-boundary shape check before COM dispatch).",
-                "If the AppID came from registration storage, run `lacerte-mcp unregister` then `lacerte-mcp register` to mint a fresh GUID. If it came from a LACERTE_APPID env var, fix or unset that env var."),
+                "Ask the operator to mint a fresh AppID: if the AppID came from registration storage, run the shell commands `lacerte-mcp unregister` then `lacerte-mcp register` (CLI, not MCP tools); if it came from a LACERTE_APPID env var, fix or unset that env var."),
 
             [BridgeUnavailable] = new StatusInfo(
                 "BridgeUnavailable",
                 Severity.Error,
                 "Live mode requested but the .NET/COM bridge process didn't start or crashed.",
-                "Confirm running on Windows with the SDK installed; re-run with LACERTE_DEBUG_WIRE=1 and inspect logs/lacerte-YYYYMMDD.log for the bridge stderr."),
+                "Confirm running on Windows with the SDK installed. If LACERTE_DEBUG_WIRE=1 is already enabled, grep for the `cid` value on this error envelope inside the wire log (default `./logs/lacerte-YYYYMMDD.log` relative to the MCP server's working directory; override via LACERTE_DEBUG_LOG_PATH) — call `lacerte_session_status` to see the resolved log path. If LACERTE_DEBUG_WIRE is not enabled, set it in your MCP host config (Claude Desktop / Cursor / Windsurf), restart the host, and reproduce — the flag must be on BEFORE the failure to capture the bridge stderr."),
 
             [SimulationOnly] = new StatusInfo(
                 "SimulationOnly",
@@ -220,7 +268,7 @@ namespace LacertMCP.Server.Errors
                 "InternalServerError",
                 Severity.Error,
                 "The MCP server itself raised an unexpected exception — this is not a Lacerte SDK error.",
-                "Capture the exceptionType from context, re-run with LACERTE_DEBUG_WIRE=1, and file an issue with the wire log timestamp."),
+                "Capture `exceptionType` from context. If LACERTE_DEBUG_WIRE=1 is enabled, grep for the `cid` value on this error envelope inside the wire log (default `./logs/lacerte-YYYYMMDD.log` relative to the MCP server's working directory; override via LACERTE_DEBUG_LOG_PATH) — call `lacerte_session_status` to see the resolved log path. Otherwise set LACERTE_DEBUG_WIRE=1 in your MCP host config, restart, reproduce, and file an issue with the resulting log block. The flag must be on BEFORE the failure to capture the exception with its arg payload."),
         };
     }
 }

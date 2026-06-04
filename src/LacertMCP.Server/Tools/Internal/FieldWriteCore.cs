@@ -37,7 +37,8 @@ namespace LacertMCP.Server.Tools.Internal
             string clientNumber,
             string field,
             object? value,
-            int? subClientID,
+            // P16-054/P16-080 — canonical C# casing matches the wire form.
+            int? subClientId,
             string? stateAbbrev,
             bool dryRun,
             string? idempotencyKey,
@@ -47,7 +48,7 @@ namespace LacertMCP.Server.Tools.Internal
             {
                 var status = await session.WriteField(
                     table, clientNumber, field, value,
-                    subClientID, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
+                    subClientId, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
 
                 var info = StatusCodes.GetStatusInfo(status);
                 return (object)new

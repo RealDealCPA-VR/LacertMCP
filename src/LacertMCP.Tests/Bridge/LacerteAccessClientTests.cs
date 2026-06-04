@@ -152,7 +152,7 @@ namespace LacertMCP.Tests.Bridge
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 client.CreateClient("appid", @"C:\Lacerte\24data", 2024, 'I',
                     "NEW01", "Individual", firstName: "bob\0", lastName: "Doe",
-                    emailID: "jane@example.com"));
+                    emailId: "jane@example.com"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
             Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
             Assert.Equal("firstName", ex.Context["field"]);

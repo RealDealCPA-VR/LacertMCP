@@ -109,7 +109,7 @@ namespace LacertMCP.Server.Bridge
             {
                 // P15-007: misclassified as AppNotRegistered (9006) until now.
                 // The operator DID register; the persisted/env-supplied AppID
-                // just has bad shape, so the 9006 "Run lacerte_register"
+                // just has bad shape, so the 9006 "Run `lacerte-mcp register`"
                 // remediation sent LLM clients into infinite loops.
                 throw new LacerteSDKError(
                     SyntheticStatusCodes.InvalidAppId,
@@ -480,11 +480,13 @@ namespace LacertMCP.Server.Bridge
 
         /// <summary>
         /// Pre-flight for <see cref="Writer.UpdateTaxReturn"/>: appId,
-        /// dataPath, dbf, clientNumber, field, value, subClientID, stateAbbrev.
+        /// dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev.
+        /// <para>P16-054/P16-080 — `subClientId` casing matches the wire form;
+        /// error-context echoes the same name.</para>
         /// </summary>
         public static void ValidateUpdateTaxReturnArgs(
             string appId, string dataPath, string dbf, string clientNumber,
-            string field, object? value, int? subClientID, string? stateAbbrev)
+            string field, object? value, int? subClientId, string? stateAbbrev)
         {
             const string op = "UpdateTaxReturn";
             ValidateAppId(appId, op);
@@ -493,16 +495,16 @@ namespace LacertMCP.Server.Bridge
             ValidateClientNumber(clientNumber, op);
             ValidateFieldName(field, op);
             ValidateValue(value, op);
-            if (subClientID.HasValue && subClientID.Value < 0)
+            if (subClientId.HasValue && subClientId.Value < 0)
             {
                 throw new LacerteSDKError(
                     StatusCodes.InValidSubClientID,
                     new Dictionary<string, object?>
                     {
                         ["op"] = op,
-                        ["field"] = "subClientID",
-                        ["value"] = subClientID.Value,
-                        ["reason"] = "subClientID must be >= 0.",
+                        ["field"] = "subClientId",
+                        ["value"] = subClientId.Value,
+                        ["reason"] = "subClientId must be >= 0.",
                     });
             }
             ValidateStateAbbrev(stateAbbrev, op);
@@ -577,25 +579,27 @@ namespace LacertMCP.Server.Bridge
 
         /// <summary>
         /// Pre-flight for <see cref="LacerteAccessClient.CreateClient"/>:
-        /// appId, dataPath, clientID, taxType, firstName, lastName, emailID.
+        /// appId, dataPath, clientId, taxType, firstName, lastName, emailId.
         /// P15-020 — CreateClient is the only COM mutation path that bypassed
-        /// BridgeInputValidation in Phase 14. firstName/lastName/emailID are
+        /// BridgeInputValidation in Phase 14. firstName/lastName/emailId are
         /// operator-supplied free-form strings that the SDK marshaller will
         /// silently truncate on the first NUL; bridge-side EnsureSafeText
         /// rejects them BEFORE the dynamic dispatch.
+        /// <para>P16-054/P16-080 — `clientId`/`emailId` casing matches the
+        /// wire form; error-context echoes the same names.</para>
         /// </summary>
         public static void ValidateCreateClientArgs(
-            string appId, string dataPath, string clientID, string taxType,
-            string? firstName, string? lastName, string? emailID)
+            string appId, string dataPath, string clientId, string taxType,
+            string? firstName, string? lastName, string? emailId)
         {
             const string op = "CreateClient";
             ValidateAppId(appId, op);
             ValidateDataPath(dataPath, op);
-            ValidateClientNumber(clientID, op);
+            ValidateClientNumber(clientId, op);
             EnsureSafeText(taxType, op, "taxType", ShortStringMaxLength);
             EnsureSafeText(firstName, op, "firstName", ShortStringMaxLength);
             EnsureSafeText(lastName, op, "lastName", ShortStringMaxLength);
-            EnsureSafeText(emailID, op, "emailID", EmailMaxLength);
+            EnsureSafeText(emailId, op, "emailId", EmailMaxLength);
         }
     }
 }

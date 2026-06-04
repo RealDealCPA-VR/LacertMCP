@@ -78,8 +78,26 @@ namespace LacertMCP.Server
 
             // MCP server: stdio transport + attribute-driven tool/prompt discovery across this assembly.
             // WithPromptsFromAssembly picks up WorkflowPrompts (Phase 11 task #79).
+            //
+            // P16-050 — set Implementation/ServerInfo on the MCP wire so the
+            // host UI (Claude Desktop server list, Cursor status bar, Windsurf
+            // panel) and the InitializeResult.serverInfo field carry the
+            // canonical "lacerte-mcp" name and the BuildInfo.Version stamp.
+            // Without this the SDK falls back to assembly defaults with no
+            // visible SemVer — bug reports from operators won't carry the
+            // version stamp. The SDK 0.3.0-preview.4 does not expose a fluent
+            // .WithServerInfo(...) extension; ServerInfo is set inside the
+            // AddMcpServer configureOptions lambda via McpServerOptions.
             builder.Services
-                .AddMcpServer()
+                .AddMcpServer(opts =>
+                {
+                    opts.ServerInfo = new ModelContextProtocol.Protocol.Implementation
+                    {
+                        Name = "lacerte-mcp",
+                        Title = "Lacerte MCP",
+                        Version = BuildInfo.Version,
+                    };
+                })
                 .WithStdioServerTransport()
                 .WithToolsFromAssembly()
                 .WithPromptsFromAssembly();

@@ -18,19 +18,24 @@ namespace LacertMCP.Server.Session
 
     /// <summary>
     /// Arguments bag for <see cref="SimulationStore.SimulateCreateClient"/>.
-    /// Mirrors the shape of <c>IClientList.SetDataPath → IClient(...) → CreateClient</c>
+    /// Mirrors the shape of <c>IClientList.SetDataPath -> IClient(...) -> CreateClient</c>
     /// in the live COM bridge so the wire-shape stays observationally identical
     /// across modes.
+    /// <para>
+    /// P16-054/P16-080 — ClientID/EmailID renamed to ClientId/EmailId so the
+    /// internal C# casing matches the canonical wire form (camelCase clientId/
+    /// emailId). One canonical casing across the whole codebase.
+    /// </para>
     /// </summary>
     public sealed record SimulateCreateClientArgs(
         string DataPath,
         int Year,
         char Module,
-        string ClientID,
+        string ClientId,
         string TaxType,
         string? FirstName = null,
         string? LastName = null,
-        string? EmailID = null);
+        string? EmailId = null);
 
     /// <summary>
     /// Deep-clone snapshot of the entire simulation store. Returned by

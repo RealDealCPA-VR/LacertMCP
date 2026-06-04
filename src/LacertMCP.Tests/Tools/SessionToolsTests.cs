@@ -33,7 +33,10 @@ namespace LacertMCP.Tests.Tools
 
             Assert.True(root.GetProperty("success").GetBoolean());
             var result = root.GetProperty("result");
-            Assert.Equal("Simulation", result.GetProperty("mode").GetString());
+            // Mode casing aligned with lacerte_health + HeartbeatWriter — every
+            // surface emits lowercase ("simulation"/"live") for the conceptual
+            // mode field.
+            Assert.Equal("simulation", result.GetProperty("mode").GetString());
             Assert.False(result.GetProperty("isRegistered").GetBoolean());
             // No context set yet — should be JSON null.
             Assert.Equal(System.Text.Json.JsonValueKind.Null, result.GetProperty("context").ValueKind);
@@ -69,7 +72,8 @@ namespace LacertMCP.Tests.Tools
             Assert.True(root.GetProperty("success").GetBoolean());
             var ctx = root.GetProperty("result");
             Assert.Equal(SeedData.DataPathIData2024, ctx.GetProperty("dataPath").GetString());
-            Assert.Equal(2024, ctx.GetProperty("year").GetInt32());
+            // P16-069/P16-079 — response field is `taxYear`.
+            Assert.Equal(2024, ctx.GetProperty("taxYear").GetInt32());
             Assert.Equal("I", ctx.GetProperty("module").GetString());
             Assert.False(ctx.GetProperty("readOnly").GetBoolean());
         }
@@ -344,6 +348,146 @@ namespace LacertMCP.Tests.Tools
             var env = new System.Collections.Generic.Dictionary<string, string?>();
             var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"C:\anywhere\logs", env);
             Assert.NotNull(result);
+        }
+
+        // -----------------------------------------------------------------
+        // P16-030 — hint on empty lacerte_list_datapaths result
+        //
+        // Tests drive BuildListDatapathsPayload directly to avoid mutating
+        // the process-wide LACERTE_DATA_ROOT env var, which would race
+        // against parallel test classes.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void ListDatapaths_NonExistentRoot_PayloadCarriesHint_NamingEnvVarAndLayout()
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(
+                SessionTools.BuildListDatapathsPayload(@"Q:\definitely\not\a\real\path"));
+            var result = ToolTestHelpers.Parse(json);
+            Assert.False(result.GetProperty("rootExists").GetBoolean());
+            Assert.Equal(0, result.GetProperty("count").GetInt32());
+            var hint = result.GetProperty("hint").GetString();
+            Assert.NotNull(hint);
+            Assert.Contains("LACERTE_DATA_ROOT", hint);
+            Assert.Contains("{YY}Tax", hint);
+        }
+
+        [Fact]
+        public void ListDatapaths_RootExistsButEmpty_PayloadCarriesHint_MentioningSharedLayout()
+        {
+            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "lacert-mcp-emptyroot-" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(root);
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(
+                    SessionTools.BuildListDatapathsPayload(root));
+                var result = ToolTestHelpers.Parse(json);
+                Assert.True(result.GetProperty("rootExists").GetBoolean());
+                Assert.Equal(0, result.GetProperty("count").GetInt32());
+                var hint = result.GetProperty("hint").GetString();
+                Assert.NotNull(hint);
+                Assert.Contains("{YY}data", hint);
+                Assert.Contains("lacerte_set_context", hint);
+            }
+            finally
+            {
+                try { System.IO.Directory.Delete(root, recursive: true); } catch { /* swallow */ }
+            }
+        }
+
+        [Fact]
+        public void ListDatapaths_RootWithMatchingFolders_OmitsHintOnHappyPath()
+        {
+            var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "lacert-mcp-happy-" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "24Tax", "IData"));
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(
+                    SessionTools.BuildListDatapathsPayload(root));
+                var result = ToolTestHelpers.Parse(json);
+                Assert.Equal(1, result.GetProperty("count").GetInt32());
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, result.GetProperty("hint").ValueKind);
+            }
+            finally
+            {
+                try { System.IO.Directory.Delete(root, recursive: true); } catch { /* swallow */ }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // P16-066 — wire-log diagnostic state on lacerte_session_status
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task SessionStatus_SurfacesWireLogState_WhenDisabled_PathIsWouldBe()
+        {
+            // Default test process: LACERTE_DEBUG_WIRE not set, logging off.
+            // Snapshot must report debugWireEnabled=false AND a non-null
+            // wireLogPath (the would-be path so the operator can enable +
+            // restart + grep without guessing).
+            var json = await NewTools().LacerteSessionStatus();
+            var result = ToolTestHelpers.Parse(json).GetProperty("result");
+            Assert.False(result.GetProperty("debugWireEnabled").GetBoolean());
+            var path = result.GetProperty("wireLogPath").GetString();
+            Assert.NotNull(path);
+            // Filename portion is the canonical lacerte-YYYYMMDD.log shape.
+            Assert.Contains("lacerte-", path);
+            Assert.EndsWith(".log", path);
+        }
+
+        [Fact]
+        public void WireLog_ResolvedOrWouldBeLogPath_ReturnsCanonicalFilename()
+        {
+            // The would-be-path resolver is process-state-only (env var read
+            // happens elsewhere) — verify it always produces a non-empty path
+            // ending in the canonical lacerte-YYYYMMDD.log filename. This is
+            // race-safe to run unconditionally and pins the helper contract
+            // so a future refactor can't silently start returning null when
+            // logging is disabled.
+            var path = LacertMCP.Server.Logging.WireLog.ResolvedOrWouldBeLogPath();
+            Assert.False(string.IsNullOrEmpty(path));
+            var fname = System.IO.Path.GetFileName(path);
+            Assert.StartsWith("lacerte-", fname);
+            Assert.EndsWith(".log", fname);
+        }
+
+        // -----------------------------------------------------------------
+        // P16-083 — minutesUntilExpiry rounded to 1 decimal at the boundary
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task SessionStatus_MinutesUntilExpiry_RoundedToOneDecimal()
+        {
+            var json = await NewTools().LacerteSessionStatus();
+            var result = ToolTestHelpers.Parse(json).GetProperty("result");
+            var mins = result.GetProperty("minutesUntilExpiry").GetDouble();
+            // Round-trip: |mins - round(mins,1)| < epsilon
+            Assert.True(System.Math.Abs(mins - System.Math.Round(mins, 1, System.MidpointRounding.AwayFromZero)) < 1e-9,
+                $"minutesUntilExpiry {mins} not rounded to 1 decimal");
+        }
+
+        // -----------------------------------------------------------------
+        // P16-051/P16-078 — dataPath description uses single backslashes
+        // (no C# escape leak doubling them on the wire).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void SetContextDescription_DataPathExample_UsesSingleBackslashes()
+        {
+            var method = typeof(SessionTools).GetMethod(nameof(SessionTools.LacerteSetContext))!;
+            var dataPathParam = System.Linq.Enumerable.First(
+                method.GetParameters(),
+                p => p.Name == "dataPath");
+            var descAttr = (System.ComponentModel.DescriptionAttribute?)System.Attribute.GetCustomAttribute(
+                dataPathParam, typeof(System.ComponentModel.DescriptionAttribute));
+            Assert.NotNull(descAttr);
+            // Must contain the canonical single-backslash example...
+            Assert.Contains(@"C:\Lacerte\24Tax\IData", descAttr!.Description);
+            // ...and must NOT contain the 4-char doubled-backslash sequence the
+            // LLM would copy verbatim into a call payload.
+            Assert.DoesNotContain(@"C:\\Lacerte", descAttr.Description);
         }
 
         [Fact]
