@@ -30,7 +30,7 @@ namespace LacertMCP.Tests.Session
 
         private static LacerteSessionManager NewSimManager()
         {
-            // Explicit empty env â†’ guaranteed sim mode regardless of host shell.
+            // Explicit empty env → guaranteed sim mode regardless of host shell.
             return new LacerteSessionManager(new Dictionary<string, string?>());
         }
 
@@ -253,7 +253,11 @@ namespace LacertMCP.Tests.Session
             var mgr = NewSimManagerWithContext();
             var row = await mgr.ReadClient("1001"); // BROW seed
             Assert.NotNull(row);
-            Assert.Equal("BROW", row!["ClientID"]);
+            // P17-011 — CloneRow now emits camelCase wire keys for the
+            // SDK-meta aliases (clientId/clientNumber/subClientId/stateAbbrev)
+            // to match the input-parameter casing P16-054/P16-080 enforced.
+            // FoxPro DBF column codes (C1_*) still ship verbatim.
+            Assert.Equal("BROW", row!["clientId"]);
         }
 
         [Fact]
@@ -677,8 +681,15 @@ namespace LacertMCP.Tests.Session
             // collision is post-hoc traceable.
             Assert.NotNull(ex.Context["existingEntryCreatedAt"]);
             Assert.NotNull(ex.Context["existingEntryAgeMs"]);
-            Assert.NotNull(ex.Context["cachedFingerprintPrefix"]);
-            Assert.NotNull(ex.Context["requestedFingerprintPrefix"]);
+            // P17-007 — the HMAC-keyed fingerprint prefixes are gated behind
+            // LACERTE_DEBUG_WIRE=1 so they ship in the wire envelope only
+            // when explicit operator diagnostics are turned on. In the
+            // default ops posture (WireLog disabled) the prefix keys are
+            // intentionally absent from the conflict context.
+            Assert.False(ex.Context.ContainsKey("cachedFingerprintPrefix"),
+                "P17-007: cachedFingerprintPrefix must NOT leak to the wire unless LACERTE_DEBUG_WIRE=1.");
+            Assert.False(ex.Context.ContainsKey("requestedFingerprintPrefix"),
+                "P17-007: requestedFingerprintPrefix must NOT leak to the wire unless LACERTE_DEBUG_WIRE=1.");
         }
 
         // =================================================================

@@ -42,8 +42,8 @@ namespace LacertMCP.Tests.Integration
             var beforeRows = await mgr.ListClients();
             var beforeIds = new HashSet<string>(
                 beforeRows
-                    .Where(r => r.TryGetValue("ClientID", out var v) && v is string)
-                    .Select(r => ((string)r["ClientID"]!).ToUpperInvariant()));
+                    .Where(r => r.TryGetValue("clientId", out var v) && v is string)
+                    .Select(r => ((string)r["clientId"]!).ToUpperInvariant()));
 
             // Parse the CSV in-memory â€” no test fixture file, no I/O.
             using var reader = new StringReader(CsvBody);
@@ -82,7 +82,7 @@ namespace LacertMCP.Tests.Integration
             foreach (var id in intakeIds)
             {
                 Assert.Contains(afterRows, r =>
-                    r.TryGetValue("ClientID", out var v) && v is string s &&
+                    r.TryGetValue("clientId", out var v) && v is string s &&
                     string.Equals(s, id, System.StringComparison.OrdinalIgnoreCase));
             }
 
@@ -101,7 +101,7 @@ namespace LacertMCP.Tests.Integration
             var stillThree = await mgr.ListClients();
             // Count of CSV-prefixed rows must still be 3; a duplicate would push it to 4+.
             var csvCount = stillThree.Count(r =>
-                r.TryGetValue("ClientID", out var v) && v is string s &&
+                r.TryGetValue("clientId", out var v) && v is string s &&
                 s.StartsWith("CSV", System.StringComparison.OrdinalIgnoreCase) &&
                 !beforeIds.Contains(s.ToUpperInvariant()));
             Assert.Equal(3, csvCount);

@@ -28,9 +28,14 @@
     <AssemblyVersion>0.1.0.0</AssemblyVersion>
     <FileVersion>0.1.0.0</FileVersion>
     <!--
-      Include the short git SHA when MSBuild has it (CI fills SourceRevisionId);
-      fall back to the bare version in non-git / sim builds so this never trips
-      a "Substring out of range" exception.
+      P17-009 — Include the short git SHA in InformationalVersion when
+      $(SourceRevisionId) is populated. Populated by:
+        - .github/workflows/ci.yml: `-p:SourceRevisionId=${{ github.sha }}`
+        - scripts/release.ps1: `-p:SourceRevisionId=$(git rev-parse HEAD)`
+      Local `dotnet build` without that arg produces the bare $(Version)
+      fallback — intentional for non-git contexts (sim/tarball/hand-built).
+      The Substring(0,7) guard never trips because the outer Length >= 7
+      condition gates entry to the .Substring expression.
     -->
     <InformationalVersion Condition="'$(SourceRevisionId)' != '' AND $(SourceRevisionId.Length) &gt;= 7">$(Version)+$(SourceRevisionId.Substring(0,7))</InformationalVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>

@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -508,6 +509,215 @@ namespace LacertMCP.Tests.Tools
             Assert.False(hint.GetProperty("canResumeViaSameBatch").GetBoolean());
             Assert.Equal(System.Text.Json.JsonValueKind.Null,
                 hint.GetProperty("idempotencyKeyPrefix").ValueKind);
+        }
+
+        // ---------------------------------------------------------------
+        // P17-008 — batch-size cap + expectedCount cross-check tests.
+        //
+        // The bulk write tool fans out N writes through the live SDK from
+        // a single MCP call. Without a cap a fuzzy LLM-constructed payload
+        // (e.g. "every client in NY" emitted as every client in the firm)
+        // can mutate thousands of rows with no per-row inspection. The
+        // hard cap (DefaultMaxBulkEntries=500, override via
+        // LACERTE_BULK_WRITE_MAX) is enforced at the tool chokepoint
+        // BEFORE any row runs — same posture as the existing 9016
+        // ContextMismatch pre-flight. expectedCount is the symmetric
+        // operator-intent cross-check that catches LLM-vs-prompt drift.
+        // ---------------------------------------------------------------
+
+        // (l) entries.Length > maxAllowed throws 9020 BulkBatchTooLarge
+        //     with {entryCount, maxAllowed, table} context, BEFORE any row
+        //     runs. Use the env var to lower the cap to 3 so the test
+        //     doesn't have to materialize 501 entries.
+        [Fact]
+        public async Task BulkWrite_ExceedsCap_Throws9020WithStructuredContext()
+        {
+            var prior = Environment.GetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName);
+            try
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, "3");
+
+                var (mgr, tool) = NewToolWithContext();
+
+                // 4 entries with cap=3 → reject.
+                var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+                {
+                    new() { ClientNumber = "1001", Field = "C1_15", Value = "a" },
+                    new() { ClientNumber = "1002", Field = "C1_15", Value = "b" },
+                    new() { ClientNumber = "1003", Field = "C1_15", Value = "c" },
+                    new() { ClientNumber = "1004", Field = "C1_15", Value = "d" },
+                };
+
+                var json = await tool.LacerteFieldWriteBulk(
+                    table: 1,
+                    entries: entries);
+
+                var root = Parse(json);
+                Assert.False(root.GetProperty("success").GetBoolean());
+                Assert.Equal(SyntheticStatusCodes.BulkBatchTooLarge,
+                    root.GetProperty("statusCode").GetInt32());
+                Assert.Equal("BulkBatchTooLarge",
+                    root.GetProperty("statusName").GetString());
+
+                // Carried context must surface the entry count, the cap,
+                // and the env-var override name so the LLM can suggest a
+                // structured remediation.
+                var ctx = root.GetProperty("context");
+                Assert.Equal(4, ctx.GetProperty("entryCount").GetInt32());
+                Assert.Equal(3, ctx.GetProperty("maxAllowed").GetInt32());
+                Assert.Equal(1, ctx.GetProperty("table").GetInt32());
+                Assert.Equal(FieldWriteBulkTools.BulkWriteMaxEnvName,
+                    ctx.GetProperty("envOverride").GetString());
+
+                // Remediation must name the splitting strategy and the env
+                // override so the LLM/operator has a path forward.
+                var remediation = root.GetProperty("remediation").GetString();
+                Assert.Contains("Split", remediation);
+                Assert.Contains(FieldWriteBulkTools.BulkWriteMaxEnvName, remediation);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, prior);
+            }
+        }
+
+        // (m) entries.Length == maxAllowed PASSES the cap (the cap is an
+        //     UPPER bound, not a strict inequality). Verifies the boundary
+        //     condition doesn't reject a deliberately-sized batch.
+        [Fact]
+        public async Task BulkWrite_AtCapBoundary_Succeeds()
+        {
+            var prior = Environment.GetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName);
+            try
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, "5");
+
+                using var fixture = new AccessMapTestFixture();
+                var (mgr, tool) = NewToolWithContext();
+
+                var clients = await Seed5IndividualClients(mgr);
+                // Exactly 5 entries with cap=5 → must NOT trip 9020.
+                var entries = clients.Select(cn => new FieldWriteBulkTools.BulkWriteEntry
+                {
+                    ClientNumber = cn,
+                    Field = AccessMapTestFixture.WritableField,
+                    Value = $"boundary-{cn}",
+                }).ToArray();
+
+                var json = await tool.LacerteFieldWriteBulk(
+                    table: AccessMapTestFixture.Table,
+                    entries: entries);
+
+                var root = Parse(json);
+                Assert.True(root.GetProperty("success").GetBoolean());
+                Assert.Equal(5, root.GetProperty("result").GetProperty("successCount").GetInt32());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, prior);
+            }
+        }
+
+        // (n) expectedCount=10 but entries.Length=11 throws 9021
+        //     BulkBatchCountMismatch with {expected, actual, table} context
+        //     BEFORE any row runs. Symmetric with the year/readOnly
+        //     mismatch pre-flights at (f)/(g).
+        [Fact]
+        public async Task BulkWrite_ExpectedCountMismatch_Throws9021WithStructuredContext()
+        {
+            var (mgr, tool) = NewToolWithContext();
+
+            // 2 entries supplied but caller asserted 1 → reject.
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = "1001", Field = "C1_15", Value = "x" },
+                new() { ClientNumber = "1002", Field = "C1_15", Value = "y" },
+            };
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: 1,
+                entries: entries,
+                expectedCount: 1);
+
+            var root = Parse(json);
+            Assert.False(root.GetProperty("success").GetBoolean());
+            Assert.Equal(SyntheticStatusCodes.BulkBatchCountMismatch,
+                root.GetProperty("statusCode").GetInt32());
+            Assert.Equal("BulkBatchCountMismatch",
+                root.GetProperty("statusName").GetString());
+
+            var ctx = root.GetProperty("context");
+            Assert.Equal(1, ctx.GetProperty("expected").GetInt32());
+            Assert.Equal(2, ctx.GetProperty("actual").GetInt32());
+            Assert.Equal(1, ctx.GetProperty("table").GetInt32());
+        }
+
+        // (o) expectedCount==entries.Length PASSES the cross-check (sanity:
+        //     the happy path through the new gate must not reject a
+        //     correctly-asserted batch).
+        [Fact]
+        public async Task BulkWrite_ExpectedCountMatches_PassesPreflight()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var clients = await Seed5IndividualClients(mgr);
+            var entries = clients.Select(cn => new FieldWriteBulkTools.BulkWriteEntry
+            {
+                ClientNumber = cn,
+                Field = AccessMapTestFixture.WritableField,
+                Value = $"match-{cn}",
+            }).ToArray();
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries,
+                expectedCount: 5);
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Equal(5, root.GetProperty("result").GetProperty("successCount").GetInt32());
+        }
+
+        // (p) ResolveMaxBulkEntries env-var parsing — null/empty/non-numeric
+        //     /negative/zero all fall back to the default. Matches the
+        //     project's never-throw-from-env-parse convention.
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("not-a-number")]
+        [InlineData("-1")]
+        [InlineData("0")]
+        public void ResolveMaxBulkEntries_InvalidEnvVar_FallsBackToDefault(string? raw)
+        {
+            var prior = Environment.GetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName);
+            try
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, raw);
+                Assert.Equal(FieldWriteBulkTools.DefaultMaxBulkEntries,
+                    FieldWriteBulkTools.ResolveMaxBulkEntries());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, prior);
+            }
+        }
+
+        // (q) ResolveMaxBulkEntries with a valid positive integer replaces
+        //     the default — the env-var escape hatch the remediation names.
+        [Fact]
+        public void ResolveMaxBulkEntries_ValidEnvVar_ReplacesDefault()
+        {
+            var prior = Environment.GetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName);
+            try
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, "1234");
+                Assert.Equal(1234, FieldWriteBulkTools.ResolveMaxBulkEntries());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, prior);
+            }
         }
     }
 }

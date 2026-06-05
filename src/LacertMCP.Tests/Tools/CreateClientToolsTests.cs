@@ -413,13 +413,15 @@ namespace LacertMCP.Tests.Tools
 
             // Stored row should also be uppercase so downstream case-sensitive
             // lookups don't miss. Verify via ListClients which returns the
-            // raw DBF rows (sim and live both surface ClientID verbatim).
+            // raw DBF rows (P17-011: the ClientID alias is camelCased to
+            // `clientId` on wire response keys to match the input-parameter
+            // casing).
             var cn = result.GetProperty("clientNumber").GetString();
             var rows = await mgr.ListClients(limit: 1000);
             var created = rows.FirstOrDefault(r =>
                 r.TryGetValue("C1_0", out var v) && v is string s && s == cn);
             Assert.NotNull(created);
-            Assert.True(created!.TryGetValue("ClientID", out var idObj));
+            Assert.True(created!.TryGetValue("clientId", out var idObj));
             Assert.Equal("ABC1", idObj as string);
         }
 

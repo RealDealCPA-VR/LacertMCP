@@ -130,14 +130,18 @@ namespace LacertMCP.Tests.Prompts
         {
             // P15-038 part 3 — Step 4 must spell out the canonical CSV column →
             // Lacerte field mapping so the LLM doesn't reinvent it per session.
-            // Confirmed fields (firstName=C1_1 / lastName=C1_2 / emailID=C1_3)
+            // Confirmed fields (firstName=C1_1 / lastName=C1_2 / emailId=C1_3)
             // are spec-sourced; TBD-F5 markers must be present so the LLM
             // doesn't invent codes for fields the schema doesn't yet expose.
+            // P17-005 — assertion was previously `emailID` (ALL-CAPS suffix)
+            // which pinned the broken spelling left over from P16-080's
+            // half-done rename; rebound to canonical camelCase `emailId`
+            // (matches the wire parameter on lacerte_client_create).
             var text = ((TextContentBlock)WorkflowPrompts.ClientIntake().Messages[0].Content).Text;
             Assert.Contains("CSV column", text);
             Assert.Contains("firstName", text);
             Assert.Contains("C1_1", text);
-            Assert.Contains("emailID", text);
+            Assert.Contains("emailId", text);
             Assert.Contains("C1_3", text);
             Assert.Contains("TBD-F5", text);
             Assert.Contains("addressLine1", text);

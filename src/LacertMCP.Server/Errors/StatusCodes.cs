@@ -151,14 +151,14 @@ namespace LacertMCP.Server.Errors
             [DuplicateClient] = new StatusInfo(
                 "DuplicateClient",
                 Severity.Error,
-                "A client with that ClientID already exists for this tax year/module.",
-                "Pick a different ClientID, or call lacerte_client_read to load the existing record."),
+                "A client with that clientId already exists for this tax year/module.",
+                "Pick a different clientId, or call lacerte_client_read to load the existing record."),
 
             [LengthExceeded] = new StatusInfo(
                 "LengthExceeded",
                 Severity.Error,
-                "A field value is longer than Lacerte allows (ClientID > 8 chars is the most common cause).",
-                "Trim the value; ClientIDs must be <= 8 alphanumeric characters with no special chars."),
+                "A field value is longer than Lacerte allows (clientId > 8 chars is the most common cause).",
+                "Trim the value; clientId values must be <= 8 alphanumeric characters with no special chars."),
 
             [TaxModuleMismatch] = new StatusInfo(
                 "TaxModuleMismatch",
@@ -229,8 +229,8 @@ namespace LacertMCP.Server.Errors
             [InValidClientName] = new StatusInfo(
                 "InValidClientName",
                 Severity.Error,
-                "A token failed validation (ClientID character whitelist, single-character module code, or a required name field). Code 24 is reused for three distinct gates — see context.reason and context.field/module for the specific rule that fired.",
-                "Read context.reason in the envelope for the gate-specific rule (it is correct everywhere). Common cases: (a) ClientID must match ^[A-Z0-9]+$ (uppercase letters and digits only, 1-8 chars — no spaces, no hyphen, no apostrophe; for example `OREILLY`, not `O'Reilly` or `O-Reilly`); (b) module must be a single character in I/C/P/S/F/R/T/N/B; (c) firstName/lastName/emailID required and non-whitespace for lacerte_client_create."),
+                "A token failed validation (clientId character whitelist, single-character module code, or a required name field). Code 24 is reused for three distinct gates — see context.reason and context.field/module for the specific rule that fired.",
+                "Read context.reason in the envelope for the gate-specific rule (it is correct everywhere). Common cases: (a) clientId must match ^[A-Z0-9]+$ (uppercase letters and digits only, 1-8 chars — no spaces, no hyphen, no apostrophe; for example `OREILLY`, not `O'Reilly` or `O-Reilly`); (b) module must be a single character in I/C/P/S/F/R/T/N/B; (c) firstName/lastName/emailId required and non-whitespace for lacerte_client_create."),
 
             [InValidTaxYear] = new StatusInfo(
                 "InValidTaxYear",
@@ -247,8 +247,8 @@ namespace LacertMCP.Server.Errors
             [InValidSubClientID] = new StatusInfo(
                 "InValidSubClientID",
                 Severity.Error,
-                "SubClientID must be > 0 for DATA2/DATA4 writes.",
-                "Pass a positive integer SubClientID identifying the dependent/partner/shareholder row."),
+                "subClientId must be > 0 for DATA2/DATA4 writes.",
+                "Pass a positive integer subClientId identifying the dependent/partner/shareholder row."),
 
             [InValidStateAbbrev] = new StatusInfo(
                 "InValidStateAbbrev",

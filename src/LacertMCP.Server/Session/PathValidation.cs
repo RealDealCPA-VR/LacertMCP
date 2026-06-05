@@ -151,6 +151,19 @@ namespace LacertMCP.Server.Session
                     {
                         throw Reject(dataPath, "dataPath is outside LACERTE_DATA_ROOT (" + rootCanonical + ").");
                     }
+
+                    // P17-016 — same reparse-point bypass applies to
+                    // LACERTE_DATA_ROOT: an attacker who can create a junction
+                    // inside the operator's data root could redirect ODBC and
+                    // bridge reads/writes to a sensitive directory. Lower
+                    // exposure than the log-dir vector (LACERTE_DATA_ROOT is
+                    // operator-set and dataPath comes through lacerte_set_context
+                    // which the operator drives) but the structural gap is
+                    // identical; close it for symmetry.
+                    if (ContainsReparsePointSegment(canonical, rootWithSep))
+                    {
+                        throw Reject(dataPath, "dataPath traverses an NTFS reparse point (junction/symlink) — rejected to prevent allowlist bypass.");
+                    }
                 }
             }
 
@@ -166,6 +179,26 @@ namespace LacertMCP.Server.Session
         /// fall back to a default rather than throw, because WireLog policy
         /// (see <c>Logging/WireLog.cs</c>) is "debug logging must never break
         /// the operator path."
+        ///
+        /// <para>
+        /// P17-010 — fail-CLOSED when zero allowlist roots are discovered
+        /// (typical on POSIX dev boxes where USERPROFILE/TEMP/TMP are not
+        /// conventional). The prior behavior of permitting any canonical path
+        /// in that case silently disabled the gate off-Windows, breaking the
+        /// 'sim and live observationally identical' boundary invariant.
+        /// </para>
+        ///
+        /// <para>
+        /// P17-016 — also walk the path segments from the allowlist root down
+        /// to the leaf and reject if any extant directory in the chain is an
+        /// NTFS reparse point (junction / symlink). <see cref="Path.GetFullPath"/>
+        /// only collapses '..' and normalizes separators — it does NOT follow
+        /// reparse points, so an attacker with write access to %TEMP% (no admin
+        /// needed for `mklink /J`) could create a junction inside the
+        /// allowlist root that redirects the wire log into a sensitive
+        /// directory carrying disk-scope PII. Non-existent segments are
+        /// treated as clean (junctions can only exist on extant directories).
+        /// </para>
         /// </summary>
         public static string? ValidateLogDir(string? logDir, IDictionary<string, string?>? env = null)
         {
@@ -218,19 +251,46 @@ namespace LacertMCP.Server.Session
 
             if (roots.Count == 0)
             {
-                // No allowlist roots available (e.g. test env) → permit
-                // canonical path as-is. Operator-controlled env on real boxes
-                // always populates USERPROFILE + TEMP, so this branch is just
-                // a no-op for tests.
-                return canonical;
+                // P17-010 — fail-CLOSED. No allowlist roots discovered means
+                // we cannot enforce the gate, so we MUST reject rather than
+                // permit. Forcing WireLog.ResolveConfig to fall back to the
+                // CWD-relative ./logs default is always safe and matches
+                // WireLog's never-throw-just-fall-back policy. Operators who
+                // need a custom log path must populate USERPROFILE,
+                // LACERTE_DATA_ROOT, or TEMP/TMP explicitly so the allowlist
+                // has something to enforce against. (The prior behavior of
+                // returning the canonical path silently disabled the gate on
+                // POSIX dev boxes where the Windows-conventional env vars are
+                // typically unset, breaking the sim/live boundary invariant
+                // from CLAUDE.md.)
+                return null;
             }
 
             var pathWithSep = EnsureTrailingSeparator(canonical);
-            if (roots.Any(r => pathWithSep.StartsWith(r, StringComparison.OrdinalIgnoreCase)))
+            string? matchedRoot = null;
+            foreach (var r in roots)
             {
-                return canonical;
+                if (pathWithSep.StartsWith(r, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchedRoot = r;
+                    break;
+                }
             }
-            return null;
+            if (matchedRoot == null) return null;
+
+            // P17-016 — walk extant segments from the matched root down to the
+            // leaf. Reject if any segment in the chain (including the leaf
+            // itself, if it exists) is an NTFS reparse point — junctions and
+            // symlinks both carry FileAttributes.ReparsePoint. Non-existent
+            // tail segments are treated as clean: directories that don't yet
+            // exist can't be reparse points, and lazy-create-on-first-write is
+            // a legitimate pattern WireLog relies on.
+            if (ContainsReparsePointSegment(canonical, matchedRoot))
+            {
+                return null;
+            }
+
+            return canonical;
         }
 
         // -----------------------------------------------------------------
@@ -243,6 +303,77 @@ namespace LacertMCP.Server.Session
             var c = path[path.Length - 1];
             if (c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar) return path;
             return path + Path.DirectorySeparatorChar;
+        }
+
+        /// <summary>
+        /// P17-016 — walk extant directory segments from <paramref name="rootWithSep"/>
+        /// down to <paramref name="canonical"/> and return <c>true</c> if any
+        /// existing directory in the chain carries
+        /// <see cref="FileAttributes.ReparsePoint"/> (NTFS junctions and
+        /// symbolic links both set this attribute). Non-existent tail
+        /// segments are treated as clean — directories that don't yet exist
+        /// can't be reparse points and the lazy-create-on-first-write pattern
+        /// must keep working. On any unexpected IO failure during the walk
+        /// (permission denied, etc.) we conservatively treat as reparse
+        /// (return <c>true</c>) since we can't prove the segment is safe.
+        /// </summary>
+        private static bool ContainsReparsePointSegment(string canonical, string rootWithSep)
+        {
+            try
+            {
+                // Strip the root prefix so we only walk segments below it.
+                // canonical may or may not have a trailing separator — we
+                // build pathWithSep against rootWithSep using OrdinalIgnoreCase
+                // semantics consistent with the StartsWith allowlist check.
+                var canonicalWithSep = EnsureTrailingSeparator(canonical);
+                if (canonicalWithSep.Length < rootWithSep.Length) return false;
+
+                // Walk from the root downward. We check the root itself plus
+                // every descendant directory up to the leaf. A reparse-point
+                // anywhere in the chain redirects further traversal, so any
+                // hit poisons the whole path.
+                var current = rootWithSep.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (DirectoryIsReparsePoint(current)) return true;
+
+                // Iterate the path components below the root.
+                var remainder = canonicalWithSep.Substring(rootWithSep.Length);
+                if (string.IsNullOrEmpty(remainder)) return false;
+
+                var segments = remainder.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                    StringSplitOptions.RemoveEmptyEntries);
+                foreach (var seg in segments)
+                {
+                    current = current + Path.DirectorySeparatorChar + seg;
+                    if (!Directory.Exists(current))
+                    {
+                        // Tail not yet provisioned — safe to lazy-create later.
+                        return false;
+                    }
+                    if (DirectoryIsReparsePoint(current)) return true;
+                }
+                return false;
+            }
+            catch
+            {
+                // Unexpected IO failure — fail-CLOSED.
+                return true;
+            }
+        }
+
+        private static bool DirectoryIsReparsePoint(string path)
+        {
+            try
+            {
+                var info = new DirectoryInfo(path);
+                if (!info.Exists) return false;
+                return (info.Attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
+            }
+            catch
+            {
+                // Can't determine attributes (permission denied / race) →
+                // fail-CLOSED so the caller treats it as a reparse hit.
+                return true;
+            }
         }
 
         private static string? ReadEnv(IDictionary<string, string?>? env, string name)

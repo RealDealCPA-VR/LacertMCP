@@ -65,8 +65,9 @@ namespace LacertMCP.Tests.Integration
             var clientNumber = (string)first["ClientId"]!;
             var clientRow = await mgr.ReadClient(clientNumber);
             Assert.NotNull(clientRow);
-            Assert.True(clientRow!.ContainsKey("ClientNumber"));
-            Assert.Equal(clientNumber, (string)clientRow["ClientNumber"]!);
+            // P17-011 — wire key is camelCase clientNumber.
+            Assert.True(clientRow!.ContainsKey("clientNumber"));
+            Assert.Equal(clientNumber, (string)clientRow["clientNumber"]!);
         }
     }
 }

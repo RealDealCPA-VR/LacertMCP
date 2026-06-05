@@ -30,8 +30,10 @@ namespace LacertMCP.Tests.Tools
             var result = root.GetProperty("result");
             Assert.True(result.GetProperty("count").GetInt32() >= 2);
 
+            // P17-011 — wire key is camelCase `clientId` (P16-054/P16-080
+            // canonical casing applied to read-tool response keys).
             var clients = result.GetProperty("clients").EnumerateArray()
-                .Select(c => c.GetProperty("ClientID").GetString())
+                .Select(c => c.GetProperty("clientId").GetString())
                 .ToArray();
             Assert.Contains("BROW", clients);
             Assert.Contains("PEND", clients);
@@ -72,7 +74,8 @@ namespace LacertMCP.Tests.Tools
             Assert.True(root.GetProperty("success").GetBoolean());
             var result = root.GetProperty("result");
             Assert.True(result.GetProperty("found").GetBoolean());
-            Assert.Equal("BROW", result.GetProperty("client").GetProperty("ClientID").GetString());
+            // P17-011 — wire key is camelCase clientId.
+            Assert.Equal("BROW", result.GetProperty("client").GetProperty("clientId").GetString());
         }
 
         [Fact]

@@ -127,7 +127,7 @@ namespace LacertMCP.Tests.Bridge
                 Amount: 100.0,
                 Description: "test");
             var ex = Assert.Throws<LacerteSDKError>(() =>
-                client.WriteDetail("appid", @"C:\Lacerte\24data", 2024, 'I', "JOHNS", row));
+                client.WriteDetail("appid", @"C:\Lacerte\24data", 2024, 'I', "JOHNS", row, replaceIndex: null));
             Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
         }
 

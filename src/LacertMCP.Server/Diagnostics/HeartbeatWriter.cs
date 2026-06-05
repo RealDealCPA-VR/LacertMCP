@@ -17,13 +17,33 @@ namespace LacertMCP.Server.Diagnostics
     /// <para>
     /// Background hosted service that periodically writes a single-line JSON
     /// document to <see cref="HeartbeatPath"/> (default
-    /// <c>%TEMP%/lacerte-mcp-heartbeat.json</c>). A supervisor — Task Scheduler,
-    /// NSSM, an operator's PowerShell one-liner — can <c>Get-Item</c> the file
-    /// for an mtime staleness probe and <c>ConvertFrom-Json</c> the contents
-    /// for a peek at <c>{pid, registered, mode, ts}</c> without writing a full
-    /// MCP client. Closes the "the operator runs the MCP unattended and never
-    /// notices the 24h Intuit auth quietly expired 6 hours ago" failure mode
-    /// the audit flagged.
+    /// <c>%TEMP%/lacerte-mcp-heartbeat-{pid}.json</c>). A supervisor — Task
+    /// Scheduler, NSSM, an operator's PowerShell one-liner — can
+    /// <c>Get-Item</c> the file for an mtime staleness probe and
+    /// <c>ConvertFrom-Json</c> the contents for a peek at
+    /// <c>{pid, mode, registered, expiresAt, minutesUntilExpiry, buildVersion,
+    /// ts}</c> without writing a full MCP client. Closes the "the operator
+    /// runs the MCP unattended and never notices the 24h Intuit auth quietly
+    /// expired 6 hours ago" failure mode the audit flagged.
+    /// </para>
+    ///
+    /// <para>
+    /// P17-003 — Payload projects from <see cref="LacerteSessionManager.SessionStatus"/>
+    /// so the README-advertised auth-countdown + build-version fields are
+    /// actually populated, and <c>registered</c> is computed as
+    /// <c>IsRegistered &amp;&amp; ExpiresAt &gt; UtcNow</c> so the heartbeat
+    /// truthfully flips to <c>false</c> the moment the ticket expires —
+    /// independent of whether a tool call has fired since the lapse. Watchers
+    /// reading only the file no longer see a stale green light across an idle
+    /// overnight window.
+    /// </para>
+    ///
+    /// <para>
+    /// P17-014 — File name is PID-suffixed so a single operator running
+    /// Claude Desktop + Cursor (or any other dual-host MCP setup) gets one
+    /// heartbeat file per server instance rather than two processes silently
+    /// clobbering the same file every 30s and collapsing the liveness contract.
+    /// External watchers enumerate <c>lacerte-mcp-heartbeat-*.json</c>.
     /// </para>
     ///
     /// <para>
@@ -45,8 +65,28 @@ namespace LacertMCP.Server.Diagnostics
         /// <summary>Default cadence when the env var is unset / unparseable.</summary>
         public const int DefaultIntervalSeconds = 30;
 
-        /// <summary>Canonical file name written under <see cref="Path.GetTempPath"/>.</summary>
-        public const string HeartbeatFileName = "lacerte-mcp-heartbeat.json";
+        /// <summary>
+        /// P17-014 — Glob pattern external watchers enumerate to find every
+        /// live MCP instance's heartbeat file (one per PID under
+        /// <see cref="Path.GetTempPath"/>). Backed by
+        /// <see cref="BuildHeartbeatFileName"/> which is PID-suffixed so two
+        /// concurrent MCP hosts on the same box do not clobber each other.
+        /// </summary>
+        public const string HeartbeatFileGlob = "lacerte-mcp-heartbeat-*.json";
+
+        /// <summary>
+        /// P17-014 — Canonical file name (PID-suffixed) for THIS process,
+        /// written under <see cref="Path.GetTempPath"/>. Computed once per
+        /// call site; format is <c>lacerte-mcp-heartbeat-{pid}.json</c>.
+        /// </summary>
+        public static string HeartbeatFileName => BuildHeartbeatFileName(SafePid());
+
+        /// <summary>
+        /// Compose the PID-suffixed heartbeat file name. Exposed for tests that
+        /// pin the format without round-tripping through Process.GetCurrentProcess.
+        /// </summary>
+        internal static string BuildHeartbeatFileName(int pid) =>
+            "lacerte-mcp-heartbeat-" + pid.ToString(CultureInfo.InvariantCulture) + ".json";
 
         private readonly LacerteSessionManager _session;
         private readonly ILogger<HeartbeatWriter>? _logger;
@@ -78,7 +118,13 @@ namespace LacertMCP.Server.Diagnostics
         /// <summary>Effective cadence in seconds.</summary>
         public int IntervalSecondsValue => (int)_interval.TotalSeconds;
 
-        /// <summary>Resolve the default heartbeat path under <see cref="Path.GetTempPath"/>.</summary>
+        /// <summary>
+        /// Resolve the default heartbeat path under <see cref="Path.GetTempPath"/>.
+        /// File name is PID-suffixed per P17-014 so concurrent MCP server
+        /// instances do not clobber each other. External watchers should
+        /// enumerate <see cref="HeartbeatFileGlob"/> rather than expecting a
+        /// single canonical file.
+        /// </summary>
         public static string DefaultPath() => Path.Combine(Path.GetTempPath(), HeartbeatFileName);
 
         /// <summary>
@@ -148,16 +194,40 @@ namespace LacertMCP.Server.Diagnostics
 
         private string BuildPayload()
         {
-            // Keep the schema small and stable — external watchers may script
-            // against these field names. {pid, registered, mode, ts} is the
-            // task-level contract; we add nothing beyond it here so the
-            // payload is trivially round-trippable for parity tests.
+            // P17-003 — Project from SessionStatus() so the README-advertised
+            // {pid, mode, registered, expiresAt, minutesUntilExpiry,
+            // buildVersion, ts} schema is actually populated. Crucially,
+            // `registered` is computed as IsRegistered && ExpiresAt > UtcNow
+            // (not the raw IsRegistered latch) so an idle server whose 24h
+            // Intuit ticket lapsed at 02:00 flips to registered:false the
+            // moment it lapses — without waiting for the next tool call's
+            // ThrowIfAuthExpired probe. The whole point of P15-054 was to
+            // surface silent auth-expiry to an external watcher; the bare
+            // latch lied across overnight idle windows.
+            //
+            // SessionStatus() is documented as pure in-memory and never
+            // throws (edition probe failure is swallowed at line 445-451)
+            // so calling it from the heartbeat loop is safe. We still guard
+            // for the unexpected — TryWrite's catch swallows any rethrow.
+            var snapshot = _session.SessionStatus();
+            var now = DateTimeOffset.UtcNow;
+            var registeredAndFresh = snapshot.IsRegistered
+                && snapshot.ExpiresAt.HasValue
+                && snapshot.ExpiresAt.Value > now;
+
             var doc = new
             {
                 pid = SafePid(),
-                registered = _session.IsRegistered,
-                mode = _session.Mode.ToString().ToLowerInvariant(),
-                ts = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                mode = snapshot.Mode.ToString().ToLowerInvariant(),
+                registered = registeredAndFresh,
+                // ISO-8601 round-trippable; null when never registered.
+                expiresAt = snapshot.ExpiresAt.HasValue
+                    ? snapshot.ExpiresAt.Value.ToString("o", CultureInfo.InvariantCulture)
+                    : null,
+                // Already clamped >= 0 by SessionStatus at LacerteSessionManager.cs:432.
+                minutesUntilExpiry = snapshot.MinutesUntilExpiry,
+                buildVersion = snapshot.BuildVersion,
+                ts = now.ToString("o", CultureInfo.InvariantCulture),
             };
             return JsonSerializer.Serialize(doc);
         }

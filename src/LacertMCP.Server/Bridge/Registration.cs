@@ -113,6 +113,18 @@ namespace LacertMCP.Server.Bridge
         /// minimum surface here to avoid a Server → Cli project reference
         /// (Cli already references Server, and reversing that would create a
         /// dependency cycle).
+        ///
+        /// <para>
+        /// P17-017: behavior MUST stay observationally identical to
+        /// <c>AppIdStore.Get()</c> on the file-backed branch (the only branch
+        /// exercisable off-Windows). Same env resolution
+        /// (<c>LACERTE_MCP_FORCE_FILE_STORE=1</c> → file; else Windows → CredMan,
+        /// non-Windows → file), same APPDATA fallback chain, same JSON shape
+        /// (<c>{"AppId":"&lt;guid&gt;"}</c>), same unparseable-input → null
+        /// collapse. Parity is pinned by
+        /// <c>LacertMCP.Tests.Bridge.RegistrationTests.GetStoredAppId_FileBackend_*_P17_017</c>
+        /// — touch this method and run those tests.
+        /// </para>
         /// </summary>
         public static Guid? GetStoredAppId()
         {

@@ -32,8 +32,28 @@ param(
 $staging = if ($OutputDir) { $OutputDir } else { Join-Path $script:RepoRoot 'dist' }
 
 # ---- 1. Build Release ---------------------------------------------------
+# P17-009 — Resolve the current commit SHA (when this script runs inside a git
+# checkout) and pass it to MSBuild as $(SourceRevisionId). Directory.Build.props
+# uses that to stamp `0.1.0+<short-sha>` into AssemblyInformationalVersion so
+# `lacerte-mcp status` / `lacerte_session_status` / heartbeat carry a
+# commit-level anchor for bug reports. Non-git contexts (tarball/hand-unzip
+# build) fall back to the bare $(Version) — that path stays working.
+$gitSha = ''
+try {
+    $gitSha = (& git rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $gitSha = '' }
+    if ($null -ne $gitSha) { $gitSha = $gitSha.Trim() }
+} catch {
+    $gitSha = ''
+}
+
 Write-Host "==> Building Release x64..." -ForegroundColor Cyan
-& $script:Dotnet build $script:Solution -c Release -p:Platform=x64 -nologo
+$buildArgs = @('build', $script:Solution, '-c', 'Release', '-p:Platform=x64', '-nologo')
+if ($gitSha) {
+    $buildArgs += "-p:SourceRevisionId=$gitSha"
+    Write-Host "    (stamping SourceRevisionId=$gitSha)" -ForegroundColor DarkGray
+}
+& $script:Dotnet @buildArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
     exit $LASTEXITCODE

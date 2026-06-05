@@ -107,6 +107,43 @@ namespace LacertMCP.Server.Errors
         // than reaching for whatever code is handy.
         public const int InvalidArgument = 9017;
 
+        // 9019 — lacerte_detail_write replaceIndex is supplied in LIVE mode.
+        // P17-001: the live SDK's WriteToDetailFile COM method only appends
+        // (spec §2); there is no documented update-by-index path. Prior
+        // behavior silently dropped replaceIndex on the floor (two
+        // `_ = replaceIndex;` discards in LacerteSessionManager.WriteDetail's
+        // live branch), so an operator-requested row REPLACE became a live
+        // APPEND while the tool returned statusCode=Success — the worst
+        // possible two-mode-discipline violation: data divergence with a
+        // green light. Fail-CLOSED at the session chokepoint before the
+        // wire call so sim (which honors replaceIndex via
+        // ApplySimDetailWriteWithUndo) and live throw the same structured
+        // error rather than diverging silently. Remediation: read the
+        // existing rows via lacerte_detail_read, append the corrected row,
+        // and delete the stale row via the (future) lacerte_detail_delete
+        // tool. Context carries {op, clientNumber, replaceIndex}.
+        public const int LiveReplaceIndexUnsupported = 9019;
+
+        // 9020 — lacerte_field_write_bulk entries.Length exceeds the per-call
+        // cap (default 500, override via LACERTE_BULK_WRITE_MAX). The bulk
+        // write tool fans out N writes through the live SDK from a single MCP
+        // call; without an upper bound a fuzzy LLM-constructed payload can
+        // mutate thousands of rows with no per-row inspection. The project's
+        // own pagination layer (Pagination.MaxLimit=1000) bounds every read
+        // tool — writes have strictly higher blast radius and deserve at
+        // least the same ceiling. P17-008. Context carries {entryCount,
+        // maxAllowed, table}.
+        public const int BulkBatchTooLarge = 9020;
+
+        // 9021 — lacerte_field_write_bulk caller-supplied expectedCount does
+        // NOT equal entries.Length. Symmetric with 9016 ContextMismatch (a
+        // pre-flight cross-check that catches LLM-vs-operator intent drift
+        // before any row runs). The operator's prompt says "write to exactly
+        // 47 NY clients" — passing expectedCount=47 lets the system enforce
+        // the count instead of the operator scanning a 200-row perItem
+        // afterwards. P17-008. Context carries {expected, actual, table}.
+        public const int BulkBatchCountMismatch = 9021;
+
         // ---- 9100–9199: auth lifecycle ----
         // 9101 reserved for the architecture-doc cross-reference (re-auth surfacing path).
         // 9102 idempotency-conflict per session manager design in Todo.md task #31.
@@ -153,7 +190,7 @@ namespace LacertMCP.Server.Errors
             [ClientIDTooLong] = new StatusInfo(
                 "ClientIDTooLong",
                 Severity.Error,
-                "ClientID exceeds 8 characters, or contains a disallowed character.",
+                "clientId exceeds 8 characters, or contains a disallowed character.",
                 "Trim to <= 8 alphanumeric chars; no special chars."),
 
             [TaxYearTooOld] = new StatusInfo(
@@ -171,8 +208,8 @@ namespace LacertMCP.Server.Errors
             [SubClientIDRequired] = new StatusInfo(
                 "SubClientIDRequired",
                 Severity.Error,
-                "DATA2 or DATA4 write attempted without subClientID.",
-                "Pass a positive integer subClientID."),
+                "DATA2 or DATA4 write attempted without subClientId.",
+                "Pass a positive integer subClientId."),
 
             [AppNotRegistered] = new StatusInfo(
                 "AppNotRegistered",
@@ -233,6 +270,24 @@ namespace LacertMCP.Server.Errors
                 Severity.Error,
                 "A tool argument failed validation. See context.reason for the specific failure.",
                 "Re-call the tool with the argument value corrected per the reason field; do NOT change unrelated state (context, registration, etc.). This is a caller-input bug — not a Lacerte / data-path / context problem."),
+
+            [LiveReplaceIndexUnsupported] = new StatusInfo(
+                "LiveReplaceIndexUnsupported",
+                Severity.Error,
+                "lacerte_detail_write received a replaceIndex while running in LIVE mode. The Lacerte SDK's WriteToDetailFile COM method only appends (spec §2); there is no documented update-by-index path. Sim mode honors replaceIndex for parity testing; the live path fails closed rather than silently appending and reporting Success.",
+                "To correct a detail row in live mode: (1) call lacerte_detail_read to enumerate existing rows; (2) call lacerte_detail_write WITHOUT replaceIndex to append the corrected row; (3) delete the stale row via lacerte_detail_delete (forthcoming). Until that delete tool ships, surface the divergence to the operator rather than mutating live tax-return data with a stale row left in place."),
+
+            [BulkBatchTooLarge] = new StatusInfo(
+                "BulkBatchTooLarge",
+                Severity.Error,
+                "lacerte_field_write_bulk received more entries than the per-call cap allows. See context.entryCount and context.maxAllowed for the specific numbers.",
+                "Split the batch into chunks of <= maxAllowed entries and submit sequentially with a shared idempotencyKey prefix — succeeded rows replay from cache on resubmit, so chunked submission stays safe under retry. Override the cap (default 500) via the LACERTE_BULK_WRITE_MAX environment variable if your operator workflow genuinely needs larger batches; do NOT loop the call client-side without an idempotencyKey."),
+
+            [BulkBatchCountMismatch] = new StatusInfo(
+                "BulkBatchCountMismatch",
+                Severity.Error,
+                "lacerte_field_write_bulk caller-supplied expectedCount does not match entries.Length. The expectedCount cross-check exists to catch LLM-vs-operator intent drift BEFORE any row runs.",
+                "Inspect context.expected and context.actual to see which side drifted. If the operator's intended target count is correct, fix the entries[] payload to match; if the entries[] payload is correct, drop or update the expectedCount assertion. Do NOT just re-call with expectedCount = entries.Length — that defeats the cross-check."),
 
             [ReAuthRequired] = new StatusInfo(
                 "ReAuthRequired",

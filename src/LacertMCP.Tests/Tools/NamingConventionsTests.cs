@@ -1,11 +1,16 @@
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
+using LacertMCP.Server.Prompts;
 using LacertMCP.Server.Session;
 using LacertMCP.Server.Session.Fixtures;
 using LacertMCP.Server.Tools;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Xunit;
 
@@ -56,6 +61,82 @@ namespace LacertMCP.Tests.Tools
                 offenders.Count == 0,
                 "Tool parameters must use camelCase `Id` (clientId/emailId/subClientId), not ALL-CAPS `ID`. Offenders: "
                 + string.Join(", ", offenders));
+        }
+
+        // -----------------------------------------------------------------
+        // P17-005 — workflow PROMPT BODIES (the multi-line text the LLM
+        // reads and mirrors when calling a tool) must spell parameter names
+        // with the canonical camelCase `Id` suffix (clientId/emailId/
+        // subClientId), never ALL-CAPS `ID`. The parameter-side sentinel
+        // above (P16-054/P16-080) only reflects over [McpServerTool] method
+        // parameters; it cannot see prompt prose. P16-080's rename left
+        // WorkflowPrompts.cs spelling `clientID`/`emailID` in 9 tool-call
+        // templates — the LLM followed the prompt verbatim and the MCP
+        // SDK's case-sensitive binding dropped the unmatched required
+        // fields. This sentinel walks every [McpServerPrompt]-decorated
+        // method, renders the prompt body, and regex-asserts the body has
+        // no `\b(client|email|subClient)ID\b` matches.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void PromptBodies_NoAllCapsIdSuffix_P17_005()
+        {
+            var asm = typeof(WorkflowPrompts).Assembly;
+            var promptMethods = asm.GetTypes()
+                .Where(t => t.GetCustomAttribute<McpServerPromptTypeAttribute>() != null)
+                .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+                .Where(m => m.GetCustomAttribute<McpServerPromptAttribute>() != null)
+                .ToList();
+
+            Assert.NotEmpty(promptMethods);
+
+            // Word-boundary regex so prose mentions of (e.g.) SDK headers
+            // like `IClient(ClientID, EmailID, ...)` survive — only the
+            // banned mixed-camel spellings clientID / emailID / subClientID
+            // (the actual wire-parameter aliases the LLM would mirror) fail.
+            var banned = new Regex(@"\b(client|email|subClient)ID\b", RegexOptions.Compiled);
+
+            var offenders = new List<string>();
+            foreach (var m in promptMethods)
+            {
+                // Each prompt method takes optional/nullable parameters with
+                // sensible defaults — invoke with all-default args so the
+                // body renders fully. Map each parameter to its default
+                // value or null for reference types.
+                var args = m.GetParameters()
+                    .Select(p =>
+                    {
+                        if (p.HasDefaultValue) return p.DefaultValue;
+                        if (!p.ParameterType.IsValueType) return null;
+                        return Activator.CreateInstance(p.ParameterType);
+                    })
+                    .ToArray();
+
+                var result = (GetPromptResult?)m.Invoke(null, args);
+                Assert.NotNull(result);
+                Assert.NotEmpty(result!.Messages);
+
+                foreach (var msg in result.Messages)
+                {
+                    if (msg.Content is TextContentBlock tcb)
+                    {
+                        var hits = banned.Matches(tcb.Text);
+                        if (hits.Count > 0)
+                        {
+                            offenders.Add(
+                                $"{m.DeclaringType?.Name}.{m.Name}: " +
+                                string.Join(",", hits.Cast<Match>().Select(h => h.Value).Distinct()));
+                        }
+                    }
+                }
+            }
+
+            Assert.True(
+                offenders.Count == 0,
+                "Workflow prompt bodies must use camelCase `Id` (clientId/emailId/subClientId), not ALL-CAPS `ID`. "
+                + "These prompts are read by the LLM, which mirrors the spelling when calling tools — ALL-CAPS spellings "
+                + "trigger MCP-SDK case-sensitive parameter-binding failures. Offenders: "
+                + string.Join(" | ", offenders));
         }
 
         // -----------------------------------------------------------------

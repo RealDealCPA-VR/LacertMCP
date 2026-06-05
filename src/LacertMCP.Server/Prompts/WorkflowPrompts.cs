@@ -57,10 +57,10 @@ Step 2 — Confirm or set the active context
   • Call `lacerte_set_context` with the picked triple. Leave `readOnly` false (we will write).
 
 Step 3 — Create the client record
-  • Validate the operator's chosen `clientID`: <= 8 alphanumeric characters, no special chars.
+  • Validate the operator's chosen `clientId`: <= 8 alphanumeric characters, no special chars.
   • Pick a `taxType` that matches the module (e.g. ""1040"" for I, ""1120"" for C, ""1065"" for P).
-  • Call `lacerte_client_create` with `{{ clientID, taxType, firstName, lastName, emailID }}`.
-  • If status is `DuplicateClient`, ask the operator for a different clientID and retry.
+  • Call `lacerte_client_create` with `{{ clientId, taxType, firstName, lastName, emailId }}`.
+  • If status is `DuplicateClient`, ask the operator for a different clientId and retry.
   • Note the returned `clientNumber` — every subsequent write needs it.
 
 Step 4 — Seed core address / phone fields (if collected during intake)
@@ -78,7 +78,7 @@ Step 4 — Seed core address / phone fields (if collected during intake)
     | -------------------- | ------------- | -------------------- |
     | firstName            | C1_1          | yes (spec §4)        |
     | lastName             | C1_2          | yes (spec §4)        |
-    | emailID / email      | C1_3          | yes (spec §4)        |
+    | emailId / email      | C1_3          | yes (spec §4)        |
     | addressLine1         | TBD-F5        | no — gated on F5     |
     | addressLine2         | TBD-F5        | no — gated on F5     |
     | city                 | TBD-F5        | no — gated on F5     |
@@ -94,7 +94,7 @@ Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at
   • A W-2 row looks like:
       `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", source: ""W2"", tsj: ""T"" }})`
     Series cheat-sheet: 11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners. `tsj` is one of T/S/J/"""" (taxpayer/spouse/joint/unspecified). `stateAbbrev` is """" or a 2-letter postal code (validated ^[A-Z]{{2}}$).
-  • For idempotent retries pass `idempotencyKey: ""intake-<clientID>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true`.
+  • For idempotent retries pass `idempotencyKey: ""intake-<clientId>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true`.
   • The SDK does NOT validate detail-row shape; this tool's client-side validation is the only safeguard. Read the error message verbatim — series/code/stateAbbrev/tsj each surface a per-field `reason` in the error context if rejected.
 
 Step 6 — Verify the new client appears in the roster
@@ -274,20 +274,20 @@ Step 1 — Confirm session + context
 
 Step 2 — Declare the column → field mapping ONCE
   • Ask the operator (or read the CSV header row) for the column names present in `{label}`.
-  • Build a mapping dictionary `{{ csvColumn: lacerteField }}` per the canonical table in the `lacerte_client_intake` prompt's Step 4 (firstName=C1_1, lastName=C1_2, emailID=C1_3 are confirmed; address/phone/DOB/SSN are TBD pending Todo.md F5).
+  • Build a mapping dictionary `{{ csvColumn: lacerteField }}` per the canonical table in the `lacerte_client_intake` prompt's Step 4 (firstName=C1_1, lastName=C1_2, emailId=C1_3 are confirmed; address/phone/DOB/SSN are TBD pending Todo.md F5).
   • For each TBD field the operator wants to seed, call `lacerte_field_access_map` to confirm the field exists and is `ReadWrite` on the active module. If `Unknown` / `ReadOnly` / `Hidden`, STOP and tell the operator that field cannot be bulk-seeded yet.
 
 Step 3 — Validate the row payloads BEFORE any write
-  • For each CSV row, build `{{ clientID, taxType, firstName, lastName, emailID }}` plus a `seedFields` dict from the column mapping.
+  • For each CSV row, build `{{ clientId, taxType, firstName, lastName, emailId }}` plus a `seedFields` dict from the column mapping.
   • Reject any row missing the 5 required fields up front; report which row + which field is missing in your operator summary BEFORE any side-effect.
   • If row count > 50, ask the operator for explicit confirmation before proceeding.
 
 Step 4 — Per-row create (stop-on-first-error by default)
-  • For each row, generate `idempotencyKey = \""csv-intake-<batchId>-<clientID>\""` so a retry of the same row replays the cached result instead of double-creating.
+  • For each row, generate `idempotencyKey = \""csv-intake-<batchId>-<clientId>\""` so a retry of the same row replays the cached result instead of double-creating.
   • Call `lacerte_client_create` with the row's 5 required fields. If `lacerte_client_create` supports a `seedFields` param (P15-038 part 1), pass the seed dict in the SAME call so create + seed share one idempotency unit. Otherwise:
       - call `lacerte_client_create` first;
       - capture the returned `clientNumber`;
-      - then loop the seedFields dict, calling `lacerte_field_write` for each `{{ table: 1, clientNumber, field, value, idempotencyKey: \""csv-intake-<batchId>-<clientID>-<field>\"" }}`.
+      - then loop the seedFields dict, calling `lacerte_field_write` for each `{{ table: 1, clientNumber, field, value, idempotencyKey: \""csv-intake-<batchId>-<clientId>-<field>\"" }}`.
   • On `DuplicateClient` (status 18) STOP unless the operator explicitly said \""skip duplicates\""; on any other non-Success statusCode, STOP and surface the structured `userMessage` + `remediation`.
 
 Step 5 — Verify a 3-row sample
@@ -295,7 +295,7 @@ Step 5 — Verify a 3-row sample
   • Call `lacerte_client_read` on each and confirm at least one seed field matches the CSV value the operator gave you.
 
 Step 6 — Report
-  • Render a short table: `csvRow | clientID | clientNumber | status | seedFieldsWritten | error?`
+  • Render a short table: `csvRow | clientId | clientNumber | status | seedFieldsWritten | error?`
   • Totals at the bottom: requested / created / duplicateSkipped / failed / verifiedSample.
 
 Surface every tool error verbatim — do not summarize away a 9xxx status code. If you stopped mid-batch, name the exact row index so the operator can fix + resume.";

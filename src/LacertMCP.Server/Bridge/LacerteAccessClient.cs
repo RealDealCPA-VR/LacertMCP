@@ -187,11 +187,30 @@ namespace LacertMCP.Server.Bridge
 
         public int WriteDetail(
             string appId, string dataPath, int year, char module,
-            string clientNumber, DetailRow row)
+            string clientNumber, DetailRow row, int? replaceIndex)
         {
             EnsureLive();
             // Live verification deferred to Windows + Lacerte box.
             _ = year; _ = module;
+            // P17-001 — fail-CLOSED on replaceIndex in live mode. The SDK's
+            // WriteToDetailFile only appends (spec §2); silently dropping
+            // replaceIndex (the prior behavior) made an operator-requested
+            // row replace silently become an append against a live tax
+            // return. Until a real read-delete-append path lands at this
+            // bridge, refuse the call with a structured 9019 so the operator
+            // sees the divergence instead of a corrupted return reported as
+            // Success. The sim path continues to honor replaceIndex via
+            // ApplySimDetailWriteWithUndo.
+            if (replaceIndex.HasValue)
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.LiveReplaceIndexUnsupported,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = "WriteDetail",
+                        ["clientNumber"] = clientNumber,
+                        ["replaceIndex"] = replaceIndex.Value,
+                    });
+            }
             // F11 — wrap with WireLog. row is logged verbatim; WireLog.Redact
             // strips SSN/EIN/BankAccountNumber/RoutingNumber.
             return WireLog.RecordSync<int>("Bridge.WriteDetail",

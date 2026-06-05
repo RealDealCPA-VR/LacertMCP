@@ -11,7 +11,20 @@ namespace LacertMCP.Tests.Tools
     /// Phase 5 task #41 — `lacerte_session_status`, `lacerte_set_context`,
     /// `lacerte_can_use_new_apis`, `lacerte_list_modules`,
     /// `lacerte_list_datapaths`.
+    ///
+    /// <para>
+    /// FINAL-VERIFY trivial fix — placed in the AccessMapMutationCollection so
+    /// the SessionStatus_SurfacesWireLogState_WhenDisabled assertion (which
+    /// reads the process-global WireLog._testForceConfig state via
+    /// WireLog.IsEnabled) doesn't race the WireLogRotationTests /
+    /// WireLogSessionIntegrationTests / WireLogResultSummarizationTests that
+    /// flip that state under EnableForTests/DisableForTests brackets. All
+    /// three of those test classes already live in AccessMapMutationCollection;
+    /// adding SessionToolsTests to the same collection serializes them per
+    /// the existing project convention.
+    /// </para>
     /// </summary>
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class SessionToolsTests
     {
         private static SessionTools NewTools() => new SessionTools(ToolTestHelpers.NewSimManager());
@@ -339,15 +352,123 @@ namespace LacertMCP.Tests.Tools
         }
 
         [Fact]
-        public void ValidateLogDir_NoEnvAllowlistRoots_ReturnsCanonical()
+        public void ValidateLogDir_NoEnvAllowlistRoots_RejectsToForceFallback()
         {
-            // When the env dictionary has no allowlist roots (test env, no
-            // USERPROFILE / TEMP / LACERTE_DATA_ROOT), the helper returns the
-            // canonical path. Production env always has USERPROFILE on
-            // Windows so the allowlist is real there.
+            // P17-010 — when the env dictionary has no allowlist roots (the
+            // typical POSIX dev box where USERPROFILE/TEMP/TMP are not set),
+            // the helper MUST reject so WireLog falls back to ./logs rather
+            // than provisioning arbitrary filesystem locations. The prior
+            // behavior of returning the canonical path silently disabled the
+            // gate off-Windows, breaking the sim/live boundary invariant.
             var env = new System.Collections.Generic.Dictionary<string, string?>();
             var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(@"C:\anywhere\logs", env);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_PosixShapedEnv_RejectsArbitraryPath()
+        {
+            // P17-010 — POSIX-conventional env vars (HOME, TMPDIR) are NOT in
+            // the Windows-shaped allowlist set (USERPROFILE, TEMP, TMP,
+            // LACERTE_DATA_ROOT). With only HOME/TMPDIR populated, the
+            // allowlist is empty and the helper rejects arbitrary paths.
+            // Operators on POSIX who need a custom log path must set
+            // LACERTE_DATA_ROOT explicitly so the allowlist has something to
+            // enforce against.
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["HOME"] = "/home/dev",
+                ["TMPDIR"] = "/tmp",
+            };
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir("/etc/cron.d", env);
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_NonExistentTailUnderRoot_StillAccepted()
+        {
+            // P17-016 — the reparse-point walk treats non-existent tail
+            // segments as clean (lazy-create-on-first-write is a legitimate
+            // pattern WireLog relies on). A path under USERPROFILE pointing
+            // to a directory that doesn't exist yet still validates.
+            var env = new System.Collections.Generic.Dictionary<string, string?>
+            {
+                ["USERPROFILE"] = @"C:\Users\tester",
+            };
+            var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(
+                @"C:\Users\tester\AppData\Local\NotYetCreated\logs", env);
             Assert.NotNull(result);
+        }
+
+        [Fact]
+        public void ValidateLogDir_RejectsJunctionUnderTemp_Windows()
+        {
+            // P17-016 — on Windows, create a real junction inside a temp
+            // root and assert ValidateLogDir rejects it. The junction has the
+            // FileAttributes.ReparsePoint bit which the segment walker
+            // detects.
+            //
+            // Skipped off-Windows: mklink is a Windows-only mechanism and
+            // the FileAttributes.ReparsePoint surface is not meaningfully
+            // tested on POSIX hosts. The fail-closed posture for the rest
+            // of the gate is exercised by ValidateLogDir_PosixShapedEnv_*.
+            if (System.Environment.OSVersion.Platform != System.PlatformID.Win32NT)
+            {
+                return;
+            }
+
+            var tempRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "lac-mcp-junction-" + System.Guid.NewGuid().ToString("N").Substring(0, 8));
+            var target = System.IO.Path.Combine(tempRoot, "real-target");
+            var junction = System.IO.Path.Combine(tempRoot, "via-junction");
+            System.IO.Directory.CreateDirectory(target);
+            try
+            {
+                // Create the junction via cmd /c mklink /J (no admin needed).
+                var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                    "/c mklink /J \"" + junction + "\" \"" + target + "\"")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    p!.WaitForExit(5000);
+                    if (p.ExitCode != 0)
+                    {
+                        // Junction creation can fail on locked-down boxes —
+                        // skip rather than fail the suite (no privileges to
+                        // exercise the test).
+                        return;
+                    }
+                }
+
+                // Point the allowlist at the temp root via TEMP env, then
+                // try to validate a path that traverses the junction. Expect
+                // null (rejected by the reparse-point walker).
+                var env = new System.Collections.Generic.Dictionary<string, string?>
+                {
+                    ["TEMP"] = tempRoot,
+                };
+                var result = LacertMCP.Server.Session.PathValidation.ValidateLogDir(
+                    System.IO.Path.Combine(junction, "logs"), env);
+                Assert.Null(result);
+
+                // Sanity: a NON-junction sibling under the same allowlist
+                // root validates fine, confirming the rejection is
+                // specifically because of the reparse point, not a broader
+                // gate.
+                var cleanResult = LacertMCP.Server.Session.PathValidation.ValidateLogDir(
+                    System.IO.Path.Combine(target, "logs"), env);
+                Assert.NotNull(cleanResult);
+            }
+            finally
+            {
+                try { System.IO.Directory.Delete(junction, recursive: false); } catch { }
+                try { System.IO.Directory.Delete(tempRoot, recursive: true); } catch { }
+            }
         }
 
         // -----------------------------------------------------------------

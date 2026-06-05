@@ -110,10 +110,22 @@ namespace LacertMCP.Server.Bridge
         /// <summary>
         /// Per-client detail-file write. Wraps the detail-row write path on
         /// <c>IDBFWriter</c>. Returns the TAPIStatus integer (1 = Success).
+        /// <para>
+        /// P17-001 — <paramref name="replaceIndex"/> mirrors the sim path's
+        /// replace-vs-append semantics. The underlying SDK
+        /// <c>WriteToDetailFile</c> COM method only appends per spec §2; live
+        /// implementations are expected to fail-closed with
+        /// <see cref="SyntheticStatusCodes.LiveReplaceIndexUnsupported"/> when
+        /// <paramref name="replaceIndex"/> is non-null until a real
+        /// read-delete-append path lands. Threading the param through the
+        /// interface (rather than dropping it at the session manager) keeps
+        /// the bridge boundary honest and lets future implementations fan out
+        /// when the SDK gains a true update-by-index primitive.
+        /// </para>
         /// </summary>
         int WriteDetail(
             string appId, string dataPath, int year, char module,
-            string clientNumber, DetailRow row);
+            string clientNumber, DetailRow row, int? replaceIndex);
 
         // =================================================================
         // Create

@@ -94,7 +94,7 @@ namespace LacertMCP.Tests.Bridge
                 => throw new NotImplementedException();
 
             public int WriteDetail(string appId, string dataPath, int year, char module,
-                string clientNumber, DetailRow row)
+                string clientNumber, DetailRow row, int? replaceIndex)
                 => throw new NotImplementedException();
 
             public BridgeCreateClientResult CreateClient(string appId, string dataPath, int year, char module,

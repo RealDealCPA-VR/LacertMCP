@@ -296,11 +296,17 @@ namespace LacertMCP.Tests.Bridge
             }
 
             public int WriteDetail(string appId, string dataPath, int year, char module,
-                string clientNumber, DetailRow row)
+                string clientNumber, DetailRow row, int? replaceIndex)
             {
                 System.Threading.Interlocked.Increment(ref WriteDetailCalls);
+                // P17-001 — record whether the call came in with replaceIndex
+                // so a parity test can assert the live path NEVER reaches the
+                // bridge with one (the session manager throws 9019 first).
+                LastReplaceIndex = replaceIndex;
                 return StatusCodes.Success;
             }
+
+            public int? LastReplaceIndex;
 
             public BridgeCreateClientResult CreateClient(string appId, string dataPath, int year, char module,
                 string clientID, string taxType, string? firstName, string? lastName, string? emailID)

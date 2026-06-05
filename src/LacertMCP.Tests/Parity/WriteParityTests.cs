@@ -64,32 +64,41 @@ namespace LacertMCP.Tests.Parity
         // -----------------------------------------------------------------
 
         [Theory, BothModesData]
-        public async Task WriteField_Data2_AccessGateFiresFirst_FailsClosed(SessionMode mode)
+        public async Task WriteField_Data2_DiscriminatorGateFiresFirst_BothModes(SessionMode mode)
         {
             using var mgr = ParitySessionFactory.For(mode);
             // P15-050 — RequireRegistered gate now fires after RequireContext.
             await mgr.Register();
             mgr.SetContext(SeedData.DataPathPData2024, 2024, 'P');
+            // P17-002 — discriminator gate (SubClientIDRequired) now fires
+            // BEFORE the access-map check in both sim AND live mode. Prior
+            // to P17-002 this test asserted 9012 UnknownFieldAccess (the
+            // access-map gate firing first); that ordering let the live
+            // branch silently forward a missing subClientId to the SDK
+            // and the sim branch throw a different code on the same input.
+            // The new ordering makes the gate two-mode-symmetric per
+            // CLAUDE.md two-mode discipline.
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteField(2, "1001", "C2_5", "x"));
-            // Empty access map → Unknown → 9012 UnknownFieldAccess. Once the
-            // map is populated with a ReadWrite entry for C2_5, the
-            // SubClientIDRequired guard (9005) becomes reachable; covered in
-            // WriteField unit tests.
-            Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, err.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.SubClientIDRequired, err.StatusCode);
+            Assert.Equal(2, err.Context["table"]);
+            Assert.Equal("WriteField", err.Context["op"]);
         }
 
         [Theory, BothModesData]
-        public async Task WriteField_Data3_AccessGateFiresFirst_FailsClosed(SessionMode mode)
+        public async Task WriteField_Data3_DiscriminatorGateFiresFirst_BothModes(SessionMode mode)
         {
             using var mgr = ParitySessionFactory.For(mode);
             // P15-050 — RequireRegistered gate now fires after RequireContext.
             await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
+            // P17-002 — discriminator gate (StateAbbrevRequired) now fires
+            // BEFORE the access-map check in both modes (see DATA2 test).
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteField(3, "1001", "C3_1", "x"));
-            // Same fail-closed gate as DATA2 above.
-            Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, err.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.StateAbbrevRequired, err.StatusCode);
+            Assert.Equal(3, err.Context["table"]);
+            Assert.Equal("WriteField", err.Context["op"]);
         }
 
         // -----------------------------------------------------------------

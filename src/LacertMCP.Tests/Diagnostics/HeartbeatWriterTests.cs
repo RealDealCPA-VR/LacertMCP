@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Diagnostics;
@@ -10,13 +12,18 @@ using Xunit;
 namespace LacertMCP.Tests.Diagnostics
 {
     /// <summary>
-    /// P15-054 — guards on the periodic heartbeat-file writer.
+    /// P15-054 + P17-003 + P17-014 — guards on the periodic heartbeat-file writer.
     ///
     /// <para>
     /// Asserts the env-var parsing contract (default 30s, 0/negative disables,
     /// unparseable falls back to default), the JSON payload shape an external
-    /// watcher will script against ({pid, registered, mode, ts}), and that
-    /// write failures stay swallowed so the heartbeat can never poison a tool
+    /// watcher will script against ({pid, mode, registered, expiresAt,
+    /// minutesUntilExpiry, buildVersion, ts}), that registered honours the
+    /// real ExpiresAt clock (not the bare IsRegistered latch) so an idle
+    /// server with a lapsed Intuit ticket truthfully reports
+    /// <c>registered:false</c>, that the heartbeat file name is PID-suffixed
+    /// so concurrent MCP instances don't clobber each other, and that write
+    /// failures stay swallowed so the heartbeat can never poison a tool
     /// call. Runs entirely off-Windows — uses Path.GetTempPath, in-memory
     /// session, and the test-seam ctor that skips env-var resolution.
     /// </para>
@@ -85,6 +92,57 @@ namespace LacertMCP.Tests.Diagnostics
         }
 
         // ------------------------------------------------------------------
+        // P17-014 — PID-suffixed file name (multi-instance hygiene)
+        // ------------------------------------------------------------------
+
+        [Fact]
+        public void HeartbeatFileName_IsPidSuffixed_P17_014()
+        {
+            // Two concurrent MCP server instances must not clobber the same
+            // file every 30s. The canonical name MUST carry the running
+            // process id so a watcher enumerating the glob sees one row per
+            // live instance.
+            var name = HeartbeatWriter.HeartbeatFileName;
+            var expected = "lacerte-mcp-heartbeat-" + Process.GetCurrentProcess().Id + ".json";
+            Assert.Equal(expected, name);
+        }
+
+        [Fact]
+        public void BuildHeartbeatFileName_FormatsAsLowercasePidSuffix_P17_014()
+        {
+            Assert.Equal("lacerte-mcp-heartbeat-12345.json",
+                HeartbeatWriter.BuildHeartbeatFileName(12345));
+            Assert.Equal("lacerte-mcp-heartbeat-1.json",
+                HeartbeatWriter.BuildHeartbeatFileName(1));
+        }
+
+        [Fact]
+        public void HeartbeatFileGlob_MatchesPidSuffixedNames_P17_014()
+        {
+            // The exported glob must match any PID-suffixed file the writer
+            // could produce. Keep the glob and the BuildHeartbeatFileName
+            // format in lockstep so external watchers don't silently miss
+            // instances after a future refactor.
+            Assert.Equal("lacerte-mcp-heartbeat-*.json", HeartbeatWriter.HeartbeatFileGlob);
+
+            // Convert the glob to a regex to actually verify match semantics.
+            var globRegex = "^" + Regex.Escape(HeartbeatWriter.HeartbeatFileGlob).Replace("\\*", ".*") + "$";
+            Assert.Matches(globRegex, HeartbeatWriter.BuildHeartbeatFileName(1));
+            Assert.Matches(globRegex, HeartbeatWriter.BuildHeartbeatFileName(99999));
+            Assert.Matches(globRegex, HeartbeatWriter.HeartbeatFileName);
+        }
+
+        [Fact]
+        public void DefaultPath_DoesNotEqualLegacySharedPath_P17_014()
+        {
+            // Regression sentinel: the legacy "lacerte-mcp-heartbeat.json"
+            // (no PID suffix) was the shared-clobber path. If someone
+            // reverts BuildHeartbeatFileName back to a const, this fires.
+            var legacy = Path.Combine(Path.GetTempPath(), "lacerte-mcp-heartbeat.json");
+            Assert.NotEqual(legacy, HeartbeatWriter.DefaultPath());
+        }
+
+        // ------------------------------------------------------------------
         // TryWrite + payload shape
         // ------------------------------------------------------------------
 
@@ -104,9 +162,20 @@ namespace LacertMCP.Tests.Diagnostics
                 using var doc = JsonDocument.Parse(text);
                 var root = doc.RootElement;
 
+                // P17-003 — shape is the README-advertised
+                // {pid, mode, registered, expiresAt, minutesUntilExpiry,
+                // buildVersion, ts}. Unregistered baseline => registered:false,
+                // expiresAt:null, minutesUntilExpiry:null. buildVersion is
+                // populated from the assembly stamp (BuildInfo.Version).
                 Assert.Equal(JsonValueKind.Number, root.GetProperty("pid").ValueKind);
-                Assert.Equal(JsonValueKind.False, root.GetProperty("registered").ValueKind); // default Phase-0 sim: not registered
                 Assert.Equal("simulation", root.GetProperty("mode").GetString());
+                Assert.Equal(JsonValueKind.False, root.GetProperty("registered").ValueKind); // default Phase-0 sim: not registered
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("expiresAt").ValueKind);
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("minutesUntilExpiry").ValueKind);
+                // buildVersion comes from AssemblyInformationalVersion; always non-null
+                // (BuildInfo.Version falls back to "unknown" on reflection failure).
+                var buildVersion = root.GetProperty("buildVersion").GetString();
+                Assert.False(string.IsNullOrEmpty(buildVersion));
                 // ISO-8601 timestamp — Parse round-trips, anything else throws.
                 var ts = DateTimeOffset.Parse(root.GetProperty("ts").GetString()!);
                 Assert.True((DateTimeOffset.UtcNow - ts).Duration() < TimeSpan.FromSeconds(10));
@@ -208,6 +277,152 @@ namespace LacertMCP.Tests.Diagnostics
                 else
                 {
                     Assert.True(secondMtime > firstMtime);
+                }
+            }
+            finally
+            {
+                TryDelete(path);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // P17-003 — registered/expiresAt staleness contract
+        // ------------------------------------------------------------------
+
+        [Fact]
+        public void TryWrite_RegisteredSession_PopulatesExpiresAtAndCountdown_P17_003()
+        {
+            var path = NewTempPath();
+            try
+            {
+                var session = new LacerteSessionManager();
+                session.SetRegisteredForTest(true);
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: path);
+
+                Assert.True(writer.TryWrite());
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+
+                Assert.Equal(JsonValueKind.True, root.GetProperty("registered").ValueKind);
+                // expiresAt is the freshly-set Register timestamp + 24h; must
+                // be parseable ISO-8601 and within ~24h of now.
+                var expiresAt = DateTimeOffset.Parse(root.GetProperty("expiresAt").GetString()!);
+                var delta = (expiresAt - DateTimeOffset.UtcNow).TotalMinutes;
+                Assert.InRange(delta, 24 * 60 - 5, 24 * 60 + 5);
+                // minutesUntilExpiry mirrors the same window.
+                var minutes = root.GetProperty("minutesUntilExpiry").GetDouble();
+                Assert.InRange(minutes, 24 * 60 - 5, 24 * 60 + 5);
+            }
+            finally
+            {
+                TryDelete(path);
+            }
+        }
+
+        [Fact]
+        public void TryWrite_ExpiredTicket_ReportsRegisteredFalse_EvenIfLatchStale_P17_003()
+        {
+            // The bug: with the bare _session.IsRegistered latch, an idle
+            // server whose 24h Intuit ticket lapsed at 02:00 keeps writing
+            // registered:true every 30s until the next tool call's
+            // ThrowIfAuthExpired probe flips the latch. Watchers polling
+            // only the heartbeat see a stale green light across the entire
+            // overnight idle window — defeating the whole point of P15-054.
+            //
+            // Fix: BuildPayload computes registered as
+            //   IsRegistered && ExpiresAt > UtcNow
+            // so the heartbeat truthfully flips to false the moment the
+            // ticket lapses, independent of any tool-call probe.
+            var path = NewTempPath();
+            try
+            {
+                var session = new LacerteSessionManager();
+                session.SetRegisteredForTest(true);                  // latch still true
+                session.SetExpiresAtForTest(DateTimeOffset.UtcNow.AddSeconds(-1)); // ticket lapsed
+
+                // Critical: do NOT call any tool / require-context here —
+                // simulate the "idle since 02:00, no calls have probed
+                // ThrowIfAuthExpired yet" condition the bug describes.
+                Assert.True(session.IsRegistered, "Pre-condition: latch must still read true so the regression actually fires.");
+
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: path);
+                Assert.True(writer.TryWrite());
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+
+                // The whole point: registered MUST be false even though the
+                // backing latch was never flipped.
+                Assert.Equal(JsonValueKind.False, root.GetProperty("registered").ValueKind);
+                // expiresAt is still populated (we know when the ticket lapsed).
+                Assert.Equal(JsonValueKind.String, root.GetProperty("expiresAt").ValueKind);
+                // minutesUntilExpiry is clamped to 0 by SessionStatus, not negative.
+                var minutes = root.GetProperty("minutesUntilExpiry").GetDouble();
+                Assert.Equal(0.0, minutes);
+            }
+            finally
+            {
+                TryDelete(path);
+            }
+        }
+
+        [Fact]
+        public void TryWrite_NeverRegistered_ExpiresAtNull_RegisteredFalse_P17_003()
+        {
+            // Baseline: a fresh session that was never registered should
+            // emit registered:false + expiresAt:null + minutesUntilExpiry:null.
+            // Pinning this prevents a future refactor from emitting an
+            // ambiguous "{registered:false, expiresAt:'0001-01-01T...'}"
+            // that would confuse watchers.
+            var path = NewTempPath();
+            try
+            {
+                var session = new LacerteSessionManager();
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: path);
+
+                Assert.True(writer.TryWrite());
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+
+                Assert.Equal(JsonValueKind.False, root.GetProperty("registered").ValueKind);
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("expiresAt").ValueKind);
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("minutesUntilExpiry").ValueKind);
+            }
+            finally
+            {
+                TryDelete(path);
+            }
+        }
+
+        [Fact]
+        public void TryWrite_PayloadShape_MatchesReadmeAdvertisedFields_P17_003()
+        {
+            // README.md:154 documents the heartbeat JSON as carrying
+            // "(pid, mode, auth countdown, build version)". The implementation
+            // additionally surfaces `registered`, `expiresAt`, and `ts` for the
+            // watcher's mtime-staleness + per-tick parsing needs. This test
+            // pins the full set so future drift (either side) fails CI rather
+            // than reaching production.
+            var path = NewTempPath();
+            try
+            {
+                var session = new LacerteSessionManager();
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: path);
+                Assert.True(writer.TryWrite());
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+
+                // Required keys (presence test, not value test).
+                foreach (var key in new[] {
+                    "pid", "mode", "registered",
+                    "expiresAt", "minutesUntilExpiry",
+                    "buildVersion", "ts",
+                })
+                {
+                    Assert.True(root.TryGetProperty(key, out _),
+                        $"Heartbeat payload is missing required key '{key}'.");
                 }
             }
             finally

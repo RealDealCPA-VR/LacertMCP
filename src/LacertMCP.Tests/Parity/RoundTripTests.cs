@@ -41,9 +41,12 @@ namespace LacertMCP.Tests.Parity
             var rows = await mgr.ListClients();
             Assert.NotEmpty(rows);
             var row = rows[0];
-            Assert.True(row.ContainsKey("ClientNumber"), "row must expose ClientNumber");
+            // P17-011 — wire key is now camelCase `clientNumber` to match the
+            // input-parameter casing P16-054/P16-080 enforced.
+            Assert.True(row.ContainsKey("clientNumber"), "row must expose clientNumber");
             // Either first-name (C1_1 / individual) or entity-name C1_1 — both
-            // are conventional surface keys.
+            // are conventional surface keys. FoxPro DBF column codes (C{n}_{m})
+            // are source-of-truth Lacerte field codes and ship verbatim.
             Assert.Contains(row.Keys, k => k.StartsWith("C1_", StringComparison.Ordinal));
         }
 
@@ -53,8 +56,9 @@ namespace LacertMCP.Tests.Parity
             using var mgr = NewWithContext(mode);
             var rows = await mgr.ListClients(lastNameFilter: "Bro");
             // Seed has BROW (last name "Brown") in TY24 IData.
+            // P17-011 — wire key is camelCase clientNumber.
             Assert.Contains(rows, r =>
-                r.TryGetValue("ClientNumber", out var v) && v is string s &&
+                r.TryGetValue("clientNumber", out var v) && v is string s &&
                 string.Equals(s, "1001", StringComparison.OrdinalIgnoreCase));
         }
 
@@ -68,7 +72,8 @@ namespace LacertMCP.Tests.Parity
             using var mgr = NewWithContext(mode);
             var row = await mgr.ReadClient("1001");
             Assert.NotNull(row);
-            Assert.True(row!.ContainsKey("ClientNumber"));
+            // P17-011 — camelCase wire key.
+            Assert.True(row!.ContainsKey("clientNumber"));
         }
 
         [Theory, BothModesData]

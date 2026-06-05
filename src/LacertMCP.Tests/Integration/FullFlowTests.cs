@@ -39,14 +39,15 @@ namespace LacertMCP.Tests.Integration
             Assert.True(beforeCount > 0, "seed should populate at least one client in TY24 IData");
 
             // Sanity-check that one of the seeded clients (BROW) is present.
+            // P17-011 — wire keys are camelCase (clientNumber, not ClientNumber).
             Assert.Contains(beforeRows, r =>
-                r.TryGetValue("ClientNumber", out var v) && v is string s &&
+                r.TryGetValue("clientNumber", out var v) && v is string s &&
                 s == "1001");
 
             // ----- 4. ReadClient one row -----
             var smitRow = await mgr.ReadClient("1001");
             Assert.NotNull(smitRow);
-            Assert.True(smitRow!.ContainsKey("ClientNumber"));
+            Assert.True(smitRow!.ContainsKey("clientNumber"));
 
             // ----- 5. WriteField with no fixture seam â€” exercises the
             // fail-closed access-map gate. The map ships {} in v1; the
@@ -80,8 +81,10 @@ namespace LacertMCP.Tests.Integration
             var afterRows = await mgr.ListClients();
             Assert.True(afterRows.Count == beforeCount + 1,
                 $"expected count to grow by 1; before={beforeCount}, after={afterRows.Count}");
+            // P17-011 — wire key is camelCase clientId (normalized from
+            // the seed's PascalCase ClientID alias).
             Assert.Contains(afterRows, r =>
-                r.TryGetValue("ClientID", out var v) && v is string s &&
+                r.TryGetValue("clientId", out var v) && v is string s &&
                 string.Equals(s, "NEW1", System.StringComparison.OrdinalIgnoreCase));
 
             // ----- 8. Idempotency replay returns the same ClientNumber -----

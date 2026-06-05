@@ -45,6 +45,50 @@ namespace LacertMCP.Server.Tools
     {
         private readonly LacerteSessionManager _session;
 
+        /// <summary>
+        /// P17-008 — default per-call cap on <c>entries.Length</c>. The bulk
+        /// write tool fans out N writes through the live SDK from a single
+        /// MCP call; without an upper bound a fuzzy LLM-constructed payload
+        /// (e.g., "write zip=12345 for every client in NY" emitted as every
+        /// client in the firm) can mutate thousands of rows before the
+        /// operator can inspect. The project's own pagination layer caps
+        /// every read tool at <see cref="Pagination.Pagination.MaxLimit"/>
+        /// (1000); writes have strictly higher blast radius and deserve at
+        /// least the same ceiling. We pick 500 (stricter than read) as a
+        /// deliberate brake on un-deliberate writes — overridable via the
+        /// <see cref="BulkWriteMaxEnvName"/> environment variable when an
+        /// operator workflow genuinely needs a larger batch.
+        /// </summary>
+        public const int DefaultMaxBulkEntries = 500;
+
+        /// <summary>
+        /// P17-008 — environment-variable override for
+        /// <see cref="DefaultMaxBulkEntries"/>. Positive integer values
+        /// replace the default; null / empty / non-numeric / non-positive
+        /// values silently fall back to the default (matches the project's
+        /// never-throw-from-env-parse convention).
+        /// </summary>
+        public const string BulkWriteMaxEnvName = "LACERTE_BULK_WRITE_MAX";
+
+        /// <summary>
+        /// Resolves the effective cap from <see cref="BulkWriteMaxEnvName"/>,
+        /// falling back to <see cref="DefaultMaxBulkEntries"/> on any parse
+        /// failure or non-positive value. Read on each call so a test or
+        /// operator can flip the env var mid-process without restarting.
+        /// </summary>
+        internal static int ResolveMaxBulkEntries()
+        {
+            var raw = Environment.GetEnvironmentVariable(BulkWriteMaxEnvName);
+            if (string.IsNullOrEmpty(raw)) return DefaultMaxBulkEntries;
+            if (int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                && parsed > 0)
+            {
+                return parsed;
+            }
+            return DefaultMaxBulkEntries;
+        }
+
         public FieldWriteBulkTools(LacerteSessionManager session)
         {
             _session = session;
@@ -86,10 +130,10 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Bulk-update a single DBF table across many clients in one MCP call. Iterates the existing field-write chokepoint per entry (DATA6/DATA7 still rejected, access-map gate still applied, dry-run undo still honored, idempotency-lock still serialized per key) and aggregates per-row outcomes into {totalCount, successCount, errorCount, perItem[]}. Default continueOnError=false stops at the first failure; pass continueOnError=true to keep going and collect every row's status. When idempotencyKey is supplied it acts as a prefix - each row uses '{prefix}-{clientNumber}-{field}' so a retry of the whole batch replays cleanly without aliasing across fields.")]
+        [Description("Bulk-update a single DBF table across many clients in one MCP call. Iterates the existing field-write chokepoint per entry (DATA6/DATA7 still rejected, access-map gate still applied, dry-run undo still honored, idempotency-lock still serialized per key) and aggregates per-row outcomes into {totalCount, successCount, errorCount, perItem[]}. Default continueOnError=false stops at the first failure; pass continueOnError=true to keep going and collect every row's status. When idempotencyKey is supplied it acts as a prefix - each row uses '{prefix}-{clientNumber}-{field}' so a retry of the whole batch replays cleanly without aliasing across fields. P17-008 - entries.Length is capped at 500 by default (override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge. Pass optional expectedCount to assert entries.Length equals an operator-intended target (throws 9021 BulkBatchCountMismatch on drift) - catches fuzzy LLM payload construction before any row runs.")]
         public Task<string> LacerteFieldWriteBulk(
             [Description("DBF table number applied to every entry. 1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status are writable; 6=Display and 7=Forms are read-only per spec §2 and will be rejected with ExposedForRead.")] int table,
-            [Description("Array of per-row writes. Each entry: {clientNumber, field, value, subClientId?, stateAbbrev?}. Empty array returns a no-op envelope with totalCount=0.")] BulkWriteEntry[] entries,
+            [Description("Array of per-row writes. Each entry: {clientNumber, field, value, subClientId?, stateAbbrev?}. Empty array returns a no-op envelope with totalCount=0. Capped at 500 entries by default (override via LACERTE_BULK_WRITE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkWriteEntry[] entries,
             // P16-069/P16-079 — canonical wire name `taxYear` everywhere
             // (matches lacerte_set_context + lacerte_can_use_new_apis +
             // lacerte_field_access_map). Was `year` pre-P16; bumped wire
@@ -98,7 +142,13 @@ namespace LacertMCP.Server.Tools
             [Description("Optional - validates that the active session context's readOnly flag matches this value before iterating. Null skips the check.")] bool? readOnly = null,
             [Description("If true, run the full validation + access-map gate per entry then roll back without persisting. Each row returns its would-be TAPIStatus.")] bool dryRun = false,
             [Description("If true, a failed row records its error and the loop continues to the next entry. If false (default), the loop stops at the first failure and remaining entries are marked skipped (matches the canonical bulk-write prompt's stop-on-first-error posture).")] bool continueOnError = false,
-            [Description("Optional idempotency key prefix. Per-row key is '{prefix}-{clientNumber}-{field}'. Same prefix + same per-row payload returns the cached result for that row; same prefix + different payload throws 9102 IdempotencyConflict for that row only.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key prefix. Per-row key is '{prefix}-{clientNumber}-{field}'. Same prefix + same per-row payload returns the cached result for that row; same prefix + different payload throws 9102 IdempotencyConflict for that row only.")] string? idempotencyKey = null,
+            // P17-008 — optional cross-check that catches LLM-vs-operator
+            // intent drift BEFORE any row runs. The operator's prompt may
+            // say "write to exactly 47 NY clients" — passing expectedCount=47
+            // lets the system enforce it instead of the operator scanning a
+            // 200-row perItem afterwards. Null skips the check.
+            [Description("Optional - validates that entries.Length equals this caller-supplied value before iterating. Null skips the check. Use to catch 'I meant 47 clients but the LLM emitted 200' drift; throws 9021 BulkBatchCountMismatch on mismatch.")] int? expectedCount = null)
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -159,6 +209,56 @@ namespace LacertMCP.Server.Tools
                 }
 
                 entries ??= Array.Empty<BulkWriteEntry>();
+
+                // -----------------------------------------------------------
+                // P17-008 — blast-radius brake. Fail-CLOSED at the tool
+                // chokepoint when entries.Length exceeds the per-call cap so
+                // a fuzzy LLM-constructed payload (e.g. "every client in NY"
+                // emitted as every client in the firm) can't mutate thousands
+                // of rows from a single MCP call. The project's pagination
+                // layer already bounds every READ tool at MaxLimit=1000;
+                // writes have strictly higher blast radius and deserve at
+                // least the same ceiling. Default cap = 500 (stricter than
+                // read) — override via LACERTE_BULK_WRITE_MAX when an
+                // operator workflow genuinely needs a larger batch.
+                // -----------------------------------------------------------
+                int maxAllowed = ResolveMaxBulkEntries();
+                if (entries.Length > maxAllowed)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.BulkBatchTooLarge,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = "FieldWriteBulk",
+                            ["entryCount"] = entries.Length,
+                            ["maxAllowed"] = maxAllowed,
+                            ["table"] = table,
+                            ["envOverride"] = BulkWriteMaxEnvName,
+                        });
+                }
+
+                // -----------------------------------------------------------
+                // P17-008 — optional caller-supplied entries.Length cross-
+                // check. Catches LLM-vs-operator intent drift BEFORE any
+                // row runs (the operator's prompt says "write to exactly
+                // 47 NY clients"; expectedCount=47 enforces the count
+                // structurally instead of leaving it to a post-hoc perItem
+                // scan). Symmetric with the taxYear/readOnly assertions
+                // above — both use 9016-family pre-flight throws.
+                // -----------------------------------------------------------
+                if (expectedCount.HasValue && expectedCount.Value != entries.Length)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.BulkBatchCountMismatch,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = "FieldWriteBulk",
+                            ["reason"] = "Caller-supplied expectedCount does not match entries.Length.",
+                            ["expected"] = expectedCount.Value,
+                            ["actual"] = entries.Length,
+                            ["table"] = table,
+                        });
+                }
 
                 var perItem = new List<object>(entries.Length);
                 int successCount = 0;

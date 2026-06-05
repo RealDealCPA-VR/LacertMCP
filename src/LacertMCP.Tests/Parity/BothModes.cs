@@ -8,6 +8,7 @@ using System.Text.Json.Serialization;
 using LacertMCP.Server.Bridge;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
+using Xunit;
 using Xunit.Sdk;
 
 namespace LacertMCP.Tests.Parity
@@ -19,12 +20,24 @@ namespace LacertMCP.Tests.Parity
     /// <list type="bullet">
     ///   <item><description><see cref="SessionMode.Simulation"/> — in-memory store, always available.</description></item>
     ///   <item><description><see cref="SessionMode.Live"/> — real COM/ODBC, only meaningful on a
-    ///     Windows + Lacerte CI box. Until that exists, the live leg is
-    ///     SKIPPED at construction-time via <see cref="LacerteSessionManager.Mode"/>
-    ///     (Live mode requires Win32NT + LACERTE_LIVE=1, neither of which
-    ///     matter for the test runner today). The harness STRUCTURE is here so
-    ///     adding the recorded-replay leg is a one-file change.</description></item>
+    ///     Windows + Lacerte CI box. Until a recorded-replay fixture lands
+    ///     (see <see cref="ParitySessionFactory.RecordingEnvVar"/>), the Live
+    ///     leg is GATED OFF — the attribute yields only the Simulation row
+    ///     and <see cref="LiveLegParityPlaceholder"/> emits a single Skipped
+    ///     test so the gap surfaces honestly in test runner output instead
+    ///     of silently running sim twice and reporting it as parity coverage.
+    ///     The harness STRUCTURE is here so adding the recorded-replay leg
+    ///     is a one-file change.</description></item>
     /// </list>
+    ///
+    /// <para>
+    /// P17-015 — Gate the Live leg behind <see cref="HasLiveLegFixture"/> so
+    /// dev/CI runs stop double-paying for ~58 redundant sim invocations and
+    /// the test-runner output stops falsely advertising dual-mode coverage.
+    /// When the env var <c>LACERTE_PARITY_RECORDING</c> is set OR a non-example
+    /// fixture appears in <c>Parity/fixtures/</c>, both legs are emitted and
+    /// the Live leg actually runs against the recording bridge.
+    /// </para>
     ///
     /// <para>
     /// Usage:
@@ -43,14 +56,131 @@ namespace LacertMCP.Tests.Parity
     {
         public override IEnumerable<object[]> GetData(MethodInfo testMethod)
         {
-            // Both modes are emitted; LacerteSessionManager resolves Mode from
-            // env, so the Live leg only TRULY runs on a Windows + LACERTE_LIVE=1
-            // host. On dev/CI the Live leg short-circuits to Simulation per
-            // the manager's mode-resolution rule — i.e. parity holds today by
-            // running sim twice (the second leg is a placeholder for the
-            // recorded-replay live adapter).
             yield return new object[] { SessionMode.Simulation };
-            yield return new object[] { SessionMode.Live };
+
+            // P17-015 — Only emit the Live leg when a recorded-replay fixture
+            // is actually wired up. Without it the Live leg short-circuits to
+            // Simulation (see ParitySessionFactory.For) and we'd just run the
+            // same assertions twice, padding the test count and falsely
+            // reporting dual-mode parity coverage. When this gate flips
+            // (env var set, or a real fixture committed), the second leg
+            // starts executing automatically — no theory-method changes
+            // needed. The single Skipped placeholder fact in
+            // LiveLegParityPlaceholder makes the gap visible in the test
+            // runner output instead of silently disappearing.
+            if (HasLiveLegFixture())
+            {
+                yield return new object[] { SessionMode.Live };
+            }
+        }
+
+        /// <summary>
+        /// True when the Live leg should actually fan out. The Live leg is
+        /// gated behind either an explicit <c>LACERTE_PARITY_RECORDING</c>
+        /// env var (the canonical knob, also honored by
+        /// <see cref="ParitySessionFactory.For(SessionMode)"/>) or the
+        /// presence of any committed fixture under
+        /// <c>src/LacertMCP.Tests/Parity/fixtures/</c> other than the
+        /// <c>example-recording.json</c> sample (which is only used by
+        /// <c>RecordingHarnessTests</c> via <c>ForRecording</c>, not by the
+        /// BothModesData fan-out).
+        /// </summary>
+        internal static bool HasLiveLegFixture()
+        {
+            var recording = Environment.GetEnvironmentVariable(ParitySessionFactory.RecordingEnvVar);
+            if (!string.IsNullOrEmpty(recording)) return true;
+
+            // Recorded-replay fixtures live next to BothModes.cs in the
+            // source tree. Probe the standard candidate roots so the gate
+            // works whether the test runner reports AppContext.BaseDirectory,
+            // the assembly location, or the cwd as the starting point.
+            foreach (var root in CandidateRoots())
+            {
+                var fixturesDir = FindFixturesDir(root);
+                if (fixturesDir == null) continue;
+                var files = Directory.GetFiles(fixturesDir, "*.json", SearchOption.TopDirectoryOnly);
+                if (files.Any(f => !string.Equals(
+                    Path.GetFileName(f), "example-recording.json", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static IEnumerable<string> CandidateRoots()
+        {
+            var roots = new List<string?>
+            {
+                AppContext.BaseDirectory,
+                Path.GetDirectoryName(typeof(BothModesDataAttribute).Assembly.Location),
+                Directory.GetCurrentDirectory(),
+            };
+            return roots.Where(r => !string.IsNullOrEmpty(r) && Directory.Exists(r))!;
+        }
+
+        private static string? FindFixturesDir(string root)
+        {
+            var direct = Path.Combine(root, "Parity", "fixtures");
+            if (Directory.Exists(direct)) return direct;
+
+            var probe = new DirectoryInfo(root);
+            for (int hop = 0; hop < 8 && probe != null; hop++)
+            {
+                var src = Path.Combine(probe.FullName, "src", "LacertMCP.Tests",
+                    "Parity", "fixtures");
+                if (Directory.Exists(src)) return src;
+                probe = probe.Parent;
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// P17-015 — single class-level placeholder that surfaces the Live-leg
+    /// parity gap in the test runner output. When no recorded-replay fixture
+    /// is configured this fact reports as <c>Skipped</c> with an explicit
+    /// reason instead of silently running the sim leg twice and falsely
+    /// reporting dual-mode parity coverage. When the gate flips (env var set
+    /// or a real fixture committed) the placeholder runs as a no-op green Fact
+    /// and the BothModesData fan-out picks up the second leg automatically.
+    /// </summary>
+    public class LiveLegParityPlaceholder
+    {
+        [LiveLegGatedFact]
+        public void LiveLeg_AwaitsRecordedReplayFixture()
+        {
+            // No-op. When this method actually runs (instead of being skipped
+            // via LiveLegGatedFactAttribute's Skip property) it means the
+            // recorded-replay fixture is wired up and the BothModesData
+            // fan-out is already exercising the Live leg — there is nothing
+            // additional to assert here.
+        }
+    }
+
+    /// <summary>
+    /// xUnit <c>[Fact]</c> variant that sets its <see cref="FactAttribute.Skip"/>
+    /// reason to a sentinel string when
+    /// <see cref="BothModesDataAttribute.HasLiveLegFixture"/> returns false at
+    /// attribute construction time. xUnit honors the Skip property by reporting
+    /// the test as Skipped, which is exactly what we want — the parity gap
+    /// surfaces honestly in the test runner output, and flipping the env var
+    /// (or committing a real fixture) re-enables the fact without a code change.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class LiveLegGatedFactAttribute : FactAttribute
+    {
+        public LiveLegGatedFactAttribute()
+        {
+            if (!BothModesDataAttribute.HasLiveLegFixture())
+            {
+                Skip = "Live-leg parity is gated until a recorded-replay fixture lands. " +
+                       "Set LACERTE_PARITY_RECORDING=<path> or commit a non-example " +
+                       "fixture under src/LacertMCP.Tests/Parity/fixtures/ to enable " +
+                       "the second leg across all [Theory, BothModesData] cases. " +
+                       "See Parity/BothModes.cs (P17-015) and HANDOFF.md.";
+            }
         }
     }
 
@@ -354,7 +484,7 @@ namespace LacertMCP.Tests.Parity
 
         public int WriteDetail(
             string appId, string dataPath, int year, char module,
-            string clientNumber, DetailRow row)
+            string clientNumber, DetailRow row, int? replaceIndex)
             => Match<int>("WriteDetail", new Dictionary<string, object?>
             {
                 ["appId"] = appId,
@@ -363,6 +493,10 @@ namespace LacertMCP.Tests.Parity
                 ["module"] = module.ToString(),
                 ["clientNumber"] = clientNumber,
                 ["row"] = row,
+                // P17-001 — replaceIndex threads through the interface;
+                // recordings can pin distinct expected results per index
+                // (and per null, for the legacy append path).
+                ["replaceIndex"] = replaceIndex,
             });
 
         public BridgeCreateClientResult CreateClient(

@@ -46,8 +46,9 @@ namespace LacertMCP.Tests.Integration
             var writes = new List<(string client, string value, string key)>();
             foreach (var row in clients)
             {
-                Assert.True(row.TryGetValue("ClientNumber", out var v),
-                    "ListClients row must expose ClientNumber");
+                // P17-011 — wire key is camelCase clientNumber.
+                Assert.True(row.TryGetValue("clientNumber", out var v),
+                    "ListClients row must expose clientNumber");
                 var cn = v as string;
                 Assert.False(string.IsNullOrEmpty(cn),
                     "ClientNumber must be a non-empty string");

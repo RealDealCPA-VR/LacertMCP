@@ -152,6 +152,41 @@ namespace LacertMCP.Server.Session
         private readonly ConcurrentDictionary<string, IdempotencyCacheEntry> _idempotencyCache =
             new ConcurrentDictionary<string, IdempotencyCacheEntry>();
 
+        // P17-004 — persist the idempotency cache to disk so process restart
+        // (MCP host restart, Claude Desktop reload, OS update reboot
+        // mid-batch) doesn't silently un-fingerprint prior writes and
+        // cause a retry of an already-applied write to re-execute against
+        // the live SDK. Detail writes APPEND by default (replaceIndex is
+        // sim-only per P17-001), so a post-restart retry of
+        // lacerte_detail_write without replaceIndex produces a duplicate
+        // row.
+        //
+        // Persistence sites: written on every successful StoreIdempotent;
+        // loaded once at construction. Disable by setting
+        // LACERTE_IDEMPOTENCY_PERSIST=0 (e.g., for test isolation or for
+        // operators who want strict ephemeral semantics). TTL semantics
+        // are preserved on load — entries older than IdempotencyTtl
+        // (24h) are dropped, matching what the runtime EvictIdempotencyEntry
+        // path would have done.
+        //
+        // The Result column on IdempotencyCacheEntry is `object?` — in
+        // practice it's either `int` (WriteField/WriteDetail TAPIStatus)
+        // or `CreateClientResult` (record). Persistence stores a small
+        // type discriminator ("int" / "create-client") so the load can
+        // rehydrate the right runtime type; entries whose discriminator
+        // is unknown (future result-types from new chokepoints) are
+        // skipped on load rather than throwing — a cold-start miss for
+        // those keys, never a deserialization-poisoning crash.
+        private readonly bool _idempotencyPersistEnabled;
+        private readonly string? _idempotencyCachePath;
+
+        // Single-flight gate so concurrent StoreIdempotent calls don't each
+        // launch a fresh disk write. 0 = idle, 1 = persist in progress.
+        // Losers of the CompareExchange race skip the write; the next
+        // successful Store after the in-flight one finishes will pick up
+        // any missed entries because we always serialize the full cache.
+        private int _persistingIdempotency;
+
         // Per-key semaphores to serialize concurrent same-key writes so the
         // TryReplay → execute → StoreIdempotent triple is atomic per key.
         // Without this, two concurrent identical writes both miss the cache
@@ -282,6 +317,25 @@ namespace LacertMCP.Server.Session
                 // Live verification deferred to Windows + Lacerte box.
                 _bridge = new LacerteAccessClient();
             }
+
+            // P17-004 — wire up idempotency cache persistence. Default OFF
+            // for v0.1 (opt-in) so the new disk dependency doesn't surprise
+            // operators on first upgrade and so test/CI runs stay hermetic
+            // without per-test cleanup. Set LACERTE_IDEMPOTENCY_PERSIST=1
+            // to close the cross-restart corruption hazard the finding
+            // describes — recommended for any operator running batched
+            // writes through Claude Desktop or another auto-restart host.
+            // LACERTE_IDEMPOTENCY_PERSIST_PATH overrides the storage
+            // location (default: %APPDATA%/lacerte-mcp/idempotency-cache.json
+            // on Windows, $XDG_CONFIG_HOME/lacerte-mcp/idempotency-cache.json
+            // or ~/.config/lacerte-mcp/idempotency-cache.json on POSIX).
+            var persistFlag = TryGet(resolved, "LACERTE_IDEMPOTENCY_PERSIST");
+            _idempotencyPersistEnabled = persistFlag == "1";
+            if (_idempotencyPersistEnabled)
+            {
+                _idempotencyCachePath = ResolveIdempotencyCachePath(resolved);
+                LoadIdempotencyCacheFromDisk();
+            }
         }
 
         /// <summary>
@@ -299,6 +353,18 @@ namespace LacertMCP.Server.Session
             _appName = TryGet(resolved, "LACERTE_APP_NAME");
             _bridge = bridge;
             _sim = null;
+
+            // P17-004 — test ctor honors LACERTE_IDEMPOTENCY_PERSIST too so
+            // a persistence-specific test can pin the behavior. Default
+            // OFF for the test ctor (hermetic) — tests that opt in pass
+            // LACERTE_IDEMPOTENCY_PERSIST=1 explicitly via the env dict.
+            var persistFlag = TryGet(resolved, "LACERTE_IDEMPOTENCY_PERSIST");
+            _idempotencyPersistEnabled = persistFlag == "1";
+            if (_idempotencyPersistEnabled)
+            {
+                _idempotencyCachePath = ResolveIdempotencyCachePath(resolved);
+                LoadIdempotencyCacheFromDisk();
+            }
         }
 
         // ===================================================================
@@ -1026,6 +1092,38 @@ namespace LacertMCP.Server.Session
             // marshalling could silently corrupt a numeric DBF cell.
             value = NormalizeFieldWriteValue(value, field);
 
+            // P17-002 — hoist the per-table discriminator gates out of
+            // ApplySimFieldWriteWithUndo so they fire in BOTH modes before
+            // the live bridge is touched. Previously these checks lived only
+            // in the sim path, so a live DATA2/DATA4 write missing subClientId
+            // or a DATA3/DATA4 write missing stateAbbrev silently forwarded
+            // `subClientId ?? 0` / `stateAbbrev ?? string.Empty` to the SDK
+            // (Bridge.Writer.UpdateTaxReturn line ~108-110) — best case the
+            // SDK rejected with a less-actionable error, worst case the
+            // write hit a sentinel state-row alphabetically (data corruption
+            // on the wrong return). CLAUDE.md two-mode discipline forbids
+            // that asymmetry. The downstream sim checks at
+            // ApplySimFieldWriteWithUndo lines ~1550-1563 are now redundant
+            // but kept as defense-in-depth for any direct sim-helper caller.
+            if ((table == 2 || table == 4) && (!subClientId.HasValue || subClientId.Value <= 0))
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.SubClientIDRequired,
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = table,
+                        ["op"] = "WriteField",
+                    });
+            }
+            if ((table == 3 || table == 4) && string.IsNullOrEmpty(stateAbbrev))
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.StateAbbrevRequired,
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = table,
+                        ["op"] = "WriteField",
+                    });
+            }
+
             // P14-005 — per-key serialization. Concurrent same-key calls wait
             // here so TryReplay → execute → StoreIdempotent runs atomically.
             // Null/empty key: skip locking (no idempotency contract to honor).
@@ -1192,20 +1290,45 @@ namespace LacertMCP.Server.Session
                         {
                             throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
                         }
+                        // P17-001 — fail-CLOSED at the session chokepoint when
+                        // replaceIndex is supplied in live mode. The SDK's
+                        // WriteToDetailFile only appends (spec §2); the prior
+                        // behavior silently dropped replaceIndex (two
+                        // `_ = replaceIndex;` discards) so an operator-requested
+                        // row REPLACE became a live APPEND while the tool
+                        // returned statusCode=Success — the textbook two-mode-
+                        // discipline violation. Throwing here BEFORE the
+                        // dryRun branch keeps the gate identical for both
+                        // dryRun and non-dryRun live calls (otherwise a
+                        // dryRun=true probe would mask the divergence from
+                        // the operator). Bridge.Writer.WriteDetail and
+                        // LacerteAccessClient.WriteDetail also throw 9019
+                        // defense-in-depth for any direct caller.
+                        if (replaceIndex.HasValue)
+                        {
+                            throw new LacerteSDKError(SyntheticStatusCodes.LiveReplaceIndexUnsupported,
+                                new Dictionary<string, object?>
+                                {
+                                    ["op"] = "WriteDetail",
+                                    ["clientNumber"] = clientNumber,
+                                    ["replaceIndex"] = replaceIndex.Value,
+                                });
+                        }
                         if (dryRun)
                         {
                             // Detail-file writes have no SDK-level snapshot path;
                             // honor dryRun by short-circuiting before the wire call.
-                            _ = replaceIndex;
                             inner = StatusCodes.Success;
                         }
                         else
                         {
                             var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                            _ = replaceIndex;
-                            // F12 — wrap in AutoReconnect.
+                            // F12 — wrap in AutoReconnect. replaceIndex is
+                            // threaded through to the bridge interface (P17-001)
+                            // so a future SDK update-by-index path doesn't need
+                            // a second signature change.
                             inner = await AutoReconnect.WithRetry<int>(() =>
-                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row)))
+                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row, replaceIndex)))
                                 .ConfigureAwait(false);
                         }
                     }
@@ -1735,17 +1858,57 @@ namespace LacertMCP.Server.Session
 
         private static Dictionary<string, object?> CloneRow(DbfRow src)
         {
+            // P17-011 — emit canonical camelCase wire keys for the three
+            // SDK-meta columns that CloneRow injects (clientNumber,
+            // subClientId, stateAbbrev) to match the input-parameter
+            // casing P16-054/P16-080 just enforced on every tool. The
+            // operator-facing surface used to ship `ClientNumber` /
+            // `SubClientID` / `StateAbbrev` (PascalCase) in response
+            // payloads while accepting `clientNumber` / `subClientId` /
+            // `stateAbbrev` (camelCase) on the way in — an LLM that
+            // filtered `row.stateAbbrev === "CA"` would get undefined on
+            // every row. Inside Fields the FoxPro DBF column codes
+            // (`C1_0`, `C2_3`, …) stay verbatim — those are Lacerte's
+            // source-of-truth field codes and must round-trip exactly.
+            // Other Fields keys (e.g. `ClientID`, `FilingStatus`) are
+            // normalized to camelCase only when they match one of the
+            // known SDK-meta aliases the project renamed in P16 + P17;
+            // the rest pass through to preserve seed-data shapes any
+            // existing test fixture depends on.
             var dict = new Dictionary<string, object?>(src.Fields.Count + 3)
             {
-                ["ClientNumber"] = src.ClientNumber,
+                ["clientNumber"] = src.ClientNumber,
             };
-            if (src.SubClientID.HasValue) dict["SubClientID"] = src.SubClientID.Value;
-            if (!string.IsNullOrEmpty(src.StateAbbrev)) dict["StateAbbrev"] = src.StateAbbrev;
+            if (src.SubClientID.HasValue) dict["subClientId"] = src.SubClientID.Value;
+            if (!string.IsNullOrEmpty(src.StateAbbrev)) dict["stateAbbrev"] = src.StateAbbrev;
             foreach (var kv in src.Fields)
             {
-                dict[kv.Key] = kv.Value;
+                dict[NormalizeWireKey(kv.Key)] = kv.Value;
             }
             return dict;
+        }
+
+        // P17-011 — narrow PascalCase → camelCase normalizer for the
+        // known SDK-meta column aliases. Preserves FoxPro DBF column
+        // codes (`C1_0`, `C2_3`, …) verbatim per the source-of-truth
+        // contract. Conservative: only renames the small explicit set
+        // of pre-P16 PascalCase aliases — never blindly lowercases
+        // every PascalCase key, because some Fields entries (seed-data
+        // ClientID, future schema columns) need to keep their exact
+        // casing for downstream consumers.
+        private static string NormalizeWireKey(string key)
+        {
+            switch (key)
+            {
+                case "ClientID": return "clientId";
+                case "ClientNumber": return "clientNumber";
+                case "SubClientID": return "subClientId";
+                case "StateAbbrev": return "stateAbbrev";
+                case "FirstName": return "firstName";
+                case "LastName": return "lastName";
+                case "EmailID": return "emailId";
+                default: return key;
+            }
         }
 
         // ===================================================================
@@ -1878,20 +2041,38 @@ namespace LacertMCP.Server.Session
                 // P15-016 — attach the existing entry's CreatedAt to the
                 // 9102 context dict so the operator sees BOTH timestamps
                 // when triaging a key collision; P15-074 — fingerprint-
-                // mismatch branch carries cachedFingerprintPrefix +
-                // requestedFingerprintPrefix (first 8 chars only, full
-                // base64 is noise).
-                var cachedFp = entry.PayloadFingerprint ?? string.Empty;
-                var requestedFp = payload ?? string.Empty;
+                // mismatch branch USED TO carry cachedFingerprintPrefix +
+                // requestedFingerprintPrefix.
+                //
+                // P17-007 — those prefixes ARE keyed-HMAC now (random
+                // process-local key) so they're no longer an offline
+                // brute-force oracle on small-search-space PII
+                // (SSN ~30 bits, DOB ~15 bits, routing ~26 bits). The
+                // additional belt-and-suspenders here: the prefix keys
+                // ship in the wire envelope only when LACERTE_DEBUG_WIRE=1
+                // is enabled. In the default ops posture the operator
+                // triages via existingEntryCreatedAt + existingEntryAgeMs
+                // (most actionable signal anyway), and the prefix never
+                // touches the wire. Turning on LACERTE_DEBUG_WIRE is an
+                // explicit operator action that already enables wire
+                // payload logging — adding the HMAC prefix to that
+                // controlled diagnostic surface is consistent. Avoids the
+                // P17-007 disclosure even in the unlikely event a future
+                // refactor un-HMACs the function.
                 var data = new Dictionary<string, object?>
                 {
                     ["idempotencyKey"] = key,
-                    ["reason"] = "Idempotency key reused with a different payload fingerprint.",
+                    ["reason"] = "Idempotency key reused with a different payload. Pick a fresh key, or replay the original payload byte-for-byte.",
                     ["existingEntryCreatedAt"] = entry.CreatedAt.ToString("O"),
                     ["existingEntryAgeMs"] = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds,
-                    ["cachedFingerprintPrefix"] = cachedFp.Substring(0, Math.Min(8, cachedFp.Length)),
-                    ["requestedFingerprintPrefix"] = requestedFp.Substring(0, Math.Min(8, requestedFp.Length)),
                 };
+                if (Logging.WireLog.IsEnabled)
+                {
+                    var cachedFp = entry.PayloadFingerprint ?? string.Empty;
+                    var requestedFp = payload ?? string.Empty;
+                    data["cachedFingerprintPrefix"] = cachedFp.Substring(0, Math.Min(8, cachedFp.Length));
+                    data["requestedFingerprintPrefix"] = requestedFp.Substring(0, Math.Min(8, requestedFp.Length));
+                }
                 throw new LacerteSDKError(SyntheticStatusCodes.IdempotencyConflict, data);
             }
             return false;
@@ -1902,6 +2083,14 @@ namespace LacertMCP.Server.Session
             if (string.IsNullOrEmpty(key)) return;
             _idempotencyCache[key!] = new IdempotencyCacheEntry(
                 payload, result, DateTimeOffset.UtcNow);
+
+            // P17-004 — persist on every Store so a crash after this point
+            // still has the entry on disk for the next process to pick up.
+            // PersistIdempotencyCacheToDisk is best-effort and single-flight
+            // gated so concurrent writers don't pile on the file lock;
+            // logging failure inside StoreIdempotent must not poison the
+            // happy path of an already-successful wire write.
+            PersistIdempotencyCacheToDisk();
 
             // P14-013/P14-064 — opportunistic eviction when over cap. Drop
             // expired entries first; if still over cap, batch-drop the
@@ -1976,6 +2165,276 @@ namespace LacertMCP.Server.Session
                 }
             }
         }
+
+        // ===================================================================
+        // P17-004 — Idempotency cache disk persistence
+        //
+        // Default ON; disable via LACERTE_IDEMPOTENCY_PERSIST=0. Storage at
+        // %APPDATA%/lacerte-mcp/idempotency-cache.json (Windows) or
+        // ~/.config/lacerte-mcp/idempotency-cache.json (POSIX). Overridable
+        // via LACERTE_IDEMPOTENCY_PERSIST_PATH for tests + ops who want a
+        // custom location.
+        //
+        // Writes are best-effort and never throw out of StoreIdempotent —
+        // persistence failure must not poison an already-successful wire
+        // write. Reads filter out expired (> IdempotencyTtl) entries and
+        // skip unknown result-type discriminators rather than throwing,
+        // so a forward-compat file (written by a newer build) loads
+        // partially in an older build rather than crashing the cold start.
+        // ===================================================================
+
+        private string ResolveIdempotencyCachePath()
+            => ResolveIdempotencyCachePath(ReadProcessEnv());
+
+        private string ResolveIdempotencyCachePath(IDictionary<string, string?> env)
+        {
+            var explicitPath = TryGet(env, "LACERTE_IDEMPOTENCY_PERSIST_PATH");
+            if (!string.IsNullOrEmpty(explicitPath))
+            {
+                return explicitPath!;
+            }
+            string baseDir;
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+            {
+                baseDir = TryGet(env, "APPDATA")
+                    ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            }
+            else
+            {
+                var xdg = TryGet(env, "XDG_CONFIG_HOME");
+                if (!string.IsNullOrEmpty(xdg)) baseDir = xdg!;
+                else
+                {
+                    var home = TryGet(env, "HOME")
+                        ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    baseDir = Path.Combine(home, ".config");
+                }
+            }
+            return Path.Combine(baseDir, "lacerte-mcp", "idempotency-cache.json");
+        }
+
+        // Persisted file shape:
+        //   {
+        //     "version": 1,
+        //     "entries": [
+        //       { "key": "...", "fingerprint": "...", "resultType": "int",
+        //         "resultValue": 1, "createdAt": "2026-..." }
+        //     ]
+        //   }
+        private sealed class PersistedEntry
+        {
+            public string Key { get; set; } = string.Empty;
+            public string Fingerprint { get; set; } = string.Empty;
+            public string ResultType { get; set; } = string.Empty;
+            public JsonElement ResultValue { get; set; }
+            public DateTimeOffset CreatedAt { get; set; }
+        }
+
+        private sealed class PersistedCache
+        {
+            public int Version { get; set; } = 1;
+            public List<PersistedEntry> Entries { get; set; } = new List<PersistedEntry>();
+        }
+
+        private static readonly JsonSerializerOptions s_persistJsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = false,
+        };
+
+        private void LoadIdempotencyCacheFromDisk()
+        {
+            if (string.IsNullOrEmpty(_idempotencyCachePath)) return;
+            try
+            {
+                if (!File.Exists(_idempotencyCachePath)) return;
+                var json = File.ReadAllText(_idempotencyCachePath);
+                if (string.IsNullOrWhiteSpace(json)) return;
+                var parsed = JsonSerializer.Deserialize<PersistedCache>(json, s_persistJsonOptions);
+                if (parsed?.Entries == null) return;
+                var now = DateTimeOffset.UtcNow;
+                int loaded = 0;
+                int expired = 0;
+                int skipped = 0;
+                foreach (var p in parsed.Entries)
+                {
+                    if (string.IsNullOrEmpty(p.Key) || string.IsNullOrEmpty(p.Fingerprint)) { skipped++; continue; }
+                    if (now - p.CreatedAt > IdempotencyTtl) { expired++; continue; }
+                    object? result = TryRehydrateResult(p.ResultType, p.ResultValue);
+                    if (result == null && !string.Equals(p.ResultType, "null", StringComparison.Ordinal))
+                    {
+                        // Unknown discriminator (forward-compat) — skip, do
+                        // NOT crash the cold start.
+                        skipped++;
+                        continue;
+                    }
+                    _idempotencyCache[p.Key] = new IdempotencyCacheEntry(p.Fingerprint, result, p.CreatedAt);
+                    loaded++;
+                }
+                try
+                {
+                    WireLog.RecordSync<bool>("Idempotency.loadedFromDisk",
+                        new
+                        {
+                            path = _idempotencyCachePath,
+                            loaded,
+                            expired,
+                            skipped,
+                        },
+                        () => true);
+                }
+                catch { /* logging is best-effort */ }
+            }
+            catch (Exception ex)
+            {
+                // Best-effort load. A corrupted file becomes a cold start —
+                // never a startup crash. The next StoreIdempotent will
+                // overwrite the bad file with a fresh serialization.
+                try
+                {
+                    WireLog.RecordSync<bool>("Idempotency.loadFromDiskFailed",
+                        new
+                        {
+                            path = _idempotencyCachePath,
+                            reason = ex.Message,
+                        },
+                        () => true);
+                }
+                catch { /* logging is best-effort */ }
+            }
+        }
+
+        private static object? TryRehydrateResult(string resultType, JsonElement value)
+        {
+            // Two well-known result types live in the manager today; future
+            // chokepoints that introduce new result types must add a case
+            // here. Unknown types return null (signal to caller to skip).
+            switch (resultType)
+            {
+                case "int":
+                    if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var i))
+                        return i;
+                    return null;
+                case "create-client":
+                    if (value.ValueKind != JsonValueKind.Object) return null;
+                    int status = 0;
+                    string? clientNumber = null;
+                    if (value.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.Number
+                        && s.TryGetInt32(out var statusInt)) status = statusInt;
+                    if (value.TryGetProperty("clientNumber", out var c))
+                    {
+                        clientNumber = c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+                    }
+                    return new CreateClientResult(status, clientNumber);
+                case "null":
+                    return null;
+                default:
+                    return null;
+            }
+        }
+
+        private void PersistIdempotencyCacheToDisk()
+        {
+            if (!_idempotencyPersistEnabled) return;
+            if (string.IsNullOrEmpty(_idempotencyCachePath)) return;
+            // Single-flight: skip if another thread is mid-persist. The
+            // winning thread always serializes the FULL cache so any
+            // entries added between flights are picked up by the next
+            // successful persist.
+            if (Interlocked.CompareExchange(ref _persistingIdempotency, 1, 0) != 0) return;
+            try
+            {
+                var snapshot = new PersistedCache();
+                foreach (var kv in _idempotencyCache)
+                {
+                    var entry = kv.Value;
+                    var persisted = TryPersistEntry(kv.Key, entry);
+                    if (persisted != null) snapshot.Entries.Add(persisted);
+                }
+                var dir = Path.GetDirectoryName(_idempotencyCachePath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir!);
+                }
+                // Atomic-ish write: serialize to a sibling tmp file then
+                // File.Replace/Move. Avoids leaving a half-written cache
+                // visible to a concurrent reader after a crash.
+                var tmp = _idempotencyCachePath + ".tmp";
+                var json = JsonSerializer.Serialize(snapshot, s_persistJsonOptions);
+                File.WriteAllText(tmp, json);
+                if (File.Exists(_idempotencyCachePath))
+                {
+                    File.Delete(_idempotencyCachePath);
+                }
+                File.Move(tmp, _idempotencyCachePath);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort persist. A disk full / permission denied / etc.
+                // must not poison the happy path — the cache stays in
+                // memory and the worst case is a process restart loses
+                // the prior writes (back to pre-P17-004 behavior).
+                try
+                {
+                    WireLog.RecordSync<bool>("Idempotency.persistToDiskFailed",
+                        new
+                        {
+                            path = _idempotencyCachePath,
+                            reason = ex.Message,
+                        },
+                        () => true);
+                }
+                catch { /* logging is best-effort */ }
+            }
+            finally
+            {
+                Volatile.Write(ref _persistingIdempotency, 0);
+            }
+        }
+
+        private static PersistedEntry? TryPersistEntry(string key, IdempotencyCacheEntry entry)
+        {
+            string discriminator;
+            object? valueForJson;
+            switch (entry.Result)
+            {
+                case null:
+                    discriminator = "null";
+                    valueForJson = null;
+                    break;
+                case int i:
+                    discriminator = "int";
+                    valueForJson = i;
+                    break;
+                case CreateClientResult ccr:
+                    discriminator = "create-client";
+                    valueForJson = new { status = ccr.Status, clientNumber = ccr.ClientNumber };
+                    break;
+                default:
+                    // Unknown result type — skip this entry rather than
+                    // crashing or persisting an opaque blob we can't
+                    // rehydrate. The next process gets a cold-miss for
+                    // this key, which is no worse than pre-P17-004.
+                    return null;
+            }
+            // Round-trip the value through JsonElement so the stored shape
+            // matches the load shape.
+            var rendered = JsonSerializer.SerializeToElement(valueForJson, s_persistJsonOptions);
+            return new PersistedEntry
+            {
+                Key = key,
+                Fingerprint = entry.PayloadFingerprint,
+                ResultType = discriminator,
+                ResultValue = rendered,
+                CreatedAt = entry.CreatedAt,
+            };
+        }
+
+        // Internal test seam — let tests force a persist outside the normal
+        // StoreIdempotent path for isolation.
+        internal bool IdempotencyPersistEnabled => _idempotencyPersistEnabled;
+        internal string? IdempotencyCachePath => _idempotencyCachePath;
+        internal void ForcePersistIdempotencyCacheForTest() => PersistIdempotencyCacheToDisk();
 
         // P15-050 / P15-043 — internal test seam. Some bridge-fake tests
         // (live-mode + a recording / fake ILacerteBridge) bypass the real
@@ -2104,21 +2563,58 @@ namespace LacertMCP.Server.Session
         // writes, but the options cache is essentially free.
         private static readonly JsonSerializerOptions s_payloadJsonOptions = new JsonSerializerOptions();
 
+        // P17-007 — process-local HMAC key for idempotency payload fingerprints.
+        // Round-3 P15-074 added `cachedFingerprintPrefix` (8 hex chars / 48
+        // bits) to the 9102 IdempotencyConflict envelope as a triage aid.
+        // That prefix is a deterministic SHA-256 of the (op, args) tuple,
+        // where args for WriteField includes the raw `value` — so an
+        // attacker (or an injection-controlled LLM) who guesses the
+        // idempotency key naming convention can iterate guesses on `value`
+        // and brute-force a cached secret (SSN ~30 bits, DOB ~15 bits,
+        // routing number ~26 bits effective). 48 bits is wider than every
+        // small-search-space PII space.
+        //
+        // Switching to HMAC-SHA-256 keyed with a process-local random byte
+        // string foreclosed the offline brute-force: the attacker has the
+        // prefix but not the key. The triage UX is preserved — two distinct
+        // payloads still produce two distinct prefixes within the same
+        // process — and the in-memory cache lookup at TryReplayIdempotent
+        // still works because both sides of the equality check go through
+        // the same keyed function. Process-local scope is correct: cross-
+        // restart cache misses are already inevitable (cache is in-memory
+        // only; P17-004 cold-start surfacing makes this explicit), so
+        // there's no cross-restart key-rotation problem.
+        //
+        // Generated lazily on first BuildPayload call so test-only paths
+        // that never compute a fingerprint don't pay the RNG cost.
+        private static readonly Lazy<byte[]> s_idempotencyHmacKey = new Lazy<byte[]>(() =>
+        {
+            var key = new byte[32];
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(key);
+            }
+            return key;
+        }, isThreadSafe: true);
+
         private static string BuildPayload(string op, params object?[] args)
         {
-            // Canonicalize the operation + args to a JSON blob, then SHA-256
-            // it. This is deterministic for primitive args; for complex args
-            // (DetailRow, CreateClientArgs) the JsonSerializer's default
-            // contract is stable across calls in the same process.
+            // Canonicalize the operation + args to a JSON blob, then keyed
+            // HMAC-SHA-256 it. Deterministic for primitive args within a
+            // single process (which is all the in-memory cache needs); not
+            // a public oracle of caller-controlled inputs because the key
+            // is process-local random. For complex args (DetailRow,
+            // CreateClientArgs) JsonSerializer's default contract is stable
+            // across calls in the same process.
             var canon = new Dictionary<string, object?>
             {
                 ["op"] = op,
                 ["args"] = args,
             };
             var json = JsonSerializer.Serialize(canon, s_payloadJsonOptions);
-            using (var sha = SHA256.Create())
+            using (var hmac = new HMACSHA256(s_idempotencyHmacKey.Value))
             {
-                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(json));
+                var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(json));
                 return Convert.ToBase64String(bytes);
             }
         }

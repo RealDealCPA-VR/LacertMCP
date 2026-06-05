@@ -142,11 +142,39 @@ namespace LacertMCP.Server.Bridge
         /// type. Live verification deferred — the exact COM method shape is
         /// inferred from spec §2 (no validation, row-ordered append).
         /// Returns the TAPIStatus integer (1 = Success).
+        /// <para>
+        /// P17-001 — overload that accepts an optional <paramref name="replaceIndex"/>
+        /// so the bridge boundary mirrors the sim path's replace-vs-append
+        /// surface. The SDK has no documented update-by-index COM call;
+        /// when <paramref name="replaceIndex"/> is non-null this throws
+        /// <see cref="SyntheticStatusCodes.LiveReplaceIndexUnsupported"/>
+        /// (9019) BEFORE the WireLog wrap so a corrupted-but-Success
+        /// replay can never reach the operator.
+        /// </para>
         /// </summary>
         public static int WriteDetail(
-            string appId, string dataPath, string clientNumber, DetailRow row)
+            string appId, string dataPath, string clientNumber, DetailRow row,
+            int? replaceIndex = null)
         {
             if (row == null) throw new ArgumentNullException(nameof(row));
+
+            // P17-001 — fail-CLOSED on replaceIndex in live mode. The SDK's
+            // WriteToDetailFile only appends; silently dropping replaceIndex
+            // (the prior behavior of LacerteSessionManager's live branch)
+            // converted operator-intended row REPLACE into row APPEND while
+            // returning Success — the textbook two-mode-discipline violation.
+            // Raise BEFORE BridgeInputValidation so the operator sees a
+            // single targeted error rather than a generic input-shape one.
+            if (replaceIndex.HasValue)
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.LiveReplaceIndexUnsupported,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = "WriteDetail",
+                        ["clientNumber"] = clientNumber,
+                        ["replaceIndex"] = replaceIndex.Value,
+                    });
+            }
 
             // P14-050 — bridge-boundary defense-in-depth. Validates every
             // string on DetailRow (Series/Prefix/Code/Suffix/StateAbbr/

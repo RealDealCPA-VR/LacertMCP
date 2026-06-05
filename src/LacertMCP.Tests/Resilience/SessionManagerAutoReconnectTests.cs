@@ -123,7 +123,7 @@ namespace LacertMCP.Tests.Resilience
             }
 
             public int WriteDetail(string appId, string dataPath, int year, char module,
-                string clientNumber, DetailRow row)
+                string clientNumber, DetailRow row, int? replaceIndex)
                 => StatusCodes.Success;
 
             public BridgeCreateClientResult CreateClient(string appId, string dataPath, int year, char module,

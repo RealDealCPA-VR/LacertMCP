@@ -78,7 +78,8 @@ namespace LacertMCP.Tests.Integration
 
             // Sanity: ClientNumber (C1_0) is untouched — proves the write
             // didn't smear across fields.
-            Assert.True(row2.TryGetValue("ClientNumber", out var cn));
+            // P17-011 — wire key is camelCase clientNumber.
+            Assert.True(row2.TryGetValue("clientNumber", out var cn));
             Assert.Equal("1001", cn);
         }
     }

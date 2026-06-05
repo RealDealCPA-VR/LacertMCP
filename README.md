@@ -19,6 +19,7 @@ Bounding expectations up front saves a triage loop with the LLM:
 * **No organizer, client portal, letter template, or diagnostics-detail access** — those live in non-DBF Lacerte surfaces this MCP doesn't wire up.
 * **Single-operator only** — no concurrency control across multiple Lacerte users sharing one datapath. Don't point two MCP servers at the same `LACERTE_DATA_PATH` simultaneously.
 * **No archived / closed-copy / prior-firm-transfer file access** — the MCP sees the live working set under `{YY}Tax\{Module}Data`, not Lacerte's archive folders.
+* **No live UI refresh** — writes land on disk, but the Lacerte editor only rereads on client close/reopen. Verify a write actually landed via `lacerte_client_read` / `lacerte_table_read` (see Troubleshooting); the Lacerte UI staleness is structural, not an MCP defect.
 
 If you need any of the above, drive Lacerte directly — this MCP is designed to complement, not replace, the desktop UI.
 
@@ -180,6 +181,8 @@ The `App.config` next to `LacertMCP.Server.exe` carries `useLegacyV2RuntimeActiv
 ## First call from your LLM host
 
 Once Claude Desktop / Cursor / Windsurf can see the `lacerte` server, type `/` in Claude Desktop to surface MCP prompts — you should see `lacerte_client_intake`, `lacerte_review_ef_status`, `lacerte_field_write_bulk`, and `lacerte_csv_intake` from the `lacerte` server. (Cursor: `@lacerte`. Windsurf: see the host's prompt picker.)
+
+> If `/` does not surface any `lacerte_` prompts (or the tool picker shows nothing from the `lacerte` server), jump to the "Claude Desktop / Cursor MCP config saved, but no `lacerte_` tools appear" entry in the Troubleshooting section below for the 3-step diagnostic ladder.
 
 For a hands-on three-step verify the wiring works, type these prompts verbatim:
 
@@ -419,6 +422,23 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 - **Symptom:** `LacertMCP.Server.exe` immediately crashes on boot with a CLR loader error.
 - **Diagnosis:** The `App.config` next to `LacertMCP.Server.exe` was deleted or modified. The Lacerte SDK is a mixed-mode CLR assembly that needs `useLegacyV2RuntimeActivationPolicy="true"` plus `supportedRuntime v4.0 / .NETFramework v4.6` set in the host's `.config`.
 - **Fix:** Restore `App.config` from source control (or re-run `dotnet build` — MSBuild copies it next to the output). Don't delete it.
+
+### Claude Desktop / Cursor MCP config saved, but no `lacerte_` tools appear in the host's tool list
+
+- **Symptom:** The MCP-servers config block is in place, the host was restarted, but typing `/` (Claude Desktop) or `@` (Cursor) surfaces no `lacerte_` prompts and the tool picker shows nothing from the `lacerte` server.
+- **Diagnosis:** Three independent failure modes — boot crash, broken assembly registration, or host-config mismatch — present with the same silent symptom because most MCP hosts swallow the spawned process's stderr by default.
+- **Fix (3-step diagnostic ladder):**
+  1. **Confirm the server binary actually boots.** From PowerShell on the same machine the host is running on, run `& "C:\path\to\LacertMCP.Server.exe"` directly (use the absolute path you put in the host config). If it exits immediately with a CLR loader error, jump to the `BadImageFormatException` entry above (App.config missing or modified). If it hangs waiting for stdio input, that is healthy — Ctrl+C and continue to step 2.
+  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists ~22 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
+  3. **Inspect the host's stderr capture for the spawned process.** Claude Desktop writes spawned-MCP stderr to `%APPDATA%\Claude\logs\mcp*.log` (one file per server, named after the `mcpServers` key). Cursor writes to its own `~/.cursor/logs/` tree; Windsurf surfaces it in its log pane. The exit code and any uncaught exception will be there. If the log is empty, the host may not be invoking the binary at all — re-check the config path on disk.
+
+### `lacerte_field_write` returned success but my change is not visible in Lacerte
+
+- **Symptom:** A field-write or detail-write tool returns `success: true` with a valid `cid`, but the Lacerte editor window still displays the old value when the operator looks at the return.
+- **Diagnosis:** Lacerte's editor displays a cached view of the currently-open return; DBF / COM writes land on disk, but the editor does not reread them while the client is open in the UI. This is structural to how the Lacerte desktop app works, not an MCP defect — but the same write replayed through the MCP read tools will show the new value immediately.
+- **Fix (verify-then-refresh):**
+  1. **Verify the write actually landed via the MCP.** Call `lacerte_client_read` or `lacerte_table_read` (whichever covers the field you wrote) against the same client and field. If the MCP read returns the new value, the write succeeded and the Lacerte UI is just stale — proceed to step 2. If the read still shows the old value, the write itself failed silently (escalate — check the wire log when `LACERTE_DEBUG_WIRE=1`).
+  2. **Refresh the Lacerte UI.** In Lacerte, **File → Close Client** and reopen the client, or restart Lacerte. The editor will reread from disk and surface the new value.
 
 ### `lacerte_list_datapaths` returns an empty list on a known-good install
 

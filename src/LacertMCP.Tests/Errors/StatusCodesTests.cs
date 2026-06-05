@@ -285,6 +285,47 @@ namespace LacertMCP.Tests.Errors
             Assert.Contains("C:\\Lacerte\\24Tax\\IData", info.Remediation);
         }
 
+        [Fact]
+        public void RemediationStrings_NoAllCapsIdSuffix_P17_006()
+        {
+            // P17-006 — sister sentinel to NamingConventionsTests'
+            // ToolParameters_NoAllCapsIdSuffix_P16_054_P16_080. The
+            // parameter-side test pins the wire param spellings (clientId /
+            // emailId / subClientId — camelCase `Id` per Microsoft Framework
+            // Design Guidelines). This test pins the SAME convention on
+            // every UserMessage / Remediation string in both catalogs so an
+            // LLM reading an error envelope and copy-pasting the parameter
+            // name back into a retry never sees the ALL-CAPS form. Prose
+            // mentions of the SDK's C# `ClientID` constructor or the wire-
+            // emitted StatusInfo.Name discriminators (e.g. "SubClientIDRequired")
+            // are excluded by inspecting only UserMessage + Remediation.
+            //
+            // Two-pronged catch: extending the regex to the four variants
+            // (clientID / ClientID / emailID / EmailID / subClientID /
+            // SubClientID) future-proofs against drift on related fields the
+            // next time the catalog grows.
+            var banned = new Regex(@"\b(?:subClientID|SubClientID|clientID|ClientID|emailID|EmailID)\b");
+
+            var allEntries =
+                SyntheticStatusCodes.StatusTable.Select(kv => new { Code = kv.Key, Info = kv.Value, Catalog = "synthetic" })
+                .Concat(StatusCodes.StatusTable.Select(kv => new { Code = kv.Key, Info = kv.Value, Catalog = "sdk" }));
+
+            var offenders = allEntries
+                .SelectMany(e => new[]
+                {
+                    new { e.Code, e.Catalog, Field = "UserMessage", Text = e.Info.UserMessage },
+                    new { e.Code, e.Catalog, Field = "Remediation", Text = e.Info.Remediation },
+                })
+                .Where(x => x.Text != null && banned.IsMatch(x.Text!))
+                .Select(x => $"[{x.Catalog} {x.Code}].{x.Field}: \"{x.Text}\"")
+                .ToList();
+
+            Assert.True(
+                offenders.Count == 0,
+                "Catalog UserMessage / Remediation strings must use camelCase `Id` (clientId / emailId / subClientId), not ALL-CAPS `ID`. Offenders: "
+                + string.Join("; ", offenders));
+        }
+
         [Theory]
         [InlineData(SyntheticStatusCodes.BridgeUnavailable)]
         [InlineData(SyntheticStatusCodes.InternalServerError)]
