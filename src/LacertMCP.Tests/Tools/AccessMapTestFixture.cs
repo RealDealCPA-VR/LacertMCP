@@ -72,16 +72,11 @@ namespace LacertMCP.Tests.Tools
 
         private static void ResetLoaderCache()
         {
-            // The loader exposes ResetCacheForTests as internal — we're in a
-            // separate assembly, so reflect on the private fields directly.
-            var t = typeof(FieldAccessMapLoader);
-            var moduleCacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-            var overlayCacheField = t.GetField("_overlayCache", BindingFlags.NonPublic | BindingFlags.Static);
-
-            // The fields are ConcurrentDictionary<TKey,TValue>; call .Clear()
-            // on each via the IDictionary interface.
-            (moduleCacheField?.GetValue(null) as System.Collections.IDictionary)?.Clear();
-            (overlayCacheField?.GetValue(null) as System.Collections.IDictionary)?.Clear();
+            // P18-020 — cache state moved into a single immutable
+            // AccessMapSnapshot swapped atomically by ReloadCaches; call it to
+            // install a fresh empty snapshot (semantically equivalent to
+            // clearing the two dictionaries from the previous design).
+            FieldAccessMapLoader.ReloadCaches();
         }
     }
 }

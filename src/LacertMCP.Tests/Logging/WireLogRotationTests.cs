@@ -140,7 +140,7 @@ namespace LacertMCP.Tests.Logging
 
                 WireLog.EnableForTests(dir, retentionDays: 14);
                 // Trigger a write so PruneOldLogs runs (gated by
-                // _lastPrunedDayOfYear which EnableForTests reset to -1).
+                // _lastPrunedUtcDate which EnableForTests reset to null).
                 WireLog.WriteForTest(dir, "probe", new { }, new { }, durationMs: 1);
                 WireLog.FlushForTests(dir);
 
@@ -223,6 +223,121 @@ namespace LacertMCP.Tests.Logging
             }
             finally
             {
+                WireLog.DisableForTests();
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+
+        [Fact]
+        public void Prune_FiresOnYearAnniversary_P18_018()
+        {
+            // P18-018 regression: _lastPrunedDayOfYear (old design) stored
+            // DateTime.UtcNow.DayOfYear, so a process that ran from day-of-
+            // year 150 in year N to day-of-year 150 in year N+1 short-
+            // circuited the prune for that calendar day. The fix moved the
+            // sentinel to DateTime.UtcNow.Date which is monotonically
+            // distinguishable across years.
+            //
+            // Strategy: drive only the GATE through the UtcNowProviderForTests
+            // seam (UtcNow.Date for `today` comparison). The real-clock
+            // PruneOldLogsLocked compares filename dates to real UtcNow.Date
+            // so the seeded stale file must be dated old relative to TODAY's
+            // real UtcNow.Date (90 days back, retention 14). With the buggy
+            // DayOfYear key, the second write's gate would short-circuit and
+            // prune would never run, so the stale file survives. With the
+            // fix, the gate flips on year-rollover and prune deletes the
+            // stale file.
+            var dir = NewTempDir("wirelog-yearflip");
+            var origProvider = WireLog.UtcNowProviderForTests;
+            try
+            {
+                // Step 1: pin the gate clock to year N, Dec 31.
+                int yearN = DateTime.UtcNow.Year + 100; // future-pin so we never collide w/ real UtcNow
+                var dayN = new DateTime(yearN, 12, 31, 12, 0, 0, DateTimeKind.Utc);
+                WireLog.UtcNowProviderForTests = () => dayN;
+
+                WireLog.EnableForTests(dir, retentionDays: 14);
+
+                // First write at dayN primes _lastPrunedUtcDate with the
+                // gate clock's date. Real prune runs here too but the dir
+                // is empty of stale files.
+                WireLog.WriteForTest(dir, "primer", new { }, new { }, durationMs: 1);
+                WireLog.FlushForTests(dir);
+
+                // Step 2: advance the gate clock to year N+1, Dec 31. Same
+                // DayOfYear (365) — the buggy design would NOT re-trigger
+                // prune. With the fix, dates differ so prune runs.
+                var dayNplus1 = new DateTime(yearN + 1, 12, 31, 12, 0, 0, DateTimeKind.Utc);
+                WireLog.UtcNowProviderForTests = () => dayNplus1;
+
+                // Seed a stale file dated 90 days before REAL today (so the
+                // real-clock prune in PruneOldLogsLocked picks it up).
+                var staleDate = DateTime.UtcNow.Date.AddDays(-90).ToString("yyyyMMdd");
+                var staleFile = Path.Combine(dir, $"lacerte-{staleDate}.log");
+                File.WriteAllText(staleFile, "{\"op\":\"stale\"}\n");
+                Assert.True(File.Exists(staleFile), "Sanity: stale file seeded.");
+
+                // Trigger a write whose GATE check fires only on a date
+                // change. Pre-P18-018 (DayOfYear key, 365 == 365) the gate
+                // would skip and the stale file would survive.
+                WireLog.WriteForTest(dir, "year-anniversary", new { }, new { }, durationMs: 1);
+                WireLog.FlushForTests(dir);
+
+                Assert.False(File.Exists(staleFile),
+                    "Year-anniversary write must still trigger retention prune (P18-018).");
+            }
+            finally
+            {
+                WireLog.UtcNowProviderForTests = origProvider;
+                WireLog.DisableForTests();
+                try { Directory.Delete(dir, recursive: true); } catch { }
+            }
+        }
+
+        [Fact]
+        public void Prune_SkipsRepeatedWritesWithinSameUtcDay_P18_018()
+        {
+            // Complement to the year-anniversary test: the gating must
+            // still suppress prune for repeated writes within the same UTC
+            // day. Otherwise the dir-scan would degrade hot-path perf.
+            //
+            // Verifies gate behavior using the test clock seam: lock the
+            // seam at a fixed instant, write once (primes the sentinel),
+            // seed a stale file AFTER the first write, write again at the
+            // same instant. The second write should NOT prune because the
+            // gate sees same UtcNow.Date as the primer.
+            var dir = NewTempDir("wirelog-sameday");
+            var origProvider = WireLog.UtcNowProviderForTests;
+            try
+            {
+                int yearN = DateTime.UtcNow.Year + 100;
+                var clock = new DateTime(yearN, 7, 15, 8, 0, 0, DateTimeKind.Utc);
+                WireLog.UtcNowProviderForTests = () => clock;
+
+                WireLog.EnableForTests(dir, retentionDays: 14);
+
+                // First write primes the prune sentinel.
+                WireLog.WriteForTest(dir, "first", new { }, new { }, durationMs: 1);
+                WireLog.FlushForTests(dir);
+
+                // Seed a stale file AFTER the primer write — dated 90 days
+                // before REAL today so the real-clock prune would catch it
+                // if it ran.
+                var staleDate = DateTime.UtcNow.Date.AddDays(-90).ToString("yyyyMMdd");
+                var staleFile = Path.Combine(dir, $"lacerte-{staleDate}.log");
+                File.WriteAllText(staleFile, "{\"op\":\"stale\"}\n");
+
+                // Same-day second write — gate sees _lastPrunedUtcDate ==
+                // today so prune is suppressed and the stale file survives.
+                WireLog.WriteForTest(dir, "second-same-day", new { }, new { }, durationMs: 1);
+                WireLog.FlushForTests(dir);
+
+                Assert.True(File.Exists(staleFile),
+                    "Same-day repeat write must NOT re-run prune (gating suppression preserved).");
+            }
+            finally
+            {
+                WireLog.UtcNowProviderForTests = origProvider;
                 WireLog.DisableForTests();
                 try { Directory.Delete(dir, recursive: true); } catch { }
             }

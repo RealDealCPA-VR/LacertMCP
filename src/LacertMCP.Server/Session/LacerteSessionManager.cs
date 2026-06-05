@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -194,6 +195,20 @@ namespace LacertMCP.Server.Session
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _idempotencyLocks =
             new ConcurrentDictionary<string, SemaphoreSlim>();
 
+        // P18-032 — per-key acquire-timestamp tracker for lacerte_active_locks.
+        // Stamped AFTER WaitAsync wins (so the value reflects acquisition
+        // time, not enqueue time) and cleared in the finally block before
+        // Release. ConcurrentDictionary so the observation snapshot never
+        // blocks the write path.
+        private readonly ConcurrentDictionary<string, long> _idempotencyLockHeldSince =
+            new ConcurrentDictionary<string, long>();
+
+        // P18-026 / P18-030 — monotonic high-water mark on the idempotency
+        // cache size. Updated after every successful Store; survives evictions
+        // (so the LLM can ask "has this cache ever sat near the cap?" even
+        // after pressure eased). Atomic via Interlocked.Exchange.
+        private long _idempotencyPeakCount;
+
         // P14-013/P14-064 — bound the cache so a long-running session can't
         // leak idempotency entries forever. TTL matches the 24h Intuit auth
         // window (entries created before re-auth are semantically stale).
@@ -215,6 +230,31 @@ namespace LacertMCP.Server.Session
         // pass is in progress. Losers of the CompareExchange race simply
         // skip the eviction; if still over cap next time they get a turn.
         private int _evictingIdempotency;
+
+        // P18 — per-(clientNumber) write serialization. The idempotency
+        // semaphore at ExecuteWithIdempotencyLock only serializes callers
+        // sharing the SAME idempotencyKey; two different keys (or two
+        // null-key callers) hitting the same client interleave the
+        // capture → write → undo triple inside Apply*WithUndo and
+        // corrupt the underlying row (replaceIndex restore writes a stale
+        // prior over a fresh in-flight write) or the underlying list
+        // (append-undo blindly trims Count-1 instead of identifying the
+        // appended row). The fix wraps the entire dry-run pipeline in
+        // a per-client lock so capture/write/undo runs atomically per
+        // client; the inner lock(list) inside Apply*WithUndo stays as
+        // defense-in-depth for any future direct-helper caller.
+        //
+        // The map is bounded opportunistically (entries are cheap monitors
+        // and the operator profile is one box) — eviction lives with
+        // module disposal in Phase 9 if it ever matters; for now the
+        // worst case is a long-lived map keyed by every ClientNumber the
+        // operator's tax-pro flow ever touched, which is bounded by the
+        // operator's client roster (low thousands).
+        private readonly ConcurrentDictionary<string, object> _clientWriteLocks =
+            new ConcurrentDictionary<string, object>(StringComparer.Ordinal);
+
+        private object GetClientWriteLock(string clientNumber)
+            => _clientWriteLocks.GetOrAdd(clientNumber, _ => new object());
 
         // ===================================================================
         // Construction
@@ -429,8 +469,15 @@ namespace LacertMCP.Server.Session
                     int taxYear = Context?.Year ?? _defaultTaxYear ?? DateTimeOffset.UtcNow.Year;
                     var appName = _appName ?? DefaultAppName;
                     // F12 — wrap in AutoReconnect for transient COM retries.
+                    // P18 — opName threads through to AutoReconnect's
+                    // WireLog records so a forensic grep can tell read
+                    // retries (safe) from append-only write retries
+                    // (DECISIONS.md treats those as REQUIRING post-call
+                    // verification — see "AutoReconnect transient-retry is
+                    // unsafe for append-only wire ops" entry).
                     int liveStatus = await AutoReconnect.WithRetry<int>(() =>
-                        Task.FromResult(_bridge.Register(appName, appId.Value.ToString("D"), taxYear)))
+                        Task.FromResult(_bridge.Register(appName, appId.Value.ToString("D"), taxYear)),
+                        opName: "Register")
                         .ConfigureAwait(false);
                     if (liveStatus == StatusCodes.AccessGranted)
                     {
@@ -694,7 +741,8 @@ namespace LacertMCP.Server.Session
                     return WireLog.RecordSync<bool>("CanUseNewApis",
                         new { year = key.Year, module = key.Module.ToString() },
                         () => AutoReconnect.WithRetrySync<bool>(
-                            () => _bridge.CanUseNewApis(appIdStr, key.Year, key.Module)));
+                            () => _bridge.CanUseNewApis(appIdStr, key.Year, key.Module),
+                            opName: "CanUseNewApis"));
                 }
                 return key.Year >= 2021;
             });
@@ -1133,9 +1181,21 @@ namespace LacertMCP.Server.Session
                 // P14-042 — only compute the payload fingerprint when there's
                 // an idempotency key. JSON serialize + SHA-256 + base64 is
                 // wasted work on the common no-key write path.
+                // P18 — include dryRun in the payload fingerprint at all three
+                // BuildPayload call sites (WriteField/WriteDetail/CreateClient).
+                // Without it a dry-run preview cached at statusCode=Success
+                // shares a fingerprint with the real-write commit that follows
+                // (same op/args, opposite dryRun) — TryReplayIdempotent then
+                // short-circuits the real write to Success while the wire
+                // never fires. The hazard amplifies with P17-004 disk
+                // persistence: a preview survives process restart and poisons
+                // the next session's commit. Within-mode contract (two
+                // dry-runs replay, two real writes replay) is preserved; the
+                // cross-mode same-key reuse now correctly surfaces as
+                // 9102 IdempotencyConflict instead of silent no-op.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientId, stateAbbrev);
+                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientId, stateAbbrev, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
@@ -1179,9 +1239,11 @@ namespace LacertMCP.Server.Session
                             {
                                 // TY21+ → UpdateTaxReturn keyed by ClientNumber.
                                 // F12 — wrap in AutoReconnect for transient COM retries.
+                                // P18 — opName surfaces in retry log records.
                                 inner = await AutoReconnect.WithRetry<int>(() =>
                                     Task.FromResult(_bridge.UpdateTaxReturn(appId, ctx.DataPath, ctx.Year, ctx.Module,
-                                        table, clientNumber, field, value, subClientId, stateAbbrev)))
+                                        table, clientNumber, field, value, subClientId, stateAbbrev)),
+                                    opName: "WriteField")
                                     .ConfigureAwait(false);
                             }
                             else
@@ -1218,19 +1280,42 @@ namespace LacertMCP.Server.Session
                         // then restore in finally. Cost: O(1) per dry-run
                         // write vs O(active-module) for the old whole-module
                         // snapshot.
+                        //
+                        // P18 — serialize the entire capture → write → undo
+                        // pipeline against other concurrent writes targeting
+                        // the same client. The per-key idempotency semaphore
+                        // only serializes same-key callers; two different
+                        // keys (or a null-key caller) targeting the same row
+                        // race on the capture-then-write step and can leave
+                        // a stale prior pinned over a real in-flight write
+                        // on undo. The inner row.Fields dict mutation stays
+                        // as-is; this lock just brackets the dry-run pair.
                         Action? undo = null;
-                        try
+                        lock (GetClientWriteLock(clientNumber))
                         {
-                            inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew, out undo);
-                        }
-                        finally
-                        {
-                            undo?.Invoke();
+                            try
+                            {
+                                inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew, out undo);
+                            }
+                            finally
+                            {
+                                undo?.Invoke();
+                            }
                         }
                     }
                     else
                     {
-                        inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew);
+                        // P18 — non-dry-run writes also take the per-client
+                        // lock so an in-flight dry-run probe (which holds
+                        // the lock across capture/write/undo) cannot race
+                        // a real write on the same client. Without this the
+                        // probe's undo could fire after a real write's
+                        // capture but before its mutation, corrupting the
+                        // real write's prior-value snapshot.
+                        lock (GetClientWriteLock(clientNumber))
+                        {
+                            inner = ApplySimFieldWrite(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew);
+                        }
                     }
                     return inner;
                 }).ConfigureAwait(false);
@@ -1266,9 +1351,10 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
+                // P18 — dryRun in the fingerprint; see WriteField for context.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("WriteDetail", clientNumber, row, replaceIndex);
+                    : BuildPayload("WriteDetail", clientNumber, row, replaceIndex, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
@@ -1327,8 +1413,16 @@ namespace LacertMCP.Server.Session
                             // threaded through to the bridge interface (P17-001)
                             // so a future SDK update-by-index path doesn't need
                             // a second signature change.
+                            // P18 — opName="WriteDetail" surfaces in the retry
+                            // log so an operator can grep for append-only
+                            // writes that retried (DECISIONS.md flags those
+                            // as REQUIRING post-call verification because the
+                            // SDK's WriteToDetailFile is append-only and a
+                            // post-commit transient retry produces duplicate
+                            // rows).
                             inner = await AutoReconnect.WithRetry<int>(() =>
-                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row, replaceIndex)))
+                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row, replaceIndex)),
+                                opName: "WriteDetail")
                                 .ConfigureAwait(false);
                         }
                     }
@@ -1337,19 +1431,35 @@ namespace LacertMCP.Server.Session
                         // P14-043 — per-operation undo. Capture (clientNumber,
                         // index, priorRow) inside the lock, mutate, restore on
                         // exit. O(1) vs old whole-module snapshot.
+                        //
+                        // P18 — serialize capture → write → undo against
+                        // other concurrent writes on the same client. The
+                        // append-path undo blindly trims Count-1 today; even
+                        // with this lock the append path also gets the
+                        // reference-equality remove fix below as
+                        // defense-in-depth. See WriteField for full reasoning.
                         Action? undo = null;
-                        try
+                        lock (GetClientWriteLock(clientNumber))
                         {
-                            inner = ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo);
-                        }
-                        finally
-                        {
-                            undo?.Invoke();
+                            try
+                            {
+                                inner = ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo);
+                            }
+                            finally
+                            {
+                                undo?.Invoke();
+                            }
                         }
                     }
                     else
                     {
-                        inner = ApplySimDetailWrite(ctx, clientNumber, row, replaceIndex);
+                        // P18 — non-dry-run path takes the same per-client
+                        // lock so a concurrent dry-run probe cannot interleave
+                        // with the real write's mutation. See WriteField.
+                        lock (GetClientWriteLock(clientNumber))
+                        {
+                            inner = ApplySimDetailWrite(ctx, clientNumber, row, replaceIndex);
+                        }
                     }
                     return inner;
                 }).ConfigureAwait(false);
@@ -1384,9 +1494,14 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
+                // P18 — dryRun in the fingerprint; see WriteField for context.
+                // CreateClient's dry-run cache poison is particularly severe
+                // because the cached `(Success, ClientNumber=null)` makes the
+                // real-write retry return Success with no ClientNumber — the
+                // operator silently never gets a client created.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("CreateClient", args);
+                    : BuildPayload("CreateClient", args, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out CreateClientResult cached))
                 {
@@ -1452,12 +1567,18 @@ namespace LacertMCP.Server.Session
                         else
                         {
                             var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                            // F12 — wrap in AutoReconnect.
+                            // F12 — wrap in AutoReconnect. P18 — opName surfaces
+                            // in retry log records; CreateClient is one of the
+                            // append-only ops DECISIONS.md flags as REQUIRING
+                            // post-call verification on retry (the SDK's
+                            // IClientIDDuplicated=9 rejection on attempts 2+
+                            // can MASK a successful commit on attempt 1).
                             var bridgeResult = await AutoReconnect.WithRetry<BridgeCreateClientResult>(() =>
                                 Task.FromResult(_bridge.CreateClient(
                                     appId, ctx.DataPath, ctx.Year, ctx.Module,
                                     args.ClientId, args.TaxType,
-                                    args.FirstName, args.LastName, args.EmailId)))
+                                    args.FirstName, args.LastName, args.EmailId)),
+                                opName: "CreateClient")
                                 .ConfigureAwait(false);
                             inner = new CreateClientResult(bridgeResult.Status, bridgeResult.ClientNumber);
                         }
@@ -1718,7 +1839,9 @@ namespace LacertMCP.Server.Session
                 undo = () =>
                 {
                     if (hadPrior) capturedRow.Fields[capturedField] = priorValue;
-                    else capturedRow.Fields.Remove(capturedField);
+                    // P18-001: ConcurrentDictionary exposes TryRemove (Remove(TKey)
+                    // is only available via explicit IDictionary interface).
+                    else capturedRow.Fields.TryRemove(capturedField, out _);
                 };
             }
 
@@ -1772,13 +1895,28 @@ namespace LacertMCP.Server.Session
                 {
                     if (registerUndo)
                     {
+                        // P18 — identify "our" row by reference equality
+                        // rather than blindly trimming the tail. With the
+                        // per-client lock at WriteDetail above, concurrent
+                        // appends from a different client cannot race the
+                        // same list — but a future direct caller of this
+                        // helper outside the lock would silently corrupt
+                        // an unrelated row's removal on undo. Cheap
+                        // defense-in-depth.
                         var capturedList = list;
+                        var capturedRow = row;
                         undo = () =>
                         {
                             lock (capturedList)
                             {
-                                if (capturedList.Count > 0)
-                                    capturedList.RemoveAt(capturedList.Count - 1);
+                                for (int j = capturedList.Count - 1; j >= 0; j--)
+                                {
+                                    if (ReferenceEquals(capturedList[j], capturedRow))
+                                    {
+                                        capturedList.RemoveAt(j);
+                                        break;
+                                    }
+                                }
                             }
                         };
                     }
@@ -1839,7 +1977,22 @@ namespace LacertMCP.Server.Session
                 {
                     capturedModule.Clients.TryRemove(capturedClient, out _);
                     capturedModule.Details.TryRemove(capturedClient, out _);
-                    Interlocked.Exchange(ref capturedModule.NextClientNumber, capturedPriorNext);
+                    // P18 — only roll the counter back if no concurrent
+                    // CreateClient incremented between our Increment
+                    // (SimulationStore.SimulateCreateClient) and this undo.
+                    // The previous unconditional Interlocked.Exchange could
+                    // silently clobber a counter advanced by a parallel
+                    // real CreateClient, allowing a subsequent mint to
+                    // collide with the parallel call's ClientNumber and
+                    // overwrite its row via `store.Clients[clientNumber] =
+                    // row` (Dictionary indexer assignment, no throw, tax
+                    // data lost). Failing the CAS "leaks" our reserved
+                    // number — the next real mint just skips it. That's
+                    // the correct tradeoff vs silent client overwrite.
+                    Interlocked.CompareExchange(
+                        ref capturedModule.NextClientNumber,
+                        capturedPriorNext,
+                        capturedPriorNext + 1);
                 };
             }
 
@@ -1923,11 +2076,26 @@ namespace LacertMCP.Server.Session
         // P15-012 / P15-055 — lock entries are opportunistically evicted
         // alongside cache entries by EvictIdempotencyEntry, so the lock map
         // is bounded by IdempotencyCacheMaxEntries (10k) — same invariant
-        // as the cache. A concurrent waiter may briefly hold a since-evicted
-        // semaphore — worst case is one extra execution of the body
-        // (observationally equivalent to a cache miss); the atomic-pair
-        // TryRemove in EvictIdempotencyEntry keeps a new GetOrAdd from
-        // having its semaphore destroyed.
+        // as the cache. The atomic-pair TryRemove in EvictIdempotencyEntry
+        // keeps a NEW GetOrAdd from having its freshly-installed semaphore
+        // destroyed (that race is closed).
+        //
+        // P18 (round-5 correction of P15-055 reasoning) — the prior round
+        // assumed the worst case for an eviction-vs-waiter race was "one
+        // extra body execution (observationally equivalent to a cache
+        // miss)". That was wrong: the semaphore is DISPOSED, not just
+        // unlinked, so a thread that captured the reference via GetOrAdd
+        // BEFORE the evictor disposed it has its subsequent WaitAsync()
+        // throw ObjectDisposedException. The body never runs and the
+        // exception escapes WrapToolHandler as a generic 9203
+        // InternalServerError — exactly the failure mode the idempotency
+        // primitive was meant to prevent. Same hazard applies symmetrically
+        // on Release after WaitAsync wins but the evictor wins the next
+        // nanosecond. Bounded one-shot retry: catch ODE on attempt 0,
+        // re-GetOrAdd a fresh semaphore, try once more; if that also races,
+        // fall through to executing the body without serialization —
+        // observationally equivalent to a cache miss, which is the
+        // documented worst case.
         private async Task<T> ExecuteWithIdempotencyLock<T>(string? key, Func<Task<T>> body)
         {
             if (body == null) throw new ArgumentNullException(nameof(body));
@@ -1935,15 +2103,52 @@ namespace LacertMCP.Server.Session
             {
                 return await body().ConfigureAwait(false);
             }
-            var sem = _idempotencyLocks.GetOrAdd(key!, _ => new SemaphoreSlim(1, 1));
-            await sem.WaitAsync().ConfigureAwait(false);
+            SemaphoreSlim? sem = null;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                sem = _idempotencyLocks.GetOrAdd(key!, _ => new SemaphoreSlim(1, 1));
+                try
+                {
+                    await sem.WaitAsync().ConfigureAwait(false);
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Evictor disposed the semaphore between our GetOrAdd
+                    // and our WaitAsync. The eviction pass is single-flight
+                    // and already finished considering this key; the next
+                    // GetOrAdd installs a fresh semaphore cleanly.
+                    sem = null;
+                }
+            }
+            if (sem == null)
+            {
+                // Two consecutive disposals inside our GetOrAdd→WaitAsync
+                // window is statistically negligible but theoretically
+                // possible. Degrade to unlocked execution — equivalent to
+                // a cache miss, the documented worst-case behavior.
+                return await body().ConfigureAwait(false);
+            }
+            // P18-032 — stamp the acquire timestamp AFTER WaitAsync returns
+            // so a snapshot reflects ACTUAL hold time (not enqueue time).
+            // Stopwatch.GetTimestamp() is monotonic and never throws.
+            _idempotencyLockHeldSince[key!] = Stopwatch.GetTimestamp();
             try
             {
                 return await body().ConfigureAwait(false);
             }
             finally
             {
-                sem.Release();
+                // Clear the held-since marker BEFORE Release so a concurrent
+                // observer can't see "still held" after the semaphore went
+                // back to CurrentCount=1.
+                _idempotencyLockHeldSince.TryRemove(key!, out _);
+                // Symmetric race: if eviction won between our successful
+                // WaitAsync and this finally, Release on a disposed
+                // semaphore throws ObjectDisposedException. The body already
+                // ran and the caller's contract is met — swallow.
+                try { sem.Release(); }
+                catch (ObjectDisposedException) { /* see comment above */ }
             }
         }
 
@@ -1983,6 +2188,10 @@ namespace LacertMCP.Server.Session
                 // P14-013/P14-064 — expired entries: treat as miss + evict.
                 if (DateTimeOffset.UtcNow - entry.CreatedAt > IdempotencyTtl)
                 {
+                    // P18-027 — expired-entry path observationally a miss for
+                    // counter purposes (the caller will re-execute the body).
+                    try { LacertMCP.Server.Diagnostics.StatsRegistry.BumpIdempotencyMiss(); }
+                    catch { /* never poison */ }
                     // P15-016 — log the expiry so an operator can attribute
                     // a silent re-execute to TTL expiry rather than first
                     // time. PII-safe: the key is operator-supplied.
@@ -2001,6 +2210,10 @@ namespace LacertMCP.Server.Session
                 {
                     if (entry.Result is T match)
                     {
+                        // P18-027 — true cache hit: caller replays the cached
+                        // result without re-executing the body.
+                        try { LacertMCP.Server.Diagnostics.StatsRegistry.BumpIdempotencyHit(); }
+                        catch { /* never poison */ }
                         // P15-016 — log the cache hit so the operator can
                         // tell a successful tool call apart from one that
                         // actually hit the wire. Without this, a cached
@@ -2036,6 +2249,10 @@ namespace LacertMCP.Server.Session
                         ["existingEntryCreatedAt"] = entry.CreatedAt.ToString("O"),
                         ["existingEntryAgeMs"] = (DateTimeOffset.UtcNow - entry.CreatedAt).TotalMilliseconds,
                     };
+                    // P18-027 — type-mismatch reuse counts as a conflict for
+                    // the aggregate.
+                    try { LacertMCP.Server.Diagnostics.StatsRegistry.BumpIdempotencyConflict(); }
+                    catch { /* never poison */ }
                     throw new LacerteSDKError(SyntheticStatusCodes.IdempotencyConflict, typeData);
                 }
                 // P15-016 — attach the existing entry's CreatedAt to the
@@ -2073,8 +2290,14 @@ namespace LacertMCP.Server.Session
                     data["cachedFingerprintPrefix"] = cachedFp.Substring(0, Math.Min(8, cachedFp.Length));
                     data["requestedFingerprintPrefix"] = requestedFp.Substring(0, Math.Min(8, requestedFp.Length));
                 }
+                // P18-027 — fingerprint-mismatch reuse counts as a conflict.
+                try { LacertMCP.Server.Diagnostics.StatsRegistry.BumpIdempotencyConflict(); }
+                catch { /* never poison */ }
                 throw new LacerteSDKError(SyntheticStatusCodes.IdempotencyConflict, data);
             }
+            // P18-027 — no cached entry → caller will execute body → miss.
+            try { LacertMCP.Server.Diagnostics.StatsRegistry.BumpIdempotencyMiss(); }
+            catch { /* never poison */ }
             return false;
         }
 
@@ -2083,6 +2306,20 @@ namespace LacertMCP.Server.Session
             if (string.IsNullOrEmpty(key)) return;
             _idempotencyCache[key!] = new IdempotencyCacheEntry(
                 payload, result, DateTimeOffset.UtcNow);
+
+            // P18-030 — bump the peak counter so lacerte_cache_state can
+            // report the high-water mark across the process lifetime. Lock-
+            // free CAS loop: read current peak, compare to current count,
+            // swap only if we'd raise the bar. A torn read here is harmless
+            // (the cache size is already moving anyway).
+            long peakBefore;
+            long currentCount = _idempotencyCache.Count;
+            do
+            {
+                peakBefore = Interlocked.Read(ref _idempotencyPeakCount);
+                if (currentCount <= peakBefore) break;
+            }
+            while (Interlocked.CompareExchange(ref _idempotencyPeakCount, currentCount, peakBefore) != peakBefore);
 
             // P17-004 — persist on every Store so a crash after this point
             // still has the entry on disk for the next process to pick up.
@@ -2247,6 +2484,36 @@ namespace LacertMCP.Server.Session
             if (string.IsNullOrEmpty(_idempotencyCachePath)) return;
             try
             {
+                // P18 — one-shot orphaned-.tmp recovery. A prior persist
+                // that crashed during the legacy Delete-then-Move window (or
+                // any future torn write) leaves canonical missing while the
+                // .tmp file holds the most recent successfully-serialized
+                // snapshot. Promote it to canonical before the normal read
+                // so the cold start can salvage prior writes instead of
+                // losing them.
+                var tmpPath = _idempotencyCachePath + ".tmp";
+                if (!File.Exists(_idempotencyCachePath) && File.Exists(tmpPath))
+                {
+                    try
+                    {
+                        File.Move(tmpPath, _idempotencyCachePath);
+                        try
+                        {
+                            WireLog.RecordSync<bool>("Idempotency.recoveredFromOrphanedTmp",
+                                new { path = _idempotencyCachePath }, () => true);
+                        }
+                        catch { /* logging is best-effort */ }
+                    }
+                    catch { /* fall through to cold start */ }
+                }
+                else if (File.Exists(_idempotencyCachePath) && File.Exists(tmpPath))
+                {
+                    // Both exist (e.g. crash mid-WriteAllText before the
+                    // Replace was reached). The .tmp is partial/torn; delete
+                    // it to keep the directory clean and avoid confusing
+                    // future cold starts.
+                    try { File.Delete(tmpPath); } catch { /* best-effort */ }
+                }
                 if (!File.Exists(_idempotencyCachePath)) return;
                 var json = File.ReadAllText(_idempotencyCachePath);
                 if (string.IsNullOrWhiteSpace(json)) return;
@@ -2356,17 +2623,33 @@ namespace LacertMCP.Server.Session
                 {
                     Directory.CreateDirectory(dir!);
                 }
-                // Atomic-ish write: serialize to a sibling tmp file then
-                // File.Replace/Move. Avoids leaving a half-written cache
-                // visible to a concurrent reader after a crash.
+                // P18 — atomic create-or-replace. The prior Delete-then-Move
+                // sequence had a crash window where the canonical path was
+                // observably missing; a process kill / OS reboot / AV lock
+                // landing in that window left the canonical gone AND the
+                // .tmp orphaned, so the next process start cold-missed every
+                // idempotency key — defeating P17-004's promise on the exact
+                // retry scenario it was built to prevent (multi-row
+                // WriteDetail batches without replaceIndex APPEND on
+                // re-execution). File.Replace is a single NTFS atomic
+                // rename: the destination is never observably missing.
+                // destinationBackupFileName=null skips creating a .bak
+                // sibling; ignoreMetadataErrors=true tolerates ACL
+                // inheritance quirks on %APPDATA% under Windows Defender.
                 var tmp = _idempotencyCachePath + ".tmp";
                 var json = JsonSerializer.Serialize(snapshot, s_persistJsonOptions);
                 File.WriteAllText(tmp, json);
                 if (File.Exists(_idempotencyCachePath))
                 {
-                    File.Delete(_idempotencyCachePath);
+                    File.Replace(tmp, _idempotencyCachePath,
+                        destinationBackupFileName: null,
+                        ignoreMetadataErrors: true);
                 }
-                File.Move(tmp, _idempotencyCachePath);
+                else
+                {
+                    // First-ever persist: no canonical to replace.
+                    File.Move(tmp, _idempotencyCachePath);
+                }
             }
             catch (Exception ex)
             {
@@ -2663,7 +2946,200 @@ namespace LacertMCP.Server.Session
             // Dispose all idempotency-lock semaphores.
             foreach (var sem in _idempotencyLocks.Values) sem.Dispose();
         }
+
+        // ===================================================================
+        // P18-030 — Cache state introspection for lacerte_cache_state
+        // ===================================================================
+
+        /// <summary>
+        /// P18-030 — Pure in-memory snapshot of the three per-process caches
+        /// (idempotency, new-APIs branch decisions, edition probe). Safe to
+        /// call pre-Register — no wire I/O, no bridge access — so the LLM
+        /// can use this for cold-start diagnostics. O(N) on the idempotency
+        /// cache (single Linq pass; 10k cap) and O(1) on the others.
+        /// </summary>
+        public CacheStateSnapshot GetCacheSnapshot()
+        {
+            // _idempotencyCache is a ConcurrentDictionary; the enumeration
+            // is a best-effort snapshot which is exactly what we want — a
+            // strongly-consistent freeze would require global locking on the
+            // write path, which is not worth it for a diagnostic surface.
+            int count = _idempotencyCache.Count;
+            int cap = IdempotencyCacheMaxEntries;
+            bool nearCap = count >= (int)(cap * 0.9);
+            DateTimeOffset? oldest = null;
+            DateTimeOffset? newest = null;
+            foreach (var kv in _idempotencyCache)
+            {
+                var ts = kv.Value.CreatedAt;
+                if (oldest == null || ts < oldest.Value) oldest = ts;
+                if (newest == null || ts > newest.Value) newest = ts;
+            }
+
+            // _newApisCache is small (one entry per (year, module) pair the
+            // session has touched — typically <10). Enumerate trivially.
+            var newApisEntries = new List<NewApiCacheEntry>(_newApisCache.Count);
+            foreach (var kv in _newApisCache)
+            {
+                newApisEntries.Add(new NewApiCacheEntry(kv.Key.Year, kv.Key.Module.ToString(), kv.Value));
+            }
+
+            // _edition is single-value; read under the lock so we don't see
+            // a torn write during a probe.
+            EditionInfo? editionCopy;
+            lock (_editionLock)
+            {
+                editionCopy = _edition;
+            }
+            bool probed = editionCopy != null;
+            bool sentinelFailure = probed && string.Equals(editionCopy!.LacerteEdition, "Unavailable", StringComparison.Ordinal);
+
+            return new CacheStateSnapshot(
+                IdempotencyCount: count,
+                IdempotencyCap: cap,
+                IdempotencyTtlHours: (int)IdempotencyTtl.TotalHours,
+                IdempotencyNearCap: nearCap,
+                IdempotencyOldestCreatedAt: oldest,
+                IdempotencyNewestCreatedAt: newest,
+                IdempotencyPeakCount: Interlocked.Read(ref _idempotencyPeakCount),
+                IdempotencyPersistEnabled: _idempotencyPersistEnabled,
+                IdempotencyPersistPath: _idempotencyCachePath,
+                NewApisEntries: newApisEntries,
+                EditionProbed: probed,
+                EditionSentinelFailure: sentinelFailure,
+                Edition: probed ? editionCopy!.LacerteEdition : null,
+                EditionBuild: probed ? editionCopy!.LacerteBuild : null,
+                EditionSdkVersion: probed ? editionCopy!.SdkVersion : null);
+        }
+
+        // ===================================================================
+        // P18-032 — Active-lock introspection for lacerte_active_locks
+        // ===================================================================
+
+        /// <summary>
+        /// P18-032 — Pure in-memory snapshot of currently-held idempotency
+        /// semaphores. The introspection path itself never takes the lock,
+        /// so it cannot deadlock or perturb the system under observation.
+        /// Returns up to <paramref name="cap"/> held entries (default 20);
+        /// totals are reported regardless so a flood scenario is visible
+        /// without producing a runaway response.
+        /// </summary>
+        public ActiveLocksSnapshot GetActiveLocks(int cap = 20)
+        {
+            if (cap < 1) cap = 1;
+            if (cap > 500) cap = 500;
+            int totalTracked = _idempotencyLocks.Count;
+            int heldCount = 0;
+            var held = new List<ActiveLockEntry>();
+            long nowTicks = Stopwatch.GetTimestamp();
+            double tickFreq = Stopwatch.Frequency;
+            foreach (var kv in _idempotencyLocks)
+            {
+                SemaphoreSlim sem = kv.Value;
+                // ObjectDisposedException can fire if the evictor disposed
+                // the semaphore mid-enumeration. Skip — the entry will be
+                // gone from the next snapshot anyway.
+                int current;
+                try { current = sem.CurrentCount; }
+                catch (ObjectDisposedException) { continue; }
+                if (current == 0)
+                {
+                    heldCount++;
+                    if (held.Count >= cap) continue;
+                    double? heldForSec = null;
+                    if (_idempotencyLockHeldSince.TryGetValue(kv.Key, out var startTicks))
+                    {
+                        long elapsed = nowTicks - startTicks;
+                        if (elapsed > 0) heldForSec = elapsed / tickFreq;
+                    }
+                    // P18-032 — SHA256-prefix the key so an operator-supplied
+                    // idempotency identifier never leaks verbatim into the
+                    // diagnostic surface. 8 hex chars (32 bits) is enough
+                    // distinct space to correlate with WireLog cid lines and
+                    // the operator can recompute the prefix from the original
+                    // client-supplied key to identify which write is stuck.
+                    held.Add(new ActiveLockEntry(
+                        KeyHashPrefix: HashIdempotencyKeyForDiag(kv.Key),
+                        Held: true,
+                        HeldForSeconds: heldForSec));
+                }
+            }
+            return new ActiveLocksSnapshot(
+                Idempotency: held,
+                TotalLockEntries: totalTracked,
+                HeldCount: heldCount,
+                ReturnedCap: cap,
+                SnapshotAtUtc: DateTimeOffset.UtcNow);
+        }
+
+        // P18-032 — short SHA-256 prefix of an idempotency key, used only
+        // by the diagnostic snapshot surface. Cheap (8 hex chars) and
+        // operator-reproducible — they can compute the same prefix from
+        // the original key client-side to identify which write is stuck.
+        private static string HashIdempotencyKeyForDiag(string key)
+        {
+            try
+            {
+                using var sha = SHA256.Create();
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(key));
+                var sb = new StringBuilder(8);
+                for (int i = 0; i < 4; i++) sb.Append(bytes[i].ToString("x2"));
+                return sb.ToString();
+            }
+            catch
+            {
+                // Defensive — return a sentinel so the envelope shape stays
+                // stable even if the hash op fails (it won't, but the
+                // diagnostic path must never throw).
+                return "00000000";
+            }
+        }
     }
+
+    /// <summary>
+    /// P18-030 — Snapshot returned by <see cref="LacerteSessionManager.GetCacheSnapshot"/>.
+    /// </summary>
+    public sealed record CacheStateSnapshot(
+        int IdempotencyCount,
+        int IdempotencyCap,
+        int IdempotencyTtlHours,
+        bool IdempotencyNearCap,
+        DateTimeOffset? IdempotencyOldestCreatedAt,
+        DateTimeOffset? IdempotencyNewestCreatedAt,
+        long IdempotencyPeakCount,
+        bool IdempotencyPersistEnabled,
+        string? IdempotencyPersistPath,
+        IReadOnlyList<NewApiCacheEntry> NewApisEntries,
+        bool EditionProbed,
+        bool EditionSentinelFailure,
+        string? Edition,
+        string? EditionBuild,
+        string? EditionSdkVersion);
+
+    /// <summary>
+    /// P18-030 — One row in <see cref="CacheStateSnapshot.NewApisEntries"/>.
+    /// </summary>
+    public sealed record NewApiCacheEntry(int TaxYear, string Module, bool Value);
+
+    /// <summary>
+    /// P18-032 — Snapshot returned by <see cref="LacerteSessionManager.GetActiveLocks"/>.
+    /// </summary>
+    public sealed record ActiveLocksSnapshot(
+        IReadOnlyList<ActiveLockEntry> Idempotency,
+        int TotalLockEntries,
+        int HeldCount,
+        int ReturnedCap,
+        DateTimeOffset SnapshotAtUtc);
+
+    /// <summary>
+    /// P18-032 — One held idempotency-key entry. <see cref="KeyHashPrefix"/>
+    /// is the 8-hex-char SHA-256 prefix of the operator-supplied key so the
+    /// raw identifier never leaks into the diagnostic surface.
+    /// </summary>
+    public sealed record ActiveLockEntry(
+        string KeyHashPrefix,
+        bool Held,
+        double? HeldForSeconds);
 
     /// <summary>
     /// Args for <see cref="LacerteSessionManager.CreateClient"/>. Matches the

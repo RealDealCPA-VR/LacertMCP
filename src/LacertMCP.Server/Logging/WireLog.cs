@@ -159,11 +159,26 @@ namespace LacertMCP.Server.Logging
         public static Action<string>? OnRotation { get; set; }
 
         // P15-071 — sentinel to gate once-per-day retention pruning. Stored
-        // as DateTime.UtcNow.DayOfYear so pruning piggybacks on the first
-        // write of each calendar day rather than spinning up a background
-        // timer. -1 = never pruned in this process lifetime. Guarded by
+        // as DateTime.UtcNow.Date so pruning piggybacks on the first write
+        // of each calendar day rather than spinning up a background timer.
+        // null = never pruned in this process lifetime. Guarded by
         // _writeLock.
-        private static int _lastPrunedDayOfYear = -1;
+        //
+        // P18-018 follow-up — was previously `int _lastPrunedDayOfYear`
+        // holding DateTime.UtcNow.DayOfYear (1..366). That key collides on
+        // the year-anniversary: a process running from day-of-year 150 in
+        // year N to day-of-year 150 in year N+1 saw the equality short-
+        // circuit and skipped that day's prune. DateTime.Date is
+        // monotonically distinguishable across years so the same gating
+        // pattern survives a multi-year process lifetime.
+        private static DateTime? _lastPrunedUtcDate = null;
+
+        // P18-018 — test seam mirroring the TodayYearProvider pattern in
+        // LacerteSessionManager. Lets a regression test step the clock
+        // forward across a year boundary without an actual time delay.
+        // Production callers must use the default (DateTime.UtcNow) — the
+        // setter is `internal` and only invoked by WireLogRotationTests.
+        internal static Func<DateTime> UtcNowProviderForTests { get; set; } = () => DateTime.UtcNow;
 
         // P15-001 — split keysets.
         //
@@ -296,30 +311,29 @@ namespace LacertMCP.Server.Logging
 
         /// <summary>
         /// Run <paramref name="work"/> with a wire-log entry written on completion
-        /// or failure. When the log is disabled, this is a near-zero-overhead
-        /// passthrough — the lazy config check is the only cost.
+        /// or failure. When the disk log is disabled, this still pushes the
+        /// (Disk-redacted) line into the in-process <see cref="WireLogRing"/>
+        /// so <c>lacerte_recent_log</c> can surface the recent tail even when
+        /// <c>LACERTE_DEBUG_WIRE</c> is off — P18-026. Ring push is bounded
+        /// (~50 KB at default capacity 256) and never throws.
         /// </summary>
         public static async Task<T> Record<T>(string op, object? args, Func<Task<T>> work)
         {
             if (work == null) throw new ArgumentNullException(nameof(work));
             var cfg = _testForceConfig ?? _config.Value;
-            if (cfg == null)
-            {
-                return await work().ConfigureAwait(false);
-            }
 
             var sw = Stopwatch.StartNew();
             try
             {
                 var result = await work().ConfigureAwait(false);
                 sw.Stop();
-                WriteRecord(cfg, op, args, result, error: null, sw.ElapsedMilliseconds);
+                EmitRecord(cfg, op, args, result, error: null, sw.ElapsedMilliseconds);
                 return result;
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                WriteRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
+                EmitRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
                 throw;
             }
         }
@@ -333,21 +347,47 @@ namespace LacertMCP.Server.Logging
         {
             if (work == null) throw new ArgumentNullException(nameof(work));
             var cfg = _testForceConfig ?? _config.Value;
-            if (cfg == null) return work();
 
             var sw = Stopwatch.StartNew();
             try
             {
                 var result = work();
                 sw.Stop();
-                WriteRecord(cfg, op, args, result, error: null, sw.ElapsedMilliseconds);
+                EmitRecord(cfg, op, args, result, error: null, sw.ElapsedMilliseconds);
                 return result;
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                WriteRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
+                EmitRecord(cfg, op, args, result: null, error: BuildErrorRecord(ex), sw.ElapsedMilliseconds);
                 throw;
+            }
+        }
+
+        // P18-026 — build the redacted line once, push it to the in-process
+        // ring (always), then hand off to the disk-write path only when the
+        // env-gated config is non-null. Decoupling the ring from the
+        // LACERTE_DEBUG_WIRE gate is the whole point of lacerte_recent_log:
+        // it makes the LLM's self-diagnostic surface useful in the default
+        // ops posture (debug-wire OFF) instead of only when an operator
+        // pre-enabled disk logging.
+        private static void EmitRecord(
+            WireLogConfig? cfg, string op, object? args, object? result,
+            IReadOnlyDictionary<string, object?>? error, long durationMs)
+        {
+            string line = BuildRedactedLine(
+                op, args, result, error, durationMs,
+                resultSampleLimit: cfg?.ResultSampleLimit ?? WireLogConfig.DefaultResultSampleLimit,
+                fullResults: cfg?.FullResults ?? false);
+
+            // Ring push is always-on (independent of cfg). Never throws.
+            try { WireLogRing.Push(line); }
+            catch { /* defensive */ }
+
+            // Disk write only when the env-gated config is live.
+            if (cfg != null)
+            {
+                WriteRecord(cfg, line);
             }
         }
 
@@ -461,7 +501,7 @@ namespace LacertMCP.Server.Logging
             // memo from a previous test.
             lock (_writeLock)
             {
-                _lastPrunedDayOfYear = -1;
+                _lastPrunedUtcDate = null;
             }
         }
 
@@ -748,9 +788,16 @@ namespace LacertMCP.Server.Logging
         // Internals
         // -----------------------------------------------------------------
 
-        private static void WriteRecord(
-            WireLogConfig cfg, string op, object? args, object? result,
-            IReadOnlyDictionary<string, object?>? error, long durationMs)
+        // P18-026 — Build the canonical wire-log line ONCE. The output is
+        // already Disk-scope-redacted (broad keyset) and has the large-result
+        // summarization applied when warranted. Same line is then pushed
+        // into WireLogRing AND written to disk (when enabled) so the
+        // in-process tail surfaced by lacerte_recent_log is byte-identical
+        // to what landed on disk in the corresponding session.
+        internal static string BuildRedactedLine(
+            string op, object? args, object? result,
+            IReadOnlyDictionary<string, object?>? error, long durationMs,
+            int resultSampleLimit, bool fullResults)
         {
             var record = new Dictionary<string, object?>
             {
@@ -783,11 +830,14 @@ namespace LacertMCP.Server.Logging
                 // file, and gives the operator no quick "this returned N
                 // rows in M ms" summary. Post-process the parsed line to
                 // replace any top-level result JSON array longer than
-                // cfg.ResultSampleLimit with a {kind, count, sample} object.
+                // resultSampleLimit with a {kind, count, sample} object.
                 // Opt out with LACERTE_DEBUG_LOG_FULL_RESULTS=1.
-                if (!cfg.FullResults && error == null)
+                //
+                // P18-026 — applies to the ring entry too so a 5000-row
+                // read doesn't blow the ring's ~50 KB budget on one entry.
+                if (!fullResults && error == null)
                 {
-                    line = SummarizeLargeResultArray(line, cfg.ResultSampleLimit);
+                    line = SummarizeLargeResultArray(line, resultSampleLimit);
                 }
             }
             catch
@@ -806,8 +856,11 @@ namespace LacertMCP.Server.Logging
             // (includes Description / City / Zip / identity names /
             // rawError / reason) because an archived debug log may leave
             // the host.
-            line = Redact(line, RedactionScope.Disk);
+            return Redact(line, RedactionScope.Disk);
+        }
 
+        private static void WriteRecord(WireLogConfig cfg, string line)
+        {
             lock (_writeLock)
             {
                 try
@@ -817,13 +870,16 @@ namespace LacertMCP.Server.Logging
 
                     // P15-071 — once-per-UTC-day retention prune piggybacks
                     // on a write. Cheap (single Directory.GetFiles + parse),
-                    // gated by _lastPrunedDayOfYear so we don't run it for
-                    // every record.
-                    var today = DateTime.UtcNow.DayOfYear;
-                    if (_lastPrunedDayOfYear != today)
+                    // gated by _lastPrunedUtcDate so we don't run it for
+                    // every record. P18-018 — keyed on DateTime.UtcNow.Date
+                    // (not DayOfYear) so year-anniversary collisions don't
+                    // short-circuit the prune in a multi-year process
+                    // lifetime.
+                    var today = UtcNowProviderForTests().Date;
+                    if (_lastPrunedUtcDate != today)
                     {
                         PruneOldLogsLocked(cfg.LogDir, cfg.RetentionDays);
-                        _lastPrunedDayOfYear = today;
+                        _lastPrunedUtcDate = today;
                     }
 
                     // P15-015 — check size cap BEFORE acquiring the writer
@@ -1249,7 +1305,14 @@ namespace LacertMCP.Server.Logging
             {
                 cfg = new WireLogConfig(logDir);
             }
-            WriteRecord(cfg, op, args, result, error: null, durationMs);
+            // P18-026 — same BuildRedactedLine path as production so the
+            // test seam exercises the now-shared rendering helper.
+            var line = BuildRedactedLine(
+                op, args, result, error: null, durationMs,
+                resultSampleLimit: cfg.ResultSampleLimit,
+                fullResults: cfg.FullResults);
+            try { WireLogRing.Push(line); } catch { /* defensive */ }
+            WriteRecord(cfg, line);
             // Ensure the file handle isn't held open past the call boundary
             // for one-shot probe writes — keeps WriteForTest semantics
             // identical to the prior File.AppendAllText behavior so the
@@ -1282,7 +1345,7 @@ namespace LacertMCP.Server.Logging
 
             /// <summary>
             /// P15-071 — retention window in days. On the first write of each
-            /// UTC day (gated by <see cref="_lastPrunedDayOfYear"/>), files
+            /// UTC day (gated by <see cref="_lastPrunedUtcDate"/>), files
             /// named lacerte-YYYYMMDD*.log whose embedded date is older than
             /// UtcNow.Date - RetentionDays are deleted. Default 14.
             /// Configurable via LACERTE_DEBUG_LOG_RETENTION_DAYS (1..365;

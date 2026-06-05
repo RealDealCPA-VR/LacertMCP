@@ -46,9 +46,15 @@ namespace LacertMCP.Tests
         {
             lock (_seedLock)
             {
+                // P18-020 — cache state lives inside an immutable AccessMapSnapshot
+                // swapped atomically by ReloadCaches. Reach in through the snapshot
+                // reference to seed the per-module dictionary additively.
                 var t = typeof(FieldAccessMapLoader);
-                var cacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-                var cache = cacheField?.GetValue(null) as ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>;
+                var snapshotField = t.GetField("_snapshot", BindingFlags.NonPublic | BindingFlags.Static);
+                var snapshot = snapshotField?.GetValue(null);
+                if (snapshot == null) return;
+                var modulesProp = snapshot.GetType().GetProperty("Modules", BindingFlags.Public | BindingFlags.Instance);
+                var cache = modulesProp?.GetValue(snapshot) as ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>;
                 if (cache == null) return; // loader internals changed; tests will surface elsewhere.
 
                 var key = $"{module}|{table}|{field}";

@@ -65,7 +65,8 @@ Step 3 — Create the client record
 
 Step 4 — Seed core address / phone fields (if collected during intake)
   • For each field, call `lacerte_field_write` with `{{ table: 1, clientNumber, field, value }}`.
-  • Pass `idempotencyKey` (e.g. ""intake-{name}-name"") so a retry does not double-write.
+  • Pass `idempotencyKey` (e.g. ""intake-<clientId>-<field>"") so a retry of the SAME field replays the cached result — each different field MUST get a DISTINCT key.
+  • Do NOT reuse one key across multiple field writes. Same key + different payload throws `IdempotencyConflict` (statusCode 9102) and the field is not written.
 
   Canonical Tax-Organizer column → Lacerte DATA1 field mapping (module I).
   Only the three name/email fields are confirmed off-spec today; every other
@@ -89,6 +90,25 @@ Step 4 — Seed core address / phone fields (if collected during intake)
     | dateOfBirth (DOB)    | TBD-F5        | no — gated on F5     |
     | ssn / taxpayerID     | TBD-F5        | no — gated on F5     |
 
+  IMPORTANT — degenerate-shard handling: the 8 TBD-F5 rows above CANNOT be
+  written on the v1 codebase (the individual.json shard ships empty until
+  Phase-F5 dumper output lands). If the operator pasted address/phone/DOB/SSN
+  values for the intake row:
+    • Do NOT call `lacerte_field_access_map` per TBD column — it will return
+      only the universal C1_0 entry regardless of which TBD field you ask
+      about. One upfront call per session is enough to confirm.
+    • Emit one summary line to the operator BEFORE the writes: ""Note:
+      address/phone/DOB/SSN cannot be seeded into Lacerte today (v1 shard
+      pending Phase-F5). I will record only firstName/lastName/emailId.
+      Echo the pasted address values so the operator can paste them into
+      the Lacerte UI manually after `lacerte_client_create` returns.""
+    • Skip the per-TBD-field `lacerte_field_write` calls entirely.
+    • Continue with the 3 confirmed writes (C1_1/C1_2/C1_3).
+  For an UNKNOWN column the operator hands you that is NEITHER in the
+  confirmed-3 list NOR in the TBD-8 list, call `lacerte_field_access_map`
+  once for that column; if `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`
+  / `Unknown` / absent from the response, STOP and report the column.
+
 Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at intake)
   • `lacerte_detail_write` takes 5 REQUIRED flat params (clientNumber, series, code, amount, description) plus 7 optional row-key segments that default to empty string (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) and 3 optional control params (replaceIndex, dryRun, idempotencyKey). There is NO nested `row:` wrapper — every field is a top-level kwarg.
   • A W-2 row looks like:
@@ -99,7 +119,7 @@ Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at
 
 Step 6 — Verify the new client appears in the roster
   • Call `lacerte_client_list` (no filter) and confirm the new `clientNumber` is present.
-  • Optionally `lacerte_client_read` it back and surface the address fields you just wrote so the operator can sanity-check the values.
+  • Optionally `lacerte_client_read` it back and surface ONLY the fields you actually wrote in Step 4: firstName/lastName/emailId are always populated (C1_1/C1_2/C1_3); address/phone/DOB/SSN appear only if Phase-F5 has landed AND the operator gave you those values AND the per-field access-map check passed. For a v1 install the read-back will show only C1_0/C1_1/C1_2/C1_3 + ClientID — the address section being empty is EXPECTED, not a bug; do not fabricate values to fill it. Report the read-back as `{{firstName, lastName, emailId, address: ""(gated on Todo.md F5 — not yet writable)""}}` so the operator sees the gate explicitly.
 
 If any step fails, surface the structured `statusCode` + `userMessage` + `remediation` from the tool response — those are the operator's recovery hints.";
 
@@ -150,12 +170,12 @@ Step 3 — Group the rows by `Status`
   • Count the rows in each bucket. Report the counts first so the operator gets the shape at a glance.
 
 Step 4 — Triage in this order
-  • ""Rejected"" first — call `lacerte_detail_read` for each `ClientId` and surface the rejection reason fields if present. The operator needs to fix + retransmit these.
+  • ""Rejected"" first — call `lacerte_detail_read` passing each row's `ClientId` AS the `clientNumber` parameter (the SQL join is `ef.ClientId = ci.C1_0`, so they are the same SDK-minted identifier; see P16 ClientNumber-vs-ClientID hint) and surface the rejection reason fields if present. The operator needs to fix + retransmit these.
   • ""Pending"" / ""Transmitted"" next — note `StatusDate`; flag anything older than 72 hours as ""stale, escalate"".
   • ""Accepted"" last — confirm count matches the operator's expectation; no action needed.
 
 Step 5 — Report
-  • Render a short table: `ClientId | EFId | Status | StatusDate | NextAction`.
+  • Render a short table: `clientNumber | EFId | Status | StatusDate | NextAction` (the join column `ef.ClientId` IS the SDK ClientNumber — surface it under the canonical wire name `clientNumber` to match every other tool's terminology).
   • For each Rejected row, the NextAction should name the specific field to correct (from the detail-row dump if available).
 
 Surface every tool error verbatim — do not summarize away a 9xxx status code.";
@@ -205,8 +225,8 @@ Step 1 — Confirm session + context
   • Confirm `context` matches the module + year the operator intended. If wrong, `lacerte_set_context`.
 
 Step 2 — Sanity-check the field is writable
-  • Call `lacerte_field_access_map` with the active module + table.
-  • Confirm `{fieldLabel}` is `ReadWrite`. If `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`, STOP and tell the operator the field can't be bulk-updated.
+  • Call `lacerte_field_access_map` with the active module + table. The response's `fields` dict only contains entries for fields whose access is NOT `Unknown` (the loader filters Unknown to reduce noise).
+  • Confirm `{fieldLabel}` appears in `fields` AND its access is exactly `ReadWrite`. STOP if any of: field is ABSENT from `fields` / access is `Unknown` / `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`. (NOTE: until Todo.md F5 lands full shard introspection, only `C{table}_0` is cataloged ReadWrite for every module — every other field on a v1 module returns Unknown and will be absent from the response. If you don't see `{fieldLabel}` listed, that IS the STOP signal — do NOT proceed and bulk-write entries that the chokepoint will reject with `UnknownFieldAccess` 9012.)
 
 Step 3 — Build the target client list
   • Either: the operator gave you an explicit `[clientNumber...]` list — use it.
@@ -275,7 +295,7 @@ Step 1 — Confirm session + context
 Step 2 — Declare the column → field mapping ONCE
   • Ask the operator (or read the CSV header row) for the column names present in `{label}`.
   • Build a mapping dictionary `{{ csvColumn: lacerteField }}` per the canonical table in the `lacerte_client_intake` prompt's Step 4 (firstName=C1_1, lastName=C1_2, emailId=C1_3 are confirmed; address/phone/DOB/SSN are TBD pending Todo.md F5).
-  • For each TBD field the operator wants to seed, call `lacerte_field_access_map` to confirm the field exists and is `ReadWrite` on the active module. If `Unknown` / `ReadOnly` / `Hidden`, STOP and tell the operator that field cannot be bulk-seeded yet.
+  • For each TBD field the operator wants to seed, call `lacerte_field_access_map` to confirm the field exists and is `ReadWrite` on the active module. STOP if any of: field is ABSENT from `fields` / `Unknown` / `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`, and tell the operator that field cannot be bulk-seeded yet.
 
 Step 3 — Validate the row payloads BEFORE any write
   • For each CSV row, build `{{ clientId, taxType, firstName, lastName, emailId }}` plus a `seedFields` dict from the column mapping.
@@ -288,7 +308,7 @@ Step 4 — Per-row create (stop-on-first-error by default)
       - call `lacerte_client_create` first;
       - capture the returned `clientNumber`;
       - then loop the seedFields dict, calling `lacerte_field_write` for each `{{ table: 1, clientNumber, field, value, idempotencyKey: \""csv-intake-<batchId>-<clientId>-<field>\"" }}`.
-  • On `DuplicateClient` (status 18) STOP unless the operator explicitly said \""skip duplicates\""; on any other non-Success statusCode, STOP and surface the structured `userMessage` + `remediation`.
+  • On `DuplicateClient` (statusName from the error envelope, statusCode 12) STOP unless the operator explicitly said \""skip duplicates\""; on any other non-Success statusCode, STOP and surface the structured `userMessage` + `remediation`.
 
 Step 5 — Verify a 3-row sample
   • Pick 3 random successful `clientNumber`s from the batch.

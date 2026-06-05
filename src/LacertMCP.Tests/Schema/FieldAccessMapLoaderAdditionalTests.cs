@@ -279,11 +279,9 @@ namespace LacertMCP.Tests.Schema
             Assert.Equal(FieldAccess.ReadOnly,
                 FieldAccessMapLoader.GetFieldAccess('I', 1, "C1_0", 2024));
 
-            var t = typeof(FieldAccessMapLoader);
-            var moduleCacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-            var dict = (IDictionary?)moduleCacheField?.GetValue(null);
-            Assert.NotNull(dict);
-            Assert.Empty(dict!);
+            var modules = GetSnapshotModulesDict();
+            Assert.NotNull(modules);
+            Assert.Empty(modules!);
         }
 
         // ---- helpers ----
@@ -326,15 +324,26 @@ namespace LacertMCP.Tests.Schema
 
         private static void ResetLoaderCache()
         {
-            // Mirror the AccessMapTestFixture pattern — reflect on the
-            // private static fields directly since ResetCacheForTests is
-            // internal to LacertMCP.Server.
-            var t = typeof(FieldAccessMapLoader);
-            var moduleCacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-            var overlayCacheField = t.GetField("_overlayCache", BindingFlags.NonPublic | BindingFlags.Static);
+            // P18-020 — cache state moved into a single immutable AccessMapSnapshot
+            // swapped atomically by ReloadCaches. Call ReloadCaches to install a
+            // fresh empty snapshot (semantically equivalent to clearing the two
+            // dictionaries from the previous design).
+            FieldAccessMapLoader.ReloadCaches();
+        }
 
-            (moduleCacheField?.GetValue(null) as IDictionary)?.Clear();
-            (overlayCacheField?.GetValue(null) as IDictionary)?.Clear();
+        /// <summary>
+        /// Reflect through the AccessMapSnapshot indirection to inspect the
+        /// per-module cache dictionary. Used by tests that want to assert
+        /// "no LoadModule call happened" (e.g. the universal-rule fast path).
+        /// </summary>
+        private static IDictionary? GetSnapshotModulesDict()
+        {
+            var t = typeof(FieldAccessMapLoader);
+            var snapshotField = t.GetField("_snapshot", BindingFlags.NonPublic | BindingFlags.Static);
+            var snapshot = snapshotField?.GetValue(null);
+            if (snapshot == null) return null;
+            var modulesProp = snapshot.GetType().GetProperty("Modules", BindingFlags.Public | BindingFlags.Instance);
+            return modulesProp?.GetValue(snapshot) as IDictionary;
         }
     }
 }

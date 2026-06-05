@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
@@ -412,6 +413,100 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(2024, result.GetProperty("taxYear").GetInt32());
             Assert.False(result.TryGetProperty("year", out _),
                 "Legacy `year` key must be gone from FieldAccessMap response.");
+        }
+
+        // -----------------------------------------------------------------
+        // P18-006 — every write-tool `idempotencyKey` parameter description
+        // must scream the retry-safety affordance to the LLM, not read
+        // "Optional ...". The MCP SDK ships [Description] verbatim as the
+        // parameter docs the LLM consumes on every fresh retry, so wording
+        // matters. Reflect across the F_writetools cluster and assert:
+        //   - description starts with "STRONGLY RECOMMENDED"
+        //   - description does NOT start with "Optional "
+        //   - description references the 9102 IdempotencyConflict code
+        // Pinning this sentinel prevents a future "simplify" pass from
+        // regressing the description back to "Optional ..." — the exact
+        // affordance gap P18-006 closed (LLM omits the key on retry,
+        // double-writes lacerte_detail_write rows).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void IdempotencyKey_Description_StronglyRecommended_P18_006()
+        {
+            // F_writetools cluster scope. CreateClientTools.cs lives in a
+            // sibling cluster (E_tools_session) and may not have landed the
+            // description rewrite yet — that's tracked as a cross-cluster
+            // need by the F_writetools task; this sentinel pins ONLY the
+            // four F_writetools surfaces so it stays green even when the
+            // sibling cluster lags.
+            var ownedTypes = new HashSet<System.Type>
+            {
+                typeof(FieldWriteTools),
+                typeof(UpdateReturnTools),
+                typeof(DetailsTools),
+                typeof(FieldWriteBulkTools),
+            };
+
+            var asm = typeof(SessionTools).Assembly;
+            var toolMethods = asm.GetTypes()
+                .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() != null)
+                .Where(t => ownedTypes.Contains(t))
+                .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
+                .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() != null);
+
+            var idempotencyParams = toolMethods
+                .SelectMany(m => m.GetParameters().Select(p => new { Method = m, Param = p }))
+                .Where(x => string.Equals(x.Param.Name, "idempotencyKey", System.StringComparison.Ordinal))
+                .ToList();
+
+            // Sanity — exactly 4 [McpServerTool] params named `idempotencyKey`
+            // in the F_writetools cluster (LacerteFieldWrite, LacerteUpdateReturn,
+            // LacerteDetailWrite, LacerteFieldWriteBulk). If any owned tool
+            // drops the parameter or a new one lands without it, fail loudly.
+            Assert.True(idempotencyParams.Count >= 4,
+                $"Expected at least 4 [McpServerTool] params named `idempotencyKey` in F_writetools; found {idempotencyParams.Count}.");
+
+            var offenders = new List<string>();
+            foreach (var entry in idempotencyParams)
+            {
+                var desc = entry.Param.GetCustomAttribute<DescriptionAttribute>()?.Description ?? string.Empty;
+                var label = $"{entry.Method.DeclaringType?.Name}.{entry.Method.Name}";
+
+                if (string.IsNullOrEmpty(desc))
+                {
+                    offenders.Add($"{label}: [Description] attribute is missing or empty.");
+                    continue;
+                }
+
+                // Must START WITH the retry-safety screamer — not the
+                // pre-P18-006 "Optional ..." reading the LLM treats as
+                // "omit for simpler call".
+                if (desc.StartsWith("Optional ", System.StringComparison.Ordinal))
+                {
+                    offenders.Add($"{label}: description starts with `Optional ` — must read `STRONGLY RECOMMENDED` for LLM retry-safety affordance (P18-006).");
+                    continue;
+                }
+
+                if (!desc.StartsWith("STRONGLY RECOMMENDED", System.StringComparison.Ordinal))
+                {
+                    offenders.Add($"{label}: description must start with `STRONGLY RECOMMENDED` (P18-006); got: \"{desc.Substring(0, System.Math.Min(60, desc.Length))}...\".");
+                    continue;
+                }
+
+                // Must reference the 9102 IdempotencyConflict surface so the
+                // LLM sees the conflict outcome inline, not buried in error-
+                // catalog docs the LLM may not have loaded.
+                if (!desc.Contains("9102"))
+                {
+                    offenders.Add($"{label}: description must reference 9102 IdempotencyConflict (P18-006).");
+                    continue;
+                }
+            }
+
+            Assert.True(
+                offenders.Count == 0,
+                "Write-tool `idempotencyKey` descriptions must screen the retry-safety affordance to the LLM (P18-006). "
+                + "Offenders: " + string.Join(" | ", offenders));
         }
     }
 }

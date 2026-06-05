@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using LacertMCP.Server.Diagnostics;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Logging;
 using Microsoft.Extensions.Logging;
@@ -52,8 +53,19 @@ namespace LacertMCP.Server.Resilience
         /// <see cref="BackoffMs"/>. On final failure rethrow the LAST exception
         /// (the original SDK / COM error), with retry metadata attached to the
         /// <see cref="Exception.Data"/> bag for diagnostics.
+        ///
+        /// <para>
+        /// P18 — <paramref name="opName"/> is the name of the wrapped wire
+        /// operation (e.g. <c>"WriteDetail"</c>, <c>"CreateClient"</c>) and
+        /// flows into the AutoReconnect.retry / AutoReconnect.exhausted
+        /// WireLog records so a forensic grep can distinguish a retried
+        /// read (safe to ignore) from a retried append-only write
+        /// (DECISIONS.md treats this as REQUIRES post-call verification —
+        /// see the AutoReconnect-unsafe-for-append-only entry). Optional
+        /// for backward-compat with existing test fixtures.
+        /// </para>
         /// </summary>
-        public static async Task<T> WithRetry<T>(Func<Task<T>> op, ILogger? log = null)
+        public static async Task<T> WithRetry<T>(Func<Task<T>> op, ILogger? log = null, string? opName = null)
         {
             if (op == null) throw new ArgumentNullException(nameof(op));
 
@@ -77,11 +89,11 @@ namespace LacertMCP.Server.Resilience
                     // no way to know the wire just retried. The ILogger seam
                     // stays for future DI plumbing but every existing call
                     // site passes null.
-                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex);
+                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex, opName);
                     log?.LogWarning(
                         ex,
-                        "Transient COM/RPC failure on attempt {Attempt}/{Max}; retrying in {DelayMs}ms.",
-                        attempt + 1, MaxRetries + 1, delay);
+                        "Transient COM/RPC failure on attempt {Attempt}/{Max} ({Op}); retrying in {DelayMs}ms.",
+                        attempt + 1, MaxRetries + 1, opName ?? "(unnamed)", delay);
                     await Task.Delay(delay).ConfigureAwait(false);
                 }
                 // No catch for non-transient — they propagate.
@@ -92,10 +104,11 @@ namespace LacertMCP.Server.Resilience
             {
                 last.Data["AutoReconnect.Attempts"] = MaxRetries + 1;
                 last.Data["AutoReconnect.Exhausted"] = true;
+                if (opName != null) last.Data["AutoReconnect.OpName"] = opName;
                 // P15-014 — exhausted-retries log. Pairs with the per-retry
                 // lines so a forensic grep ("AutoReconnect.exhausted") finds
                 // every wire that hit the cliff.
-                EmitExhaustedLog(MaxRetries + 1, last);
+                EmitExhaustedLog(MaxRetries + 1, last, opName);
                 throw last;
             }
             // Unreachable — IsTransient was always true, so one of the catches
@@ -106,7 +119,7 @@ namespace LacertMCP.Server.Resilience
         /// <summary>
         /// Synchronous variant — used by COM callsites that don't await.
         /// </summary>
-        public static T WithRetrySync<T>(Func<T> op, ILogger? log = null)
+        public static T WithRetrySync<T>(Func<T> op, ILogger? log = null, string? opName = null)
         {
             if (op == null) throw new ArgumentNullException(nameof(op));
 
@@ -122,11 +135,11 @@ namespace LacertMCP.Server.Resilience
                     last = ex;
                     if (attempt >= MaxRetries) break;
                     var delay = BackoffMs[attempt];
-                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex);
+                    EmitRetryLog(attempt + 1, MaxRetries + 1, delay, ex, opName);
                     log?.LogWarning(
                         ex,
-                        "Transient COM/RPC failure on attempt {Attempt}/{Max}; retrying in {DelayMs}ms.",
-                        attempt + 1, MaxRetries + 1, delay);
+                        "Transient COM/RPC failure on attempt {Attempt}/{Max} ({Op}); retrying in {DelayMs}ms.",
+                        attempt + 1, MaxRetries + 1, opName ?? "(unnamed)", delay);
                     System.Threading.Thread.Sleep(delay);
                 }
             }
@@ -135,24 +148,34 @@ namespace LacertMCP.Server.Resilience
             {
                 last.Data["AutoReconnect.Attempts"] = MaxRetries + 1;
                 last.Data["AutoReconnect.Exhausted"] = true;
-                EmitExhaustedLog(MaxRetries + 1, last);
+                if (opName != null) last.Data["AutoReconnect.OpName"] = opName;
+                EmitExhaustedLog(MaxRetries + 1, last, opName);
                 throw last;
             }
             throw new InvalidOperationException("AutoReconnect.WithRetrySync exhausted with no captured exception.");
         }
 
         // P15-014 — shared WireLog emitters for the retry + exhausted events.
+        // P18 — opName surfaces in the record so an operator can distinguish a
+        // retried read (safe to ignore) from a retried append-only write
+        // (REQUIRES post-call verification; see DECISIONS.md entry).
         // Wrapped in try/catch so a logging failure (closed writer, transient
         // disk hiccup) never poisons the wire path itself; WireLog.RecordSync
         // is already null-safe on the disabled-log fast path.
-        private static void EmitRetryLog(int attempt, int max, int delayMs, Exception ex)
+        private static void EmitRetryLog(int attempt, int max, int delayMs, Exception ex, string? opName)
         {
+            // P18-027 — bump the aggregate counter so lacerte_request_stats
+            // can answer "are we flaking today?" without grepping the disk
+            // log. Bumped per retry (NOT per call) so the count reflects
+            // attempt-pressure, which is the operationally interesting signal.
+            try { StatsRegistry.BumpAutoReconnectAttempt(); } catch { /* never poison */ }
             try
             {
                 WireLog.RecordSync<bool>(
                     "AutoReconnect.retry",
                     new
                     {
+                        opName,
                         attempt,
                         max,
                         hresult = ex.HResult.ToString("X8"),
@@ -164,14 +187,16 @@ namespace LacertMCP.Server.Resilience
             catch { /* logging is best-effort */ }
         }
 
-        private static void EmitExhaustedLog(int attempts, Exception last)
+        private static void EmitExhaustedLog(int attempts, Exception last, string? opName)
         {
+            try { StatsRegistry.BumpAutoReconnectExhausted(); } catch { /* never poison */ }
             try
             {
                 WireLog.RecordSync<bool>(
                     "AutoReconnect.exhausted",
                     new
                     {
+                        opName,
                         attempts,
                         hresult = last.HResult.ToString("X8"),
                         exType = last.GetType().Name,

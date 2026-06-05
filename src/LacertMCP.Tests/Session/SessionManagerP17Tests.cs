@@ -41,6 +41,7 @@ namespace LacertMCP.Tests.Session
     ///   DBF column codes (<c>C1_*</c>) verbatim.</description></item>
     /// </list>
     /// </summary>
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class SessionManagerP17Tests
     {
         // -----------------------------------------------------------------

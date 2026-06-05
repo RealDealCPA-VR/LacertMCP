@@ -59,7 +59,7 @@ namespace LacertMCP.Server.Tools
             [Description("Required for DATA2 / DATA4 writes. Positive integer.")] int? subClientId = null,
             [Description("Required for DATA3 / DATA4 writes. 2-letter state postal code.")] string? stateAbbrev = null,
             [Description("If true, validate + roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null,
+            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'update_return-{clientNumber}-{field}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry re-executes the write — safe at the cell level for lacerte_update_return but the LLM cannot verify whether the first call landed. Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
             return FieldWriteCore.Run(

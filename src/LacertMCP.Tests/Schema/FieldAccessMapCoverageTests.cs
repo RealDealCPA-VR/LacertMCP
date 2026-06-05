@@ -26,6 +26,7 @@ namespace LacertMCP.Tests.Schema
     /// Test count therefore stays > 0 even with empty maps.
     /// </para>
     /// </summary>
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class FieldAccessMapCoverageTests
     {
         private static readonly char[] AllModules = { 'I', 'C', 'P', 'S', 'F', 'R', 'T', 'N', 'B' };

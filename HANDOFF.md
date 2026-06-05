@@ -2,7 +2,7 @@
 
 ## Last Session Summary
 
-**Four deep-audit-and-execute rounds landed (2026-05-30 through 2026-06-04):**
+**Five deep-audit-and-execute rounds landed (2026-05-30 through 2026-06-05):**
 
 ### Round 1 — Phase 14 (117 agents, 71 tasks)
 - Audit: 10-lens parallel + adversarial verify → 78 candidates / 71 confirmed
@@ -28,7 +28,14 @@
 - Surfaced TWO real P16 regressions: prompts weren't renamed when tool params were (`clientID`→`clientId` only on params, prompts left ALL-CAPS); same drift in error remediation strings
 - Net: **1113 → 1121 tests** (+8 net; test-pyramid cleanup P17-015 also removed ~29 duplicate sim-twice parity runs, so underlying coverage improved more than the count suggests)
 
-**Final state: 1121/1132 tests passing, 0 failures, 11 expected skips (10 live-only + 1 P17-015 LiveLeg placeholder awaiting recorded fixture).** Build clean (0 warnings, 0 errors). 71/71 + 78/78 + 85/85 + 17/17 = **251 audit tasks complete across 4 rounds**. 187 files changed since bootstrap, ~12K lines net added.
+### Round 5 — Phase 18 (70 + 13 = 83 agents, 36 tasks) — DEEP FLAWS + ASPIRATIONAL FEATURES
+- Audit: 11 lenses split 6/5 between flaw-hunting (subsystem-interactions, concurrency-under-load, end-to-end-happy-path-walk, real-LLM-traffic, unmodeled-SDK, state-corruption-races) and aspirational feature ideation (high-value-tools, MCP resources, in-MCP docs, observability tools, operator accelerators). Per-phase strict verifiers. 34 flaws → 23 confirmed; 25 features → 13 confirmed.
+- Execute: preflight A_session bundle (9 interlocked LacerteSessionManager + AutoReconnect fixes) → 6 parallel fix clusters → 5 parallel feature clusters (13 new MCP tools shipped) → final verify (added [Collection] markers to serialize static-state-touching tests)
+- Surfaced one critical missed bug: dryRun absent from BuildPayload fingerprint silently poisoned idempotency cache (preview-then-commit with same key returned cached Success and skipped the wire entirely). Plus AutoReconnect double-write, DbfRow.Fields non-concurrent dict, CreateClient counter rollback under contention, Delete-then-Move that can lose persisted cache, and 6 prompt content errors (DuplicateClient as status 18 vs actual 12, idempotencyKey reuse across N rows, etc.)
+- 13 new operator-facing tools: lacerte_client_summary, lacerte_diff_clients, lacerte_export_client (resource-style), lacerte_help, 5 observability tools (recent_log, request_stats, cache_state, resource_usage, active_locks), 4 accelerators (firm_dashboard, pre_filing_check, year_over_year, field_history)
+- Net: **1121 → 1301 tests** (+180; +12 P18 session tests + ~168 feature/observability/accelerator tests)
+
+**Final state: 1301/1312 tests passing, 0 failures, 11 expected skips.** Build clean (0 warnings, 0 errors). 71/71 + 78/78 + 85/85 + 17/17 + 36/36 = **287 audit tasks complete across 5 rounds**. 217+ files changed since bootstrap, ~14.5K lines net added.
 
 ### What round 3 changed
 
@@ -77,14 +84,31 @@
 
 ### Workflow artifacts (on disk)
 
-- `audit-findings.json` + `audit-findings-r2.json` + `audit-findings-r3.json` + `audit-findings-r4.json` — 251 audit entries with verdicts + refinedRecommendations
-- `Todo.md` — Phases 14 + 15 + 16 + 17 (P14-001..071, P15-001..078, P16-001..085, P17-001..017) all checked off
-- `scripts/build-phase14-addendum.js` + `scripts/build-phase15-addendum.js` + `scripts/cluster-phase15.js` + `scripts/cluster-phase16.js` + `scripts/cluster-phase17.js` + `scripts/show-round4.js` — regenerators
+- `audit-findings.json` + `audit-findings-r2.json` + `audit-findings-r3.json` + `audit-findings-r4.json` + `audit-findings-r5.json` — 287 audit entries with verdicts + refinedRecommendations
+- `Todo.md` — Phases 14 + 15 + 16 + 17 + 18 (P14-001..071, P15-001..078, P16-001..085, P17-001..017, P18-001..036) all checked off
+- `scripts/build-phase14-addendum.js` + `scripts/build-phase15-addendum.js` + `scripts/cluster-phase15.js` + `scripts/cluster-phase16.js` + `scripts/cluster-phase17.js` + `scripts/cluster-phase18.js` + `scripts/show-round4.js` + `scripts/show-round5.js` — regenerators
+
+### New MCP tools shipped in round 5
+
+- **`lacerte_client_summary(clientNumber)`** — one-call client snapshot fanning out client/subclients/states/statuses/forms/ef_status.
+- **`lacerte_diff_clients(client1Number, client2Number)`** — structured diff: {onlyIn1, onlyIn2, valuesDiffer}.
+- **`lacerte_export_client(clientNumber)`** — round-trip JSON with explicit `uri` field (resource-style; promotes to MCP Resource when SDK 1.x ships).
+- **`lacerte_help(topic?)`** — README-equivalent text segmented by topic (quickstart/tools/troubleshooting/envvars/errors/overview).
+- **`lacerte_recent_log(cid?, limit?)`** — in-process WireLog tail with wire-scope redaction. Source for LLM self-diagnosis.
+- **`lacerte_request_stats()`** — uptime aggregate: total calls, error rate, autoReconnect attempts, p50/p95.
+- **`lacerte_cache_state()`** — idempotency/edition/canUseNewApis cache sizes + TTL state.
+- **`lacerte_resource_usage()`** — process memory + handle count snapshot.
+- **`lacerte_active_locks()`** — live count of held/queued semaphores on idempotency map.
+- **`lacerte_firm_dashboard()`** — per-(taxYear, module) client count + EF status breakdown in one call.
+- **`lacerte_pre_filing_check(clientNumber)`** — missing required fields + F4 not Ready + EF rejected/pending in one call.
+- **`lacerte_year_over_year(clientNumber, fromYear, toYear)`** — diff a client across tax years.
+- **`lacerte_field_history(clientNumber, fieldName)`** — audit log of writes to one field via WireLog query.
+- **`lacerte_prompts()`** — lists the 4 MCP prompts + returns body for hosts that do not expose Prompts UI.
 
 ## Verify Before Continuing
 
 - [ ] **Build:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" build C:/Users/VR/Projects/LacertMCP/LacertMCP.sln -c Debug -p:Platform=x64` — must report 0 warnings, 0 errors.
-- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` — must report **1121 passed, 11 skipped, 0 failed**. The 11 skips are 9 `[Fact(Skip = "Requires real Lacerte SDK")]` in `Tests/Bridge/` + 1 Windows-only Credential Manager P/Invoke in `Tests/Cli/AppIdStoreTests.cs` + 1 `LiveLegParityPlaceholder.LiveLeg_AwaitsRecordedReplayFixture` (P17-015 — flips green when the operator drops a recording under `tests/Parity/fixtures/`).
+- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` — must report **1301 passed, 11 skipped, 0 failed**. The 11 skips are 9 `[Fact(Skip = "Requires real Lacerte SDK")]` in `Tests/Bridge/` + 1 Windows-only Credential Manager P/Invoke in `Tests/Cli/AppIdStoreTests.cs` + 1 `LiveLegParityPlaceholder.LiveLeg_AwaitsRecordedReplayFixture` (flips green when operator drops a recording under `tests/Parity/fixtures/`).
   - **P17-015 parity-test counts will SHIFT:** `[BothModesData]` now gates the Live leg behind `LACERTE_PARITY_RECORDING` (env var) or a non-example fixture under `src/LacertMCP.Tests/Parity/fixtures/`. Off-Windows/CI with no fixture: ~29 Live-leg theory rows drop (was: pass-as-sim-twice), and `LiveLegParityPlaceholder.LiveLeg_AwaitsRecordedReplayFixture` adds 1 Skip with an explicit reason. Expected new totals: **~1084 passed, 11 skipped, 0 failed** (sim leg of every parity Theory still runs; Live leg surfaces as a single honest Skip instead of 29 false passes). When the operator captures `tests/Parity/fixtures/live-ty24-individual.json` (Next Task item #4), the placeholder flips to green and all 29 Live-leg rows re-emit automatically — no theory-method edits needed. See `src/LacertMCP.Tests/Parity/BothModes.cs` (P17-015) for the gate.
 - [ ] **CLI smoke:** `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` → JSON exit 0. `tools` → tool table exit 0. `doctor` → exit 2 (PARTIAL) off-Windows; exit 0 on green Windows + Lacerte box.
 - [ ] **MCP server smoke:** `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` starts cleanly; kill after confirming.

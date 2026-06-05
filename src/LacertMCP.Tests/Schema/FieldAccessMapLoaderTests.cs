@@ -4,6 +4,7 @@ using Xunit;
 
 namespace LacertMCP.Tests.Schema
 {
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class FieldAccessMapLoaderTests
     {
         [Fact]

@@ -22,6 +22,7 @@ namespace LacertMCP.Tests.Session
     ///   <item><description><c>SessionStatus</c> snapshot coherence.</description></item>
     /// </list>
     /// </summary>
+    [Collection(LacertMCP.Tests.AccessMapMutationCollection.Name)]
     public class LacerteSessionManagerTests
     {
         // -----------------------------------------------------------------

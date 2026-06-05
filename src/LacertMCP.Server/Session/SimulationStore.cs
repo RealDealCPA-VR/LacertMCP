@@ -34,8 +34,20 @@ namespace LacertMCP.Server.Session
         int? SubClientID = null,
         string? StateAbbrev = null)
     {
-        /// <summary>Wide field bag — keys like "C1_0", "C2_15", "C4_G3".</summary>
-        public Dictionary<string, object?> Fields { get; init; } = new Dictionary<string, object?>();
+        /// <summary>
+        /// Wide field bag — keys like "C1_0", "C2_15", "C4_G3".
+        /// <para>
+        /// P18-001: ConcurrentDictionary (not plain Dictionary) so that LLM-driven
+        /// tool batching can write distinct fields on the same client concurrently
+        /// without corrupting the bucket array. The per-key idempotency semaphore
+        /// (P14-005) only serializes same-key calls; distinct-key concurrent writes
+        /// were previously unguarded. Sibling rationale of P14-028's per-list lock
+        /// for DetailRow lists — do NOT "simplify" this back to Dictionary. The
+        /// dictionary-initializer indexer syntax used by Seed + SimulateCreateClient
+        /// works against ConcurrentDictionary's set indexer (upsert semantics).
+        /// </para>
+        /// </summary>
+        public ConcurrentDictionary<string, object?> Fields { get; init; } = new ConcurrentDictionary<string, object?>();
     }
 
     /// <summary>
@@ -145,6 +157,18 @@ namespace LacertMCP.Server.Session
         // Whether Register() has been called this process.
         private int _registered;
 
+        // P18-022 — per-(year, module, table) lock latch. Used by the ToggleLock
+        // test helper to simulate the live-mode case where the operator has the
+        // same return open in Lacerte's UI, holding the DBF file with read-share/
+        // write-deny per FoxPro/xBase semantics. The live SDK surfaces this as
+        // TAPIStatus 2 DBFNotAccessable on WriteToDBFDatabase / UpdateTaxReturn.
+        // Closed by a HashSet behind a gate object — low contention (flipped only
+        // from tests, read once per SimulateFieldWrite / SimulateCreateClient /
+        // WriteDetail).
+        private readonly object _lockedTablesGate = new object();
+        private readonly HashSet<(int year, char module, int table)> _lockedTables
+            = new HashSet<(int year, char module, int table)>();
+
         /// <summary>
         /// Default ctor: reads the <c>LACERTE_SIM_EXPIRED</c> env var, then
         /// calls <see cref="Seed"/> to populate the 8-client fixture.
@@ -205,6 +229,37 @@ namespace LacertMCP.Server.Session
         public void ToggleExpired(bool expired)
         {
             System.Threading.Interlocked.Exchange(ref _sessionExpired, expired ? 1 : 0);
+        }
+
+        /// <summary>
+        /// P18-022 — Test helper: flip the simulated DBF-lock latch for a
+        /// <c>(year, module, table)</c> triple. Mirrors the live-mode case
+        /// where the operator has the same return open in Lacerte's UI; the
+        /// underlying DATA{table}{module}{yy}.DBF is held with read-share /
+        /// write-deny (FoxPro / xBase semantics), so the live SDK returns
+        /// TAPIStatus 2 <see cref="StatusCodes.DBFNotAccessable"/> on
+        /// WriteToDBFDatabase / UpdateTaxReturn. When locked, the sim's
+        /// SimulateFieldWrite / WriteDetail / SimulateCreateClient return
+        /// the same status code so the agent's recovery path (close in UI,
+        /// retry) is rehearsable off-Windows. Not part of the public tool
+        /// surface — mirrors <see cref="ToggleExpired"/>.
+        /// </summary>
+        public void ToggleLock(int year, char module, int table, bool locked)
+        {
+            lock (_lockedTablesGate)
+            {
+                if (locked) _lockedTables.Add((year, module, table));
+                else _lockedTables.Remove((year, module, table));
+            }
+        }
+
+        // P18-022 — Returns true if the given (year, module, table) was flipped
+        // locked by ToggleLock. Called before LookupRow in SimulateFieldWrite,
+        // before the WriteDetail mutation, and against table 1 in
+        // SimulateCreateClient (which always writes DATA1 implicitly).
+        private bool IsTableLocked(int year, char module, int table)
+        {
+            lock (_lockedTablesGate) return _lockedTables.Contains((year, module, table));
         }
 
         // -------------------------------------------------------------------
@@ -308,6 +363,14 @@ namespace LacertMCP.Server.Session
                 return StatusCodes.InValidStateAbbrev;
             if (table == 4 && (!subClientID.HasValue || subClientID.Value <= 0))
                 return StatusCodes.InValidSubClientID;
+
+            // 3b. P18-022 — lock check. Operator has the return open in Lacerte's
+            // UI, so the DBF is held with read-share/write-deny per FoxPro/xBase
+            // semantics; the live SDK surfaces this as TAPIStatus 2 DBFNotAccessable
+            // on WriteToDBFDatabase / UpdateTaxReturn. Fires before the access map
+            // because a locked file means the SDK cannot even read row metadata,
+            // matching the live ordering. Flipped from tests via ToggleLock.
+            if (IsTableLocked(year, module, table)) return StatusCodes.DBFNotAccessable;
 
             // 4. access map
             var access = FieldAccessMapLoader.GetFieldAccess(module, table, field, year);
@@ -449,6 +512,13 @@ namespace LacertMCP.Server.Session
                 return StatusCodes.NotSignedIn;
             if (row == null) throw new ArgumentNullException(nameof(row));
 
+            // P18-022 — Operator has the per-client detail file ({CLIENT}.{Mod}{YY})
+            // held open in Lacerte's UI. The live SDK reports the same TAPIStatus 2
+            // DBFNotAccessable on detail writes. Detail files are not numbered DATA1-7,
+            // so the convention is table=0 for the detail-file lock latch (mirroring
+            // ToggleLock's signature without overloading the DATA{n} space).
+            if (IsTableLocked(year, module, 0)) return StatusCodes.DBFNotAccessable;
+
             var store = TryGetModule(dataPath, year, module);
             if (store == null) return StatusCodes.DetailCreationError;
             if (!store.Details.TryGetValue(clientNumber, out var list))
@@ -524,6 +594,13 @@ namespace LacertMCP.Server.Session
             if (!ModuleAcceptsTaxType(args.Module, args.TaxType))
                 return (StatusCodes.TaxModuleMismatch, null);
 
+            // 5b. P18-022 — Operator has DATA1 open in Lacerte's UI; the live
+            // SDK can't write a new client row in that state and returns
+            // TAPIStatus 2 DBFNotAccessable. CreateClient writes to DATA1 by
+            // definition, so the lock check is hardcoded to table 1.
+            if (IsTableLocked(args.Year, args.Module, 1))
+                return (StatusCodes.DBFNotAccessable, null);
+
             // 6. Duplicate-ClientId check (case-insensitive). The legacy
             // sim store keeps "ClientID" as the persisted dict key because
             // existing tests + seed data rely on that exact column name —
@@ -588,6 +665,13 @@ namespace LacertMCP.Server.Session
                 SessionExpired = System.Threading.Interlocked.CompareExchange(ref _sessionExpired, 0, 0) == 1,
             };
 
+            // P18-022 — Copy the lock-latch set under the gate so concurrent
+            // ToggleLock callers don't see a torn enumeration.
+            lock (_lockedTablesGate)
+            {
+                snap.LockedTables = new HashSet<(int year, char module, int table)>(_lockedTables);
+            }
+
             foreach (var dpKv in _root)
             {
                 var dpDict = new Dictionary<int, Dictionary<char, ModuleStore>>();
@@ -640,6 +724,17 @@ namespace LacertMCP.Server.Session
 
             System.Threading.Interlocked.Exchange(ref _registered, snapshot.Registered ? 1 : 0);
             System.Threading.Interlocked.Exchange(ref _sessionExpired, snapshot.SessionExpired ? 1 : 0);
+
+            // P18-022 — Restore the lock-latch set wholesale under the gate.
+            // Null-tolerant for older snapshots that predate the field.
+            lock (_lockedTablesGate)
+            {
+                _lockedTables.Clear();
+                if (snapshot.LockedTables != null)
+                {
+                    foreach (var triple in snapshot.LockedTables) _lockedTables.Add(triple);
+                }
+            }
         }
 
         private static ModuleStore CloneModuleStore(ModuleStore src)

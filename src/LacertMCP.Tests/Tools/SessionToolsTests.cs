@@ -631,5 +631,161 @@ namespace LacertMCP.Tests.Tools
                 try { System.IO.Directory.Delete(root, recursive: true); } catch { /* swallow */ }
             }
         }
+
+        // ----------------------------------------------------------------
+        // P18-016 — `nextSteps` preemptive bootstrap-guidance array on
+        // lacerte_session_status. Before P18-016 the snapshot carried no
+        // actionable hint when registration / context / expiry was the gap;
+        // the LLM had to call a read tool, eat a 9006/9007/9009 error, and
+        // parse its remediation to learn the recovery path. Now the same
+        // remediation text is surfaced on the snapshot the LLM already
+        // calls first.
+        // ----------------------------------------------------------------
+
+        [Fact]
+        public async Task SessionStatus_FreshUnregisteredManager_NextStepsMentionsRegister()
+        {
+            var tools = new SessionTools(ToolTestHelpers.NewUnregisteredSimManager());
+            var root = ToolTestHelpers.Parse(await tools.LacerteSessionStatus());
+            var result = root.GetProperty("result");
+
+            Assert.True(result.TryGetProperty("nextSteps", out var steps),
+                "session_status must always emit nextSteps");
+            Assert.Equal(System.Text.Json.JsonValueKind.Array, steps.ValueKind);
+            Assert.True(steps.GetArrayLength() >= 1);
+
+            // Priority: AppNotRegistered short-circuits — operator can't
+            // call set_context until they register.
+            var first = steps[0].GetString();
+            Assert.NotNull(first);
+            Assert.Contains("lacerte-mcp register", first);
+        }
+
+        [Fact]
+        public async Task SessionStatus_RegisteredNoContext_NextStepsMentionsListDatapaths()
+        {
+            var mgr = ToolTestHelpers.NewSimManager(); // auto-registers, no context
+            var tools = new SessionTools(mgr);
+
+            var root = ToolTestHelpers.Parse(await tools.LacerteSessionStatus());
+            var result = root.GetProperty("result");
+            var steps = result.GetProperty("nextSteps");
+            Assert.True(steps.GetArrayLength() >= 1);
+
+            // Pulls the 9009 remediation text — should mention the
+            // canonical bootstrap path and the seeded sim paths (P16-042).
+            var hint = steps[0].GetString();
+            Assert.NotNull(hint);
+            Assert.Contains("lacerte_list_datapaths", hint);
+            Assert.Contains("lacerte_set_context", hint);
+        }
+
+        [Fact]
+        public async Task SessionStatus_RegisteredWithContext_NextStepsEmpty()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tools = new SessionTools(mgr);
+
+            var root = ToolTestHelpers.Parse(await tools.LacerteSessionStatus());
+            var result = root.GetProperty("result");
+            var steps = result.GetProperty("nextSteps");
+
+            // Happy path — registered, context set, fresh 24h auth ticket
+            // (well above the 10-min expiry-soon threshold). The nextSteps
+            // array exists but is empty so the shape stays stable.
+            Assert.Equal(System.Text.Json.JsonValueKind.Array, steps.ValueKind);
+            Assert.Equal(0, steps.GetArrayLength());
+        }
+
+        // --- Pure-helper unit tests for BuildNextSteps priority ordering ---
+
+        [Fact]
+        public void BuildNextSteps_NullSnapshot_ReturnsEmpty()
+        {
+            Assert.Empty(SessionTools.BuildNextSteps(null!, null));
+        }
+
+        [Fact]
+        public void BuildNextSteps_UnregisteredShortCircuits_NoContextHintEvenWhenContextMissing()
+        {
+            // !isRegistered short-circuits — the operator can't call
+            // set_context until they register, so surfacing two hints
+            // would just confuse the LLM. One actionable next step at a
+            // time keeps the snapshot tight.
+            var snapshot = new SessionStatusSnapshot(
+                Mode: SessionMode.Simulation,
+                IsRegistered: false,
+                RegisteredAt: null,
+                ExpiresAt: null,
+                MinutesUntilExpiry: null,
+                Context: null,
+                AppName: "TestApp",
+                AppId: "***");
+
+            var steps = SessionTools.BuildNextSteps(snapshot, null);
+            Assert.Single(steps);
+            Assert.Contains("lacerte-mcp register", steps[0]);
+        }
+
+        [Fact]
+        public void BuildNextSteps_RegisteredNoContext_SurfacesContextNotSetHint()
+        {
+            var snapshot = new SessionStatusSnapshot(
+                Mode: SessionMode.Simulation,
+                IsRegistered: true,
+                RegisteredAt: System.DateTimeOffset.UtcNow,
+                ExpiresAt: System.DateTimeOffset.UtcNow.AddHours(24),
+                MinutesUntilExpiry: 1440,
+                Context: null,
+                AppName: "TestApp",
+                AppId: "***");
+
+            var steps = SessionTools.BuildNextSteps(snapshot, 1440);
+            Assert.Single(steps);
+            Assert.Contains("lacerte_list_datapaths", steps[0]);
+            Assert.Contains("lacerte_set_context", steps[0]);
+        }
+
+        [Fact]
+        public void BuildNextSteps_NearExpiry_SurfacesLoginHint()
+        {
+            var ctx = new SessionContext(SeedData.DataPathIData2024, 2024, 'I', false);
+            var snapshot = new SessionStatusSnapshot(
+                Mode: SessionMode.Simulation,
+                IsRegistered: true,
+                RegisteredAt: System.DateTimeOffset.UtcNow.AddHours(-23.9),
+                ExpiresAt: System.DateTimeOffset.UtcNow.AddMinutes(5),
+                MinutesUntilExpiry: 5,
+                Context: ctx,
+                AppName: "TestApp",
+                AppId: "***");
+
+            var steps = SessionTools.BuildNextSteps(snapshot, 5);
+            Assert.Single(steps);
+            Assert.Contains("lacerte-mcp login", steps[0]);
+            // Format the elapsed-minutes count into the prefix so the
+            // operator gets a concrete deadline, not just an abstract
+            // "expiring soon".
+            Assert.Contains("5", steps[0]);
+        }
+
+        [Fact]
+        public void BuildNextSteps_HappyPath_ReturnsEmpty()
+        {
+            var ctx = new SessionContext(SeedData.DataPathIData2024, 2024, 'I', false);
+            var snapshot = new SessionStatusSnapshot(
+                Mode: SessionMode.Simulation,
+                IsRegistered: true,
+                RegisteredAt: System.DateTimeOffset.UtcNow,
+                ExpiresAt: System.DateTimeOffset.UtcNow.AddHours(24),
+                MinutesUntilExpiry: 1440,
+                Context: ctx,
+                AppName: "TestApp",
+                AppId: "***");
+
+            var steps = SessionTools.BuildNextSteps(snapshot, 1440);
+            Assert.Empty(steps);
+        }
     }
 }

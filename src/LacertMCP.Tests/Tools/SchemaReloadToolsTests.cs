@@ -32,11 +32,9 @@ namespace LacertMCP.Tests.Tools
 
         private static void ResetLoaderCache()
         {
-            var t = typeof(FieldAccessMapLoader);
-            var moduleCacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-            var overlayCacheField = t.GetField("_overlayCache", BindingFlags.NonPublic | BindingFlags.Static);
-            (moduleCacheField?.GetValue(null) as IDictionary)?.Clear();
-            (overlayCacheField?.GetValue(null) as IDictionary)?.Clear();
+            // P18-020 — cache state moved into a single immutable
+            // AccessMapSnapshot swapped atomically by ReloadCaches.
+            FieldAccessMapLoader.ReloadCaches();
         }
 
         [Fact]

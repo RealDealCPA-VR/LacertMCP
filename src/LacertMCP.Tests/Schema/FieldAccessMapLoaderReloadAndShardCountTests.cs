@@ -123,15 +123,11 @@ namespace LacertMCP.Tests.Schema
             FieldAccessMapLoader.GetShardCounts();
 
             // Caches stay empty (no GetOrAdd calls executed).
-            var t = typeof(FieldAccessMapLoader);
-            var moduleCache = (IDictionary?)t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static)
-                ?.GetValue(null);
-            var overlayCache = (IDictionary?)t.GetField("_overlayCache", BindingFlags.NonPublic | BindingFlags.Static)
-                ?.GetValue(null);
-            Assert.NotNull(moduleCache);
-            Assert.NotNull(overlayCache);
-            Assert.Empty(moduleCache!);
-            Assert.Empty(overlayCache!);
+            var (modules, overlays) = GetSnapshotDicts();
+            Assert.NotNull(modules);
+            Assert.NotNull(overlays);
+            Assert.Empty(modules!);
+            Assert.Empty(overlays!);
         }
 
         // ============================================================
@@ -277,11 +273,28 @@ namespace LacertMCP.Tests.Schema
 
         private static void ResetLoaderCache()
         {
+            // P18-020 — cache state moved into a single immutable AccessMapSnapshot
+            // swapped atomically by ReloadCaches; call it to install a fresh
+            // empty snapshot (semantically equivalent to clearing the two
+            // dictionaries from the previous design).
+            FieldAccessMapLoader.ReloadCaches();
+        }
+
+        /// <summary>
+        /// Reflect through the AccessMapSnapshot indirection to inspect the
+        /// per-module + per-overlay cache dictionaries. Used by tests that
+        /// want to assert "nothing got loaded into the caches."
+        /// </summary>
+        private static (IDictionary? modules, IDictionary? overlays) GetSnapshotDicts()
+        {
             var t = typeof(FieldAccessMapLoader);
-            var moduleCacheField = t.GetField("_moduleCache", BindingFlags.NonPublic | BindingFlags.Static);
-            var overlayCacheField = t.GetField("_overlayCache", BindingFlags.NonPublic | BindingFlags.Static);
-            (moduleCacheField?.GetValue(null) as IDictionary)?.Clear();
-            (overlayCacheField?.GetValue(null) as IDictionary)?.Clear();
+            var snapshotField = t.GetField("_snapshot", BindingFlags.NonPublic | BindingFlags.Static);
+            var snapshot = snapshotField?.GetValue(null);
+            if (snapshot == null) return (null, null);
+            var snapType = snapshot.GetType();
+            var modules = snapType.GetProperty("Modules", BindingFlags.Public | BindingFlags.Instance)?.GetValue(snapshot) as IDictionary;
+            var overlays = snapType.GetProperty("Overlays", BindingFlags.Public | BindingFlags.Instance)?.GetValue(snapshot) as IDictionary;
+            return (modules, overlays);
         }
     }
 }

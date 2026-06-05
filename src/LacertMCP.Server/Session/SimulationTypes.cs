@@ -60,5 +60,14 @@ namespace LacertMCP.Server.Session
 
         /// <summary>Cloned value of the sessionExpired latch at snapshot time.</summary>
         public bool SessionExpired { get; set; }
+
+        /// <summary>
+        /// P18-022 — Cloned (year, module, table) lock-latch set at snapshot
+        /// time. Carried so that a Snapshot → ToggleLock → Restore round-trip
+        /// is observationally a no-op (mirrors how Registered/SessionExpired
+        /// already participate in the rollback contract).
+        /// </summary>
+        public HashSet<(int year, char module, int table)> LockedTables { get; set; }
+            = new HashSet<(int year, char module, int table)>();
     }
 }

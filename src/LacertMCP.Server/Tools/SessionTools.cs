@@ -40,7 +40,7 @@ namespace LacertMCP.Server.Tools
         public SessionTools(LacerteSessionManager session) => _session = session;
 
         [McpServerTool]
-        [Description("Return a snapshot of the active session — mode, registration state, 24h expiry, active context (datapath/taxYear/module/readOnly), and wire-log diagnostic state (debugWireEnabled + wireLogPath, for the 9201/9203 'inspect logs/...' remediation). Zero wire I/O.")]
+        [Description("Return a snapshot of the active session — mode, registration state, 24h expiry, active context (datapath/taxYear/module/readOnly), wire-log diagnostic state (debugWireEnabled + wireLogPath, for the 9201/9203 'inspect logs/...' remediation), and a `nextSteps` array of bootstrap hints (empty on the happy path). Zero wire I/O. Tip: call this FIRST on every fresh session — `nextSteps` will preemptively surface 'run lacerte-mcp register' / 'call lacerte_set_context' / 'lacerte-mcp login (auth expires in N min)' instead of forcing you to call a read tool and parse a 9006/9007/9009 error envelope to learn the same thing.")]
         public Task<string> LacerteSessionStatus()
             => WrapToolHandler.Run(() =>
             {
@@ -51,6 +51,13 @@ namespace LacertMCP.Server.Tools
                 double? minutesUntilExpiry = s.MinutesUntilExpiry.HasValue
                     ? Math.Round(s.MinutesUntilExpiry.Value, 1, MidpointRounding.AwayFromZero)
                     : (double?)null;
+                // P18-016 — preemptive bootstrap guidance. The 9006/9007/9009
+                // remediation strings already encode the canonical recovery
+                // paths; surface them on the snapshot the LLM ALREADY calls
+                // first so it can pivot WITHOUT first eating a reactive
+                // error envelope from any other tool. Empty array on the
+                // happy path keeps the shape stable.
+                var nextSteps = BuildNextSteps(s, minutesUntilExpiry);
                 return Task.FromResult<object>(new
                 {
                     // Lowercase mode ("simulation"/"live") aligned with
@@ -82,8 +89,89 @@ namespace LacertMCP.Server.Tools
                     // grep at the exact location.
                     debugWireEnabled = s.DebugWireEnabled,
                     wireLogPath = s.WireLogPath,
+                    // P18-016 — preemptive bootstrap guidance. Always emitted
+                    // (empty array on the happy path) so the wire shape stays
+                    // stable for clients that key off the field's presence.
+                    nextSteps,
                 });
             });
+
+        /// <summary>
+        /// P18-016 — assemble the <c>nextSteps</c> bootstrap-guidance array
+        /// for <see cref="LacerteSessionStatus"/>. Pulls remediation text
+        /// from <see cref="SyntheticStatusCodes.StatusTable"/> so a future
+        /// edit to a 9006/9007/9009 remediation string auto-propagates to
+        /// the session-status snapshot — single source of truth.
+        ///
+        /// <para>Public so <c>SessionToolsTests</c> can exercise the priority
+        /// ordering without spinning up the WrapToolHandler envelope.</para>
+        ///
+        /// <para>Priority order: registration gap (9006) takes precedence
+        /// over context gap (9009) because <c>lacerte_set_context</c>
+        /// requires registration; context gap takes precedence over
+        /// near-expiry (9007) because writes will throw 9009 before they
+        /// throw 9007. The happy path (registered + context set + not near
+        /// expiry) yields an empty array.</para>
+        /// </summary>
+        public static IReadOnlyList<string> BuildNextSteps(
+            SessionStatusSnapshot snapshot, double? minutesUntilExpiry)
+        {
+            var steps = new List<string>(3);
+            if (snapshot == null) return steps;
+
+            // (1) Not registered — the cold-start case for every fresh box.
+            if (!snapshot.IsRegistered)
+            {
+                steps.Add(GetRemediation(SyntheticStatusCodes.AppNotRegistered));
+                return steps;
+            }
+            // (2) Registered but no context — the most common state after a
+            // process restart on an already-registered box.
+            if (snapshot.Context == null)
+            {
+                steps.Add(GetRemediation(SyntheticStatusCodes.ContextNotSet));
+                // Don't fall through to the expiry check — without context
+                // the operator can't write yet, so the expiry warning is
+                // noise until they call set_context first.
+                return steps;
+            }
+            // (3) Registered + context set + auth ticket within 10 min of
+            // expiry — give the operator a chance to refresh BEFORE the
+            // next write fails.
+            if (minutesUntilExpiry.HasValue && minutesUntilExpiry.Value < ExpirySoonThresholdMinutes)
+            {
+                var minutesFmt = minutesUntilExpiry.Value.ToString("0.#",
+                    System.Globalization.CultureInfo.InvariantCulture);
+                steps.Add(
+                    $"Auth ticket expires in {minutesFmt} min — preempt: "
+                    + GetRemediation(SyntheticStatusCodes.LoginExpired));
+            }
+            return steps;
+        }
+
+        /// <summary>
+        /// P18-016 — minutes-until-expiry threshold below which the snapshot
+        /// surfaces a preemptive "refresh auth ticket" nextStep. Picked at
+        /// 10 minutes so the operator has time to run <c>lacerte-mcp login</c>
+        /// before the next write call, but not so far ahead that the hint
+        /// becomes noise for an actively-used session.
+        /// </summary>
+        public const double ExpirySoonThresholdMinutes = 10.0;
+
+        private static string GetRemediation(int code)
+        {
+            // The StatusTable is the single source of truth for every
+            // synthetic remediation string. Fall back to a terse
+            // synthetic-code reference when an entry is missing rather
+            // than throwing — SessionStatus is the operator's escape
+            // hatch and must never poison itself.
+            if (SyntheticStatusCodes.StatusTable.TryGetValue(code, out var info)
+                && !string.IsNullOrEmpty(info?.Remediation))
+            {
+                return info!.Remediation!;
+            }
+            return $"Synthetic status {code} — see SyntheticStatusCodes.StatusTable for remediation.";
+        }
 
         [McpServerTool]
         [Description("Set the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates year >= 2018 and module in I/C/P/S/F/R/T/N/B. Pass readOnly=true to lock the session against any write tool.")]

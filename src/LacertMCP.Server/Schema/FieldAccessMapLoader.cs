@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using LacertMCP.Server.Errors;
 
 namespace LacertMCP.Server.Schema
@@ -30,11 +31,24 @@ namespace LacertMCP.Server.Schema
     /// </list>
     ///
     /// <para>
-    /// Module + overlay maps are cached per-process in a
-    /// <see cref="ConcurrentDictionary{TKey,TValue}"/>; a missing or
-    /// malformed file caches an empty map so we don't re-stat the disk on
-    /// every call AND so a single typo in a shipped overlay doesn't poison
-    /// every subsequent write attempt for the lifetime of the process.
+    /// Module + overlay maps are cached per-process inside a single immutable
+    /// snapshot held in <see cref="_snapshot"/>; a missing or malformed file
+    /// caches an empty map so we don't re-stat the disk on every call AND so a
+    /// single typo in a shipped overlay (or a half-written base shard from a
+    /// crashed FieldAccessDumper run) doesn't poison every subsequent write
+    /// attempt for the lifetime of the process.
+    /// </para>
+    ///
+    /// <para>
+    /// P18-020 — <see cref="ReloadCaches"/> atomically swaps the snapshot via
+    /// <see cref="Interlocked.Exchange{T}(ref T,T)"/>; readers capture the
+    /// snapshot once at the entry of <see cref="GetFieldAccess"/> so both the
+    /// overlay-precedence lookup and the base-map fallback are drawn from the
+    /// SAME generation. Without this, a reload that races a write could
+    /// compose a (NEW base, OLD overlay) blend — a field newly marked
+    /// NotSupported in the updated overlay would still be ReadWrite per the
+    /// stale cached base, and the write would go through. The chokepoint has
+    /// no cross-thread synchronization with the reload otherwise.
     /// </para>
     ///
     /// <para>
@@ -47,11 +61,26 @@ namespace LacertMCP.Server.Schema
     /// </summary>
     public static class FieldAccessMapLoader
     {
-        private static readonly ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>> _moduleCache
-            = new ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>();
+        /// <summary>
+        /// P18-020 — the per-process cache state, held as a single immutable
+        /// reference so ReloadCaches can swap base + overlay atomically.
+        /// GetFieldAccess captures this once at entry so both the overlay and
+        /// base-map lookups within one call are guaranteed to consult the
+        /// same generation — no (NEW base, OLD overlay) blend.
+        /// </summary>
+        private sealed class AccessMapSnapshot
+        {
+            public ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>> Modules { get; }
+            public ConcurrentDictionary<int, TaxYearOverlay> Overlays { get; }
 
-        private static readonly ConcurrentDictionary<int, TaxYearOverlay> _overlayCache
-            = new ConcurrentDictionary<int, TaxYearOverlay>();
+            public AccessMapSnapshot()
+            {
+                Modules = new ConcurrentDictionary<char, IReadOnlyDictionary<string, FieldEntry>>();
+                Overlays = new ConcurrentDictionary<int, TaxYearOverlay>();
+            }
+        }
+
+        private static AccessMapSnapshot _snapshot = new AccessMapSnapshot();
 
         private static readonly JsonSerializerOptions _jsonOptions = BuildJsonOptions();
 
@@ -153,15 +182,22 @@ namespace LacertMCP.Server.Schema
             var normField = field.ToUpperInvariant();
             var key = module + "|" + TableString(table) + "|" + normField;
 
+            // P18-020 — capture the snapshot ONCE so both the overlay-precedence
+            // lookup and the base-map fallback below consult the same generation.
+            // A concurrent ReloadCaches Interlocked-swaps a fresh snapshot in;
+            // every call already in flight finishes against the snapshot it
+            // captured here, never blending (NEW base, OLD overlay) or vice versa.
+            var snap = Volatile.Read(ref _snapshot);
+
             // 2. Overlay (TY-version delta) wins over base.
-            var overlay = LoadOverlay(taxYear);
+            var overlay = LoadOverlay(snap, taxYear);
             if (overlay != null && overlay.Overrides.TryGetValue(key, out var o))
             {
                 return o.Access;
             }
 
             // 3. Base map.
-            var baseMap = LoadModule(module);
+            var baseMap = LoadModule(snap, module);
             if (baseMap.TryGetValue(key, out var entry))
             {
                 return entry.Access;
@@ -241,9 +277,9 @@ namespace LacertMCP.Server.Schema
 
         // ---- Internals ----
 
-        private static IReadOnlyDictionary<string, FieldEntry> LoadModule(char module)
+        private static IReadOnlyDictionary<string, FieldEntry> LoadModule(AccessMapSnapshot snap, char module)
         {
-            return _moduleCache.GetOrAdd(module, m =>
+            return snap.Modules.GetOrAdd(module, m =>
             {
                 var basename = Modules.FileBasenameFor(m);
                 if (basename == null)
@@ -258,10 +294,41 @@ namespace LacertMCP.Server.Schema
                     return new Dictionary<string, FieldEntry>();
                 }
 
-                using (var stream = File.OpenRead(path))
+                // P18-007 — be defensive about malformed/corrupted base shards
+                // symmetric with LoadOverlay below. The FieldAccessDumper
+                // workflow (P15-044 lacerte_reload_schema) made operator-
+                // triggered shard regeneration the supported happy path; a
+                // crash mid-write of `individual.json` (Ctrl-C, OS reboot,
+                // antivirus locking the file at the wrong instant) leaves a
+                // truncated/garbled file. Without this try/catch, a
+                // JsonException inside the GetOrAdd factory would propagate
+                // every call (because the entry never gets cached) —
+                // effectively process-wide-poisoning every write attempt
+                // for the lifetime of the process. The dumper's whole reason
+                // for existing was to let operators refresh shards on a
+                // long-lived MCP server without the 24h Intuit auth ticket
+                // restart, and a crash during the refresh would defeat that
+                // promise. A shipping typo or a half-written shard should
+                // fail open to "no entries for this module" (callers get
+                // Unknown, surfaced as 9012 UnknownFieldAccess on a single
+                // field, recoverable via force:true) rather than nuke every
+                // future write. Other failure modes (IOException for true
+                // sharing-violation) deliberately propagate so genuine I/O
+                // issues stay observable.
+                try
                 {
-                    var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions);
-                    return (IReadOnlyDictionary<string, FieldEntry>)(map ?? new Dictionary<string, FieldEntry>());
+                    using (var stream = File.OpenRead(path))
+                    {
+                        var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions);
+                        return (IReadOnlyDictionary<string, FieldEntry>)(map ?? new Dictionary<string, FieldEntry>());
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Cache an empty sentinel so subsequent calls don't
+                    // re-open, re-parse, and re-throw. Mirror LoadOverlay's
+                    // documented degrade-to-empty behavior.
+                    return new Dictionary<string, FieldEntry>();
                 }
             });
         }
@@ -288,9 +355,9 @@ namespace LacertMCP.Server.Schema
         /// by manifest authoring discipline, not by the loader.
         /// </para>
         /// </summary>
-        private static TaxYearOverlay? LoadOverlay(int taxYear)
+        private static TaxYearOverlay? LoadOverlay(AccessMapSnapshot snap, int taxYear)
         {
-            return _overlayCache.GetOrAdd(taxYear, year =>
+            return snap.Overlays.GetOrAdd(taxYear, year =>
             {
                 var yy = (year % 100).ToString("D2");
                 var path = Path.Combine(SchemaRoot(), "overlays", "ty" + yy + "-not-supported.json");
@@ -357,17 +424,32 @@ namespace LacertMCP.Server.Schema
         /// </para>
         ///
         /// <para>
+        /// P18-020 — implemented as a single atomic snapshot swap via
+        /// <see cref="Interlocked.Exchange{T}(ref T,T)"/>. The previous
+        /// implementation cleared two independent <c>ConcurrentDictionary</c>
+        /// instances on separate lines with no shared synchronization, which
+        /// opened a window where one cache was empty while the other still
+        /// held last-process state — readers entering between the two Clear
+        /// calls could compose a (NEW base, OLD overlay) lookup, blocking a
+        /// write that should succeed (or worse, allowing a write that the
+        /// new overlay just marked NotSupported). The fresh snapshot lazy-
+        /// loads on demand under the same disk paths; counts evicted are
+        /// reported from the displaced snapshot.
+        /// </para>
+        ///
+        /// <para>
         /// Single-load semantics remain the default — this is an EXPLICIT
         /// reload, not a watcher. No surprise reloads mid-tool.
         /// </para>
         /// </summary>
         public static (int modulesEvicted, int overlaysEvicted) ReloadCaches()
         {
-            var modules = _moduleCache.Count;
-            var overlays = _overlayCache.Count;
-            _moduleCache.Clear();
-            _overlayCache.Clear();
-            return (modules, overlays);
+            // Atomic single-pointer swap. Readers already inside GetFieldAccess
+            // captured the previous snapshot at entry and finish their lookup
+            // against it — no torn (base, overlay) blend is observable.
+            var fresh = new AccessMapSnapshot();
+            var prior = Interlocked.Exchange(ref _snapshot, fresh);
+            return (prior.Modules.Count, prior.Overlays.Count);
         }
 
         /// <summary>Test-only: forget all cached module + overlay JSON.</summary>

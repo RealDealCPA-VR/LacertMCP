@@ -74,6 +74,14 @@ namespace LacertMCP.FieldAccessDumper
             Console.WriteLine($"[dumper] Output dir: {baseDir}");
             Console.WriteLine($"[dumper] Mode: {(opts.Live ? "live (probe via bridge)" : "sim (probe via FieldAccessMapLoader + SimulateFieldWrite)")}");
 
+            // P18-007 — sweep orphan .tmp siblings from a prior interrupted
+            // run so the directory stays clean. The atomic write below stages
+            // through `{shard}.json.tmp`; a kill mid-write leaves that file
+            // behind without ever promoting it to canonical, and the loader
+            // never reads it (it only globs `*.json`, not `*.tmp`). Cleaning
+            // up matches the dumper's own clean-state ethos.
+            SweepOrphanTmps(baseDir);
+
             // Candidate triples to probe. In sim mode this is small (seed-derived
             // demo fields); in live mode the dumper would enumerate via the
             // bridge — see ProbeLiveAccess below.
@@ -151,7 +159,27 @@ namespace LacertMCP.FieldAccessDumper
             });
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, json);
+
+            // P18-007 — atomic write: stage the new bytes in a sibling .tmp,
+            // then Delete-canonical + Move-tmp-to-canonical. If the dumper is
+            // killed (Ctrl-C, OS reboot, antivirus pausing the file mid-write)
+            // BEFORE the tmp is fully written, the canonical shard stays
+            // intact — the loader never sees a truncated/garbled JSON.
+            // Without this, File.WriteAllText opens FileMode.Create which
+            // truncates the existing file atomically THEN streams bytes —
+            // a kill between truncate and full write leaves half-written
+            // JSON that poisons FieldAccessMapLoader.LoadModule for the
+            // entire process lifetime (paired defensive try/catch landed
+            // in LoadModule for P18-007 keeps the loader safe; this atomic
+            // write keeps the on-disk shard correct too).
+            //
+            // Pattern mirrors LacerteSessionManager.PersistIdempotencyCacheToDisk
+            // — the project convention for create-or-replace on net48 where
+            // File.Replace requires the destination to exist on first write.
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, json);
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
             Console.WriteLine($"[dumper] {Path.GetFileName(path)}: +{added} new, ~{overwritten} overwritten, ={kept} preserved");
         }
 
@@ -235,6 +263,37 @@ namespace LacertMCP.FieldAccessDumper
         // =================================================================
         // I/O helpers
         // =================================================================
+
+        /// <summary>
+        /// P18-007 — best-effort cleanup of orphan <c>*.json.tmp</c> files
+        /// left behind by a prior interrupted dumper run. Safe to call
+        /// on a directory that doesn't exist (no-op). Failures are logged
+        /// but do not abort the run — the canonical shards are still readable
+        /// because the loader globs <c>*.json</c>, not <c>*.tmp</c>.
+        /// </summary>
+        private static void SweepOrphanTmps(string baseDir)
+        {
+            if (!Directory.Exists(baseDir)) return;
+            try
+            {
+                foreach (var tmp in Directory.GetFiles(baseDir, "*.json.tmp", SearchOption.TopDirectoryOnly))
+                {
+                    try
+                    {
+                        File.Delete(tmp);
+                        Console.WriteLine($"[dumper] cleaned orphan tmp: {Path.GetFileName(tmp)}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"[dumper] WARN: failed to delete orphan tmp {tmp}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[dumper] WARN: orphan-tmp sweep failed for {baseDir}: {ex.Message}");
+            }
+        }
 
         private static Dictionary<string, FieldEntry> LoadExisting(string path)
         {

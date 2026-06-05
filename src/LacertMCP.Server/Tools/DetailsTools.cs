@@ -125,7 +125,7 @@ namespace LacertMCP.Server.Tools
             [Description("Import source tag. Defaults to empty — omit unless the row originated from an import workflow.")] string importSrc = "",
             [Description("Optional zero-based index to overwrite an existing row instead of appending.")] int? replaceIndex = null,
             [Description("If true, validate + simulate the write but roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102 IdempotencyConflict.")] string? idempotencyKey = null)
+            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'detail_write-{clientNumber}-{series}-{code}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry will APPEND a duplicate detail row (detail writes default to append when replaceIndex is null — silently doubling a W-2/1099/dependent row). Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null)
         {
             return WrapToolHandler.Run(async () =>
             {

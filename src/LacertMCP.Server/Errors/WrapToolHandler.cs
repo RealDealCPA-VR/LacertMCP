@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Odbc;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Unicode;
 using System.Threading.Tasks;
+using LacertMCP.Server.Diagnostics;
 using LacertMCP.Server.Logging;
 using LacertMCP.Server.Odbc;
 
@@ -90,8 +93,21 @@ namespace LacertMCP.Server.Errors
 
         /// <summary>
         /// Executes <paramref name="handler"/> and returns a JSON-serialized envelope.
+        ///
+        /// <para>
+        /// P18-027 — every entry records into <see cref="StatsRegistry"/> so
+        /// the <c>lacerte_request_stats</c> aggregate surface includes this
+        /// invocation. <paramref name="opName"/> is resolved from
+        /// <see cref="CallerMemberNameAttribute"/> when the caller doesn't
+        /// pass an explicit name, which means every existing call site
+        /// continues to compile unchanged AND every tool method name
+        /// (e.g. <c>LacerteSessionStatus</c>, <c>LacerteClientCreate</c>)
+        /// flows into the per-op breakdown for free.
+        /// </para>
         /// </summary>
-        public static async Task<string> Run(Func<Task<object>> handler)
+        public static async Task<string> Run(
+            Func<Task<object>> handler,
+            [CallerMemberName] string opName = "")
         {
             if (handler == null)
             {
@@ -105,6 +121,11 @@ namespace LacertMCP.Server.Errors
             var cid = GenerateCorrelationId();
             var prior = WireLog.CurrentCorrelationId.Value;
             WireLog.CurrentCorrelationId.Value = cid;
+            // P18-027 — start the stopwatch ONLY after the cid plumbing is
+            // in place so the recorded latency reflects the handler body,
+            // not the bookkeeping we do before it.
+            var sw = Stopwatch.StartNew();
+            bool success = false;
             try
             {
                 try
@@ -116,7 +137,9 @@ namespace LacertMCP.Server.Errors
                         ["result"] = result,
                         ["cid"] = cid,
                     };
-                    return WireLog.Redact(JsonSerializer.Serialize(envelope, JsonOptions), RedactionScope.Wire);
+                    var serialized = WireLog.Redact(JsonSerializer.Serialize(envelope, JsonOptions), RedactionScope.Wire);
+                    success = true;
+                    return serialized;
                 }
                 catch (LacerteSDKError sdkErr)
                 {
@@ -150,6 +173,14 @@ namespace LacertMCP.Server.Errors
             }
             finally
             {
+                sw.Stop();
+                // P18-027 — defensive: a registry fault must never poison
+                // the wire envelope. The hot-path increment is a single
+                // Interlocked op so the realistic failure surface is null
+                // string interning or a class-init race; both swallowed.
+                try { StatsRegistry.RecordOp(opName, success, sw.ElapsedMilliseconds); }
+                catch { /* never poison the operator path */ }
+
                 // Defensive restore — AsyncLocal flows naturally on async/await
                 // but threadpool reuse and parallel calls share the same
                 // ExecutionContext snapshot, so make sure we leave the slot
