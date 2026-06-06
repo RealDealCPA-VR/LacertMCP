@@ -460,6 +460,13 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 
 ## Reference
 
+**Start here:**
+
+* **[INSTRUCTION_MANUAL.md](INSTRUCTION_MANUAL.md)** — comprehensive end-to-end user manual: install, configure, every tool, every CLI command, every env var, common workflows, error reference, troubleshooting. The single document a new operator should read.
+* **[SKILL.md](SKILL.md)** — Claude Code skill file (YAML frontmatter + body). Tells an LLM agent when to drive Lacerte MCP and how to use it correctly: tool catalog, wire conventions, error envelope, common recipes, anti-patterns. Optimized for LLM consumption.
+
+**Deeper references:**
+
 * Source spec: [Lacerte_MCP_Structure_Spec.md](Lacerte_MCP_Structure_Spec.md)
 * Operating system for this codebase: [CLAUDE.md](CLAUDE.md)
 * Architecture: [ARCHITECTURE.md](ARCHITECTURE.md)

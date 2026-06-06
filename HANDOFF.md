@@ -82,6 +82,12 @@
 - **P17-015**: Parity tests no longer run sim-twice — `[BothModesData]` gates the Live leg behind `LACERTE_PARITY_RECORDING` env var or a non-example fixture under `Parity/fixtures/`. Off-Windows/CI now shows 1 honest skip (`LiveLegParityPlaceholder.LiveLeg_AwaitsRecordedReplayFixture`) instead of ~29 fake passes. Live leg auto-flips green when the operator drops a real recording.
 - **P17-017**: `Bridge/Registration.GetStoredAppId` no longer drifts from `AppIdStore` on `LACERTE_MCP_FORCE_FILE_STORE` semantics — both paths share a test that round-trips.
 
+### New documentation (2026-06-05)
+
+- **[`INSTRUCTION_MANUAL.md`](INSTRUCTION_MANUAL.md)** (1448 lines) — comprehensive operator manual. 21 sections covering install (sim + live), every tool with parameter shapes, all 4 prompts, all 7 CLI subcommands, full env-var table, common workflows (A-G), error reference (SDK + TPSDKStatus + synthetic), wire conventions, best practices, two-modes comparison, operational notes, 9-scenario troubleshooting, architecture overview, glossary. Self-contained — a new operator can install and use every feature without reading anything else.
+- **[`SKILL.md`](SKILL.md)** (442 lines) — Claude Code skill file. YAML frontmatter with positive triggers (operator phrases, sim seed IDs, CLI commands, env vars, TAPIStatus, DBF tables) + explicit negative triggers (Drake/UltraTax/ProConnect/TurboTax/QuickBooks). Body covers when-to-use, mode awareness, mandatory first-step discipline, wire conventions, the full 38-tool catalog by intent, 4 prompts, 9 multi-step recipes, idempotency rules, error tables (SDK + synthetic), 11 anti-patterns, escape hatches. Optimized for LLM consumption — read once, drive correctly thereafter.
+- README.md "Reference" section now points to both as the canonical starting docs.
+
 ### Workflow artifacts (on disk)
 
 - `audit-findings.json` + `audit-findings-r2.json` + `audit-findings-r3.json` + `audit-findings-r4.json` + `audit-findings-r5.json` — 287 audit entries with verdicts + refinedRecommendations
