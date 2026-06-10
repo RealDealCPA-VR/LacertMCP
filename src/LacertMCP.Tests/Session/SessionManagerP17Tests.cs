@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Bridge;
@@ -28,13 +30,14 @@ namespace LacertMCP.Tests.Session
     ///   <c>LACERTE_IDEMPOTENCY_PERSIST_PATH</c>. Expired entries are
     ///   dropped on load; unknown discriminators are skipped, not
     ///   thrown.</description></item>
-    ///   <item><description>P17-007 — HMAC-keyed fingerprint prefixes never
+    ///   <item><description>P17-007 / R6-01 — fingerprint prefixes never
     ///   ship to the wire envelope unless <c>LACERTE_DEBUG_WIRE=1</c>
-    ///   is enabled. Two different payloads still produce two distinct
-    ///   prefixes within a single process when diagnostics are on (the
-    ///   triage UX P15-074 wanted) — but those prefixes are NOT plain
-    ///   SHA-256, so offline brute-force on a small-search-space PII
-    ///   value can't recover the cached secret.</description></item>
+    ///   is enabled. R6-01 reverted the fingerprints themselves to plain
+    ///   (unkeyed) SHA-256 because the per-process HMAC key broke P17-004
+    ///   cross-restart replay; the debug-wire gate is now the sole (and
+    ///   sufficient) defense against the P17-007 offline brute-force,
+    ///   since no fingerprint material reaches the wire in the default
+    ///   posture.</description></item>
     ///   <item><description>P17-011 — <c>CloneRow</c> emits camelCase wire
     ///   keys for the three SDK-meta aliases plus the
     ///   <c>ClientID</c>-family Fields aliases, while preserving FoxPro
@@ -200,9 +203,60 @@ namespace LacertMCP.Tests.Session
         // ===================================================================
 
         [Fact]
-        public async Task IdempotencyPersistence_OffByDefault_LegacyBehavior()
+        public async Task IdempotencyPersistence_HermeticEnvWithNoStorageLocation_StaysDisabled()
         {
+            // R6-26 — persistence is default ON in production (the process
+            // env always carries APPDATA / HOME), but an injected hermetic
+            // env dict that names NO storage location (no explicit path, no
+            // per-user base dir key) stays ephemeral so tests and embedders
+            // don't silently write into the host user's real profile.
             var mgr = new LacerteSessionManager(new Dictionary<string, string?>());
+            Assert.False(mgr.IdempotencyPersistEnabled);
+            Assert.Null(mgr.IdempotencyCachePath);
+            await Task.CompletedTask;
+        }
+
+        [Fact]
+        public async Task IdempotencyPersistence_DefaultOn_WhenFlagUnsetButPathProvided()
+        {
+            // R6-26 — flag UNSET + a siteable location → persistence is ON.
+            // Pre-R6-26 the code required an explicit =1 (opt-in), directly
+            // contradicting the doc-block's "Default ON; disable via =0".
+            var tmpDir = Path.Combine(Path.GetTempPath(),
+                "lacerte-mcp-test-r626-" + Guid.NewGuid().ToString("N"));
+            var tmpPath = Path.Combine(tmpDir, "idempotency-cache.json");
+            try
+            {
+                var env = new Dictionary<string, string?>
+                {
+                    // No LACERTE_IDEMPOTENCY_PERSIST key at all.
+                    ["LACERTE_IDEMPOTENCY_PERSIST_PATH"] = tmpPath,
+                };
+                using var mgr = new LacerteSessionManager(env);
+                Assert.True(mgr.IdempotencyPersistEnabled,
+                    "R6-26: persistence must default ON when the env can site the cache file");
+                Assert.Equal(tmpPath, mgr.IdempotencyCachePath);
+                await Task.CompletedTask;
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, recursive: true); }
+                catch { /* best-effort cleanup */ }
+            }
+        }
+
+        [Fact]
+        public async Task IdempotencyPersistence_ExplicitZero_DisablesEvenWithPath()
+        {
+            // R6-26 — "=0" is the documented opt-out and must win over any
+            // siteable location.
+            var env = new Dictionary<string, string?>
+            {
+                ["LACERTE_IDEMPOTENCY_PERSIST"] = "0",
+                ["LACERTE_IDEMPOTENCY_PERSIST_PATH"] = Path.Combine(Path.GetTempPath(), "never-written.json"),
+                ["APPDATA"] = Path.GetTempPath(),
+            };
+            using var mgr = new LacerteSessionManager(env);
             Assert.False(mgr.IdempotencyPersistEnabled);
             Assert.Null(mgr.IdempotencyCachePath);
             await Task.CompletedTask;
@@ -233,6 +287,28 @@ namespace LacertMCP.Tests.Session
                     var status = await mgr1.WriteDetail("1001", row, idempotencyKey: "p17-004-roundtrip");
                     Assert.Equal(StatusCodes.Success, status);
                     Assert.True(File.Exists(tmpPath), "cache file must be written on Store");
+
+                    // R6-01 — pin the persisted fingerprint format: 64
+                    // lowercase hex chars (plain SHA-256). The pre-fix
+                    // HMAC-SHA-256 fingerprints were base64 of a hash keyed
+                    // with a per-process random key, which made this very
+                    // round-trip test pass ONLY because both managers
+                    // shared the static key in one process — a real restart
+                    // regenerated the key and every persisted fingerprint
+                    // became unverifiable (9102 on byte-identical retries).
+                    // NOTE: the persister serializes with default (PascalCase)
+                    // property names; the loader is case-insensitive.
+                    using (var doc = JsonDocument.Parse(File.ReadAllText(tmpPath)))
+                    {
+                        var entry = doc.RootElement.GetProperty("Entries").EnumerateArray()
+                            .Single(e => e.GetProperty("Key").GetString() == "p17-004-roundtrip");
+                        var fp = entry.GetProperty("Fingerprint").GetString();
+                        Assert.NotNull(fp);
+                        Assert.Equal(64, fp!.Length);
+                        Assert.All(fp, c => Assert.True(
+                            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+                            $"fingerprint must be lowercase hex SHA-256 (process-independent); got '{c}' in '{fp}'"));
+                    }
                 }
 
                 // Process 2: fresh manager constructs, loads from disk.

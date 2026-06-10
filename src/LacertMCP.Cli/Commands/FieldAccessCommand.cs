@@ -111,10 +111,12 @@ namespace LacertMCP.Cli.Commands
             if (filtered.Count == 0)
             {
                 writer.WriteLine($"(no entries in base map for module={module} table={table})");
-                // P16-021: drop the hard-coded `C` prefix that was wrong on non-C
-                // modules (e.g. on module I it read like a typo). Use the actual
-                // module letter so the example matches the user's query.
-                writer.WriteLine($"Universal rule: any field ending in _0 (e.g. {module}{table}_0) is ReadOnly on every module — no entry needed.");
+                // R6-28: the universal rule is ONLY the exact `C{table}_0` field
+                // (ClientNumber — the literal letter C on EVERY module, per
+                // FieldAccessMapLoader.IsClientNumberField). The prior wording
+                // claimed "any field ending in _0" and printed {module}{table}_0
+                // (e.g. I1_0), which the loader classifies Unknown, not ReadOnly.
+                writer.WriteLine($"Universal rule: the ClientNumber field C{table}_0 is ReadOnly on every module — no entry needed. (No other field gets special treatment; fields merely ending in _0 are NOT covered by this rule.)");
                 return 0;
             }
 
@@ -206,6 +208,15 @@ namespace LacertMCP.Cli.Commands
         public static int RunSet(char module, int table, string field, string accessRaw,
             string? dataType, int? maxLength, string source, string? note, bool force, TextWriter writer, TextWriter stderr)
         {
+            // R6-28 — uppercase-normalize BEFORE any validation or shard write.
+            // FieldAccessMapLoader.GetFieldAccess uppercases the field name and
+            // matches the module char case-sensitively (Modules.GetByChar), so a
+            // lowercase `--field c1_5` previously wrote a shard key the loader
+            // could never read back — a permanently dead row (the exact failure
+            // class P16-021 was meant to close).
+            module = char.ToUpperInvariant(module);
+            field = field?.ToUpperInvariant() ?? string.Empty;
+
             var basename = Modules.FileBasenameFor(module);
             if (basename == null)
             {
@@ -274,8 +285,8 @@ namespace LacertMCP.Cli.Commands
         // ---- discover ---------------------------------------------------------------
 
         // P15-029: Exit code 3 = "not implemented through this verb" (intentionally
-        // distinct from Doctor's exit 2 = "environment skip" — see DoctorCommand
-        // summary). Operators on Windows + live SDK should NOT toggle env vars; the
+        // distinct from Doctor's exit 2 = "partial: warnings or environment skip" —
+        // see DoctorCommand summary). Operators on Windows + live SDK should NOT toggle env vars; the
         // work was reassigned to LacertMCP.FieldAccessDumper.exe (the standalone
         // introspector that ships under src/LacertMCP.FieldAccessDumper/).
         private static Command BuildDiscoverCommand()
@@ -289,9 +300,11 @@ namespace LacertMCP.Cli.Commands
                     "Bulk field-access introspection is not exposed through this command — " +
                     "use the standalone introspector instead:");
                 Console.Out.WriteLine(
-                    "  LacertMCP.FieldAccessDumper.exe --module <I|C|P|S|F|R|T|N|B> --table <1..7>");
+                    "  LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]");
                 Console.Out.WriteLine(
-                    "  (Windows + live Lacerte SDK required at runtime; project lives under src/LacertMCP.FieldAccessDumper/).");
+                    "  (the dumper probes all known modules/tables itself — there are no --module/--table flags;");
+                Console.Out.WriteLine(
+                    "  --live requires Windows + the Lacerte SDK; project lives under src/LacertMCP.FieldAccessDumper/).");
                 Console.Out.WriteLine();
                 Console.Out.WriteLine(
                     "To set entries by hand off-box: `lacerte-mcp field-access set --module <X> --table <N> " +
@@ -400,7 +413,9 @@ namespace LacertMCP.Cli.Commands
         /// <summary>
         /// P16-021: field-name convention regex — <c>&lt;letter&gt;&lt;table&gt;_&lt;n&gt;</c>
         /// (e.g. <c>C1_42</c>, <c>c1_42</c>, <c>I3_0</c>). Case-insensitive on the
-        /// leading letter; trailing digits are unbounded. Operator can pass
+        /// leading letter — R6-28: <c>RunSet</c> uppercase-normalizes before
+        /// writing, so lowercase input is accepted but stored uppercase to match
+        /// the loader's lookup. Trailing digits are unbounded. Operator can pass
         /// <c>--force</c> to bypass for legacy imports.
         /// </summary>
         private static readonly Regex FieldShapeRegex = new Regex(

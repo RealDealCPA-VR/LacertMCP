@@ -74,10 +74,13 @@ namespace LacertMCP.Tests.Tools
             Assert.True(result.GetProperty("found").GetBoolean());
 
             // Context echo — taxYear / module / dataPath (self-documenting
-            // attached artifact per the verdict).
+            // attached artifact per the verdict). R6-18 — `module` carries
+            // the canonical single-char DBF code; the readable name moved
+            // to `moduleName`.
             var ctx = result.GetProperty("context");
             Assert.Equal(2024, ctx.GetProperty("taxYear").GetInt32());
-            Assert.Equal("individual", ctx.GetProperty("module").GetString());
+            Assert.Equal("I", ctx.GetProperty("module").GetString());
+            Assert.Equal("Individual", ctx.GetProperty("moduleName").GetString());
             Assert.Equal(SeedData.DataPathIData2024, ctx.GetProperty("dataPath").GetString());
 
             // Identity: BROW seed — FirstName="Bill", LastName="Brown".
@@ -260,6 +263,89 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal("Accepted", doc.RootElement.GetProperty("latestStatus").GetString());
             Assert.Equal("2024-04-15", doc.RootElement.GetProperty("latestStatusDate").GetString());
             Assert.Equal(2, doc.RootElement.GetProperty("perStateBreakdown").GetArrayLength());
+        }
+
+        // R6-32b — when NO row carries a parseable StatusDate, the fallback
+        // is the LAST undateable row (append order ~ "latest appended"),
+        // not the first.
+        [Fact]
+        public void ProjectEfStatus_NoDateableRows_FallsBackToLastUndateable_R6_32()
+        {
+            var rows = new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?>
+                {
+                    ["ClientId"] = "1001",
+                    ["Status"] = "Transmitted",
+                    ["StatusDate"] = "not-a-date-1",
+                },
+                new Dictionary<string, object?>
+                {
+                    ["ClientId"] = "1001",
+                    ["Status"] = "Accepted",
+                    ["StatusDate"] = "not-a-date-2",
+                },
+            };
+            var json = JsonSerializer.Serialize(ClientSummaryTools.ProjectEfStatus(rows, "1001"));
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal("Accepted", doc.RootElement.GetProperty("latestStatus").GetString());
+            Assert.Equal("not-a-date-2", doc.RootElement.GetProperty("latestStatusDate").GetString());
+        }
+
+        // R6-32a — perStateBreakdownTruncated compares against the FILTERED
+        // count (rows with a string Status), not the raw forClient count.
+        // 12 rows for the client, but only 5 carry a Status — nothing is
+        // dropped from the cap-10 breakdown, so truncated must be false.
+        [Fact]
+        public void ProjectEfStatus_TruncationUsesFilteredCount_R6_32()
+        {
+            var rows = new List<IReadOnlyDictionary<string, object?>>();
+            for (int i = 0; i < 7; i++)
+            {
+                // Null-status join rows (LEFT OUTER) — excluded from the
+                // breakdown, must not count toward truncation.
+                rows.Add(new Dictionary<string, object?>
+                {
+                    ["ClientId"] = "1001",
+                    ["StatusDate"] = "2024-03-01",
+                });
+            }
+            for (int i = 0; i < 5; i++)
+            {
+                rows.Add(new Dictionary<string, object?>
+                {
+                    ["ClientId"] = "1001",
+                    ["Status"] = "Accepted",
+                    ["StatusDate"] = "2024-03-0" + (i + 1),
+                });
+            }
+
+            var json = JsonSerializer.Serialize(ClientSummaryTools.ProjectEfStatus(rows, "1001"));
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(5, doc.RootElement.GetProperty("perStateBreakdown").GetArrayLength());
+            Assert.False(doc.RootElement.GetProperty("perStateBreakdownTruncated").GetBoolean());
+
+            // And with 11 status-carrying rows the cap (10) genuinely
+            // truncates — flag must be true.
+            rows.Add(new Dictionary<string, object?>
+            {
+                ["ClientId"] = "1001",
+                ["Status"] = "Pending",
+                ["StatusDate"] = "2024-03-09",
+            });
+            for (int i = 0; i < 5; i++)
+            {
+                rows.Add(new Dictionary<string, object?>
+                {
+                    ["ClientId"] = "1001",
+                    ["Status"] = "Pending",
+                    ["StatusDate"] = "2024-03-1" + i,
+                });
+            }
+            var json2 = JsonSerializer.Serialize(ClientSummaryTools.ProjectEfStatus(rows, "1001"));
+            using var doc2 = JsonDocument.Parse(json2);
+            Assert.Equal(10, doc2.RootElement.GetProperty("perStateBreakdown").GetArrayLength());
+            Assert.True(doc2.RootElement.GetProperty("perStateBreakdownTruncated").GetBoolean());
         }
     }
 }

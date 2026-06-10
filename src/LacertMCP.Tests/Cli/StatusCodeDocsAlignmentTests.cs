@@ -83,7 +83,7 @@ namespace LacertMCP.Tests.Cli
             // Pre-P16-004 LoginCommand.cs stderr literally read
             // "tools will return TicketExpired (9103)". The post-fix string
             // says "LoginExpired (9007)". Source grep is the most direct
-            // way to lock this in alongside the unit test in RegisterLoginStubExitCodeTests.
+            // way to lock this in alongside the unit test in RegisterLoginCeremonyExitCodeTests.
             var loginCmd = File.ReadAllText(Path.Combine(
                 RepoRoot(), "src", "LacertMCP.Cli", "Commands", "LoginCommand.cs"));
             // Comments may still mention TicketExpired (explaining what was

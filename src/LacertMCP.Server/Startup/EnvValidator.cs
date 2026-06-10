@@ -41,7 +41,38 @@ namespace LacertMCP.Server.Startup
             "LACERTE_ALLOW_UNC",
             "LACERTE_MCP_FORCE_FILE_STORE",
             "LACERTE_SIM_EXPIRED",
-            "LACERTE_PARITY_RECORDING",
+            // R6-30(b): LACERTE_DEBUG_LOG_FULL_RESULTS is a strict-"1" flag
+            // (WireLog.cs reads it with == "1"). LACERTE_PARITY_RECORDING was
+            // REMOVED from this list — it's a file path, not a boolean
+            // (validated separately in CheckParityRecording below).
+            "LACERTE_DEBUG_LOG_FULL_RESULTS",
+        };
+
+        // R6-30(b): default-ON flags — the feature is enabled unless the value
+        // is the exact string "0". Distinct from BooleanFlags because the
+        // "treated as disabled" warning text would be wrong here (a garbage
+        // value leaves the feature ENABLED). LACERTE_IDEMPOTENCY_PERSIST
+        // adopted default-ON/disable-with-0 semantics (see
+        // LacerteSessionManager idempotency persistence doc block).
+        private static readonly string[] DefaultOnFlags = new[]
+        {
+            "LACERTE_IDEMPOTENCY_PERSIST",
+        };
+
+        // R6-30(c): numeric env vars — when set, the value must be a parseable
+        // non-negative integer or the code falls back to its built-in default
+        // silently; warn so the typo surfaces at startup. long-ranged because
+        // the *_BYTES vars can legitimately exceed Int32.
+        private static readonly string[] NonNegativeIntVars = new[]
+        {
+            "LACERTE_HEARTBEAT_SECONDS",
+            "LACERTE_BULK_WRITE_MAX",
+            "LACERTE_BULK_CREATE_MAX",
+            "LACERTE_RECENT_LOG_CAPACITY",
+            "LACERTE_DEBUG_LOG_MAX_BYTES",
+            "LACERTE_DEBUG_LOG_MAX_DIR_BYTES",
+            "LACERTE_DEBUG_LOG_RETENTION_DAYS",
+            "LACERTE_DEBUG_LOG_RESULT_SAMPLE",
         };
 
         /// <summary>
@@ -61,10 +92,19 @@ namespace LacertMCP.Server.Startup
             {
                 CheckBooleanFlag(stderr, resolved, flag);
             }
+            foreach (var flag in DefaultOnFlags)
+            {
+                CheckDefaultOnFlag(stderr, resolved, flag);
+            }
+            foreach (var name in NonNegativeIntVars)
+            {
+                CheckNonNegativeInt(stderr, resolved, name);
+            }
 
             CheckDefaultTaxYear(stderr, resolved);
             CheckDataRoot(stderr, resolved);
             CheckDebugLogPath(stderr, resolved);
+            CheckParityRecording(stderr, resolved);
 
             return WriteBanner(stderr, resolved);
         }
@@ -80,6 +120,64 @@ namespace LacertMCP.Server.Startup
             // ReadEnvFlag in LacerteSessionManager.
             stderr.WriteLine(
                 $"[startup] {name}='{raw}' is not '1' — treated as disabled (this server uses strict '1'-means-on semantics; common alternatives like 'true'/'yes'/'on' do NOT enable it).");
+        }
+
+        /// <summary>
+        /// R6-30(b): default-ON flag check. The feature is enabled unless the
+        /// value is the exact string <c>"0"</c>; unset/empty/<c>"1"</c> are all
+        /// fine. Anything else (e.g. <c>"false"</c>/<c>"off"</c>) does NOT
+        /// disable the feature, which is the opposite of what the operator
+        /// likely intended — warn loudly.
+        /// </summary>
+        private static void CheckDefaultOnFlag(TextWriter stderr, IDictionary<string, string?> env, string name)
+        {
+            var raw = Get(env, name);
+            if (raw == null) return;            // unset = default ON
+            if (raw.Length == 0) return;        // explicit empty = default ON
+            if (raw == "1" || raw == "0") return; // canonical
+            stderr.WriteLine(
+                $"[startup] {name}='{raw}' is not '0' or '1' — this flag defaults to ON and is disabled only by the exact string '0'; the value '{raw}' leaves it ENABLED (common alternatives like 'false'/'off'/'no' do NOT disable it).");
+        }
+
+        /// <summary>
+        /// R6-30(c): numeric env var check — when set but not a parseable
+        /// non-negative integer, the reading code silently falls back to its
+        /// built-in default; warn so the typo is visible at startup.
+        /// </summary>
+        private static void CheckNonNegativeInt(TextWriter stderr, IDictionary<string, string?> env, string name)
+        {
+            var raw = Get(env, name);
+            if (string.IsNullOrEmpty(raw)) return;
+            if (!long.TryParse(raw, out var value) || value < 0)
+            {
+                stderr.WriteLine(
+                    $"[startup] {name}='{raw}' is not a non-negative integer — the value will not be honored as written (the reading code falls back to its built-in default or disables the feature).");
+            }
+        }
+
+        /// <summary>
+        /// R6-30(a): <c>LACERTE_PARITY_RECORDING</c> is a PATH to a parity
+        /// recording file (see Tests/Parity/BothModes.cs), not a boolean —
+        /// the old boolean check warned "'&lt;path&gt;' is not '1'" on every
+        /// documented usage. Validate instead that the file exists when set.
+        /// </summary>
+        private static void CheckParityRecording(TextWriter stderr, IDictionary<string, string?> env)
+        {
+            var raw = Get(env, "LACERTE_PARITY_RECORDING");
+            if (string.IsNullOrEmpty(raw)) return;
+            try
+            {
+                if (!File.Exists(raw))
+                {
+                    stderr.WriteLine(
+                        $"[startup] LACERTE_PARITY_RECORDING='{raw}' does not exist on disk — parity replay tests will not find the recording (this variable is a file path, not a 0/1 flag).");
+                }
+            }
+            catch (Exception ex)
+            {
+                stderr.WriteLine(
+                    $"[startup] LACERTE_PARITY_RECORDING='{raw}' is malformed ({ex.GetType().Name}) — ignored.");
+            }
         }
 
         private static void CheckDefaultTaxYear(TextWriter stderr, IDictionary<string, string?> env)

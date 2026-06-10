@@ -44,7 +44,11 @@ namespace LacertMCP.FieldAccessDumper
             if (opts.ShowHelp)
             {
                 PrintHelp();
-                return 0;
+                // R6-39: an unknown arg is an operator error, not a help
+                // request — exit non-zero so scripts (and the CLI's discover
+                // redirect) can detect the typo instead of reading exit 0 as
+                // "dump succeeded".
+                return opts.UnknownArg ? 1 : 0;
             }
 
             try
@@ -348,22 +352,11 @@ namespace LacertMCP.FieldAccessDumper
         // Module + arg helpers
         // =================================================================
 
+        // R6-39: module char → shard basename now delegates to
+        // Schema.Modules.FileBasenameFor (single source of truth — this file
+        // previously re-implemented the map despite the project-wide dedup).
         private static string? ModuleBasename(char module)
-        {
-            switch (module)
-            {
-                case 'I': return "individual";
-                case 'C': return "corporate";
-                case 'P': return "partnership";
-                case 'S': return "scorp";
-                case 'F': return "fiduciary";
-                case 'R': return "exempt";
-                case 'T': return "estate";
-                case 'N': return "gift";
-                case 'B': return "benefit";
-                default: return null;
-            }
-        }
+            => Modules.FileBasenameFor(module);
 
         private static Options ParseArgs(string[] args)
         {
@@ -381,13 +374,32 @@ namespace LacertMCP.FieldAccessDumper
                     case "--live":
                         opts.Live = true; break;
                     case "--year":
-                        if (i + 1 < args.Length && int.TryParse(args[++i], out var y)) opts.TaxYear = y;
+                        // R6-39: a garbage --year value previously consumed the
+                        // token and silently kept the default — the operator
+                        // had no idea the dump was probed against the wrong
+                        // tax year. Warn to stderr on both the missing-value
+                        // and unparseable-value cases.
+                        if (i + 1 >= args.Length)
+                        {
+                            Console.Error.WriteLine($"[dumper] WARN: --year requires a value (e.g. --year 2024) — using default {opts.TaxYear}.");
+                        }
+                        else if (int.TryParse(args[++i], out var y))
+                        {
+                            opts.TaxYear = y;
+                        }
+                        else
+                        {
+                            Console.Error.WriteLine($"[dumper] WARN: --year '{args[i]}' is not a valid integer — using default {opts.TaxYear}.");
+                        }
                         break;
                     case "--out":
                         if (i + 1 < args.Length) opts.OutputDir = args[++i];
                         break;
                     default:
                         Console.Error.WriteLine($"[dumper] unknown arg: {a}");
+                        // R6-39: flag the error so Main exits 1 after printing
+                        // help (unknown args previously exited 0).
+                        opts.UnknownArg = true;
                         opts.ShowHelp = true; break;
                 }
             }
@@ -416,6 +428,9 @@ namespace LacertMCP.FieldAccessDumper
         private sealed class Options
         {
             public bool ShowHelp;
+            // R6-39: set when an unrecognized argument was encountered; Main
+            // prints help and exits 1 instead of 0.
+            public bool UnknownArg;
             public bool Overwrite;
             public bool Live;
             public int TaxYear = DateTime.UtcNow.Year;

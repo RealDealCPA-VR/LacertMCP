@@ -27,14 +27,23 @@ namespace LacertMCP.Server.Tools
     /// proposed adding parameterized <c>ListClientsAt</c> / <c>ReadEFStatusAt</c>
     /// overloads to <see cref="LacerteSessionManager"/> so the dashboard
     /// could be pure-read with zero side effects on the operator's current
-    /// <c>set_context</c>. Cluster ownership confines this PR to the four
-    /// new tool files, so we use the snapshot+restore-Context pattern
-    /// here. The behavior is observationally identical to the *At overloads
-    /// — restore runs in a finally block so a thrown read can't strand the
-    /// operator's context — but it DOES briefly hold the lock on
-    /// <c>SetContext</c> across the per-tuple read. A future cross-cluster
-    /// follow-up can land the *At overloads and drop the snapshot/restore
-    /// shim with no wire-shape change.
+    /// <c>set_context</c>. Those *At overloads still do not exist (the
+    /// session manager is owned by another cluster), so we use the
+    /// snapshot+restore-Context pattern here. Restore runs in a finally
+    /// block so a thrown read can't strand the operator's context.
+    /// </para>
+    ///
+    /// <para>
+    /// R6-09 — because the fan-out mutates the GLOBAL session context
+    /// across awaits, the whole save-set-restore span is serialized through
+    /// <see cref="Internal.ContextScanGate"/> with
+    /// <c>lacerte_year_over_year</c> (the other context-flipping scan
+    /// tool), so the two scans cannot interleave each other's context
+    /// flips. Limitation: tools OUTSIDE the gate (e.g. a concurrent
+    /// <c>lacerte_field_write</c>) can still observe the temporarily set
+    /// read-only tuple — see the gate's class doc. The real fix remains
+    /// the session-manager *At overloads; when they land, drop the
+    /// snapshot/restore shim and this gate with no wire-shape change.
     /// </para>
     /// </summary>
     [McpServerToolType]
@@ -120,10 +129,6 @@ namespace LacertMCP.Server.Tools
                     tuples.Add(dt);
                 }
 
-                // ---- Snapshot active context for restore-in-finally --------
-                var status = _session.SessionStatus();
-                var savedContext = status.Context;
-
                 var byContext = new List<object>(tuples.Count);
                 int totalClients = 0;
                 int totalEfRows = 0;
@@ -131,8 +136,21 @@ namespace LacertMCP.Server.Tools
                 foreach (var b in CanonicalStatusBuckets) firmHistogram[b] = 0;
                 firmHistogram["other"] = 0;
 
+                // R6-09 — serialize the whole snapshot-set-restore span
+                // against lacerte_year_over_year via the shared scan gate so
+                // the two context-flipping scans can't interleave. Acquired
+                // BEFORE the snapshot so the saved context can't be a
+                // mid-flight tuple from the other scan.
+                await Internal.ContextScanGate.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                SessionContext? savedContext;
                 try
                 {
+                    // ---- Snapshot active context for restore-in-finally ----
+                    var status = _session.SessionStatus();
+                    savedContext = status.Context;
+
+                    try
+                    {
                     foreach (var t in tuples)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
@@ -144,6 +162,8 @@ namespace LacertMCP.Server.Tools
                         foreach (var b in CanonicalStatusBuckets) perTupleHistogram[b] = 0;
                         perTupleHistogram["other"] = 0;
                         string? latestStatusDate = null;
+                        DateTime? latestParsedDate = null;
+                        string? undateableFallback = null;
 
                         try
                         {
@@ -185,12 +205,32 @@ namespace LacertMCP.Server.Tools
                                     && sdObj is string sd
                                     && !string.IsNullOrEmpty(sd))
                                 {
-                                    if (latestStatusDate == null
-                                        || string.CompareOrdinal(sd, latestStatusDate) > 0)
+                                    // R6-33a — chronological comparison via
+                                    // the shared EfStatusDates parse so this
+                                    // watermark agrees with ClientSummary's
+                                    // ProjectEfStatus "latest" for the same
+                                    // rows (CompareOrdinal mis-ordered
+                                    // non-ISO date shapes). Unparseable
+                                    // strings only win when NO row parses
+                                    // (last-seen, matching the R6-32 fallback
+                                    // posture).
+                                    if (Internal.EfStatusDates.TryParse(sd, out var sdParsed))
                                     {
-                                        latestStatusDate = sd;
+                                        if (latestParsedDate == null || sdParsed > latestParsedDate)
+                                        {
+                                            latestParsedDate = sdParsed;
+                                            latestStatusDate = sd;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        undateableFallback = sd;
                                     }
                                 }
+                            }
+                            if (latestStatusDate == null)
+                            {
+                                latestStatusDate = undateableFallback;
                             }
                         }
                         catch (LacerteSDKError sdkErr)
@@ -290,6 +330,13 @@ namespace LacertMCP.Server.Tools
                         }
                     }
                 }
+                }
+                finally
+                {
+                    // R6-09 — release AFTER the restore so the other scan
+                    // tool can never observe a mid-flight tuple.
+                    Internal.ContextScanGate.Gate.Release();
+                }
 
                 return new
                 {
@@ -299,7 +346,11 @@ namespace LacertMCP.Server.Tools
                     summary = new
                     {
                         totalClients,
-                        totalModulesScanned = byContext.Count,
+                        // R6-33b — renamed from `totalModulesScanned`: the
+                        // count is per (taxYear, module) TUPLE, not per
+                        // distinct module (one module scanned across 3 years
+                        // counts 3).
+                        totalTuplesScanned = byContext.Count,
                         totalEfRows,
                         statusHistogram = firmHistogram,
                     },
@@ -351,13 +402,12 @@ namespace LacertMCP.Server.Tools
                 }
             }
             // If the caller passed a non-empty string that yielded zero
-            // valid modules (e.g. "xyz"), treat as "no match" rather than
-            // silently falling back to all-9 — the caller's intent was
-            // restrictive, even if the chars were bad.
-            if (allowed.Count == 0 && string.IsNullOrEmpty(modulesFilter))
-            {
-                foreach (var c in AllModuleChars) allowed.Add(c);
-            }
+            // valid modules (e.g. "xyz"), allowed stays empty — "no match"
+            // rather than silently falling back to all-9, because the
+            // caller's intent was restrictive even if the chars were bad.
+            // (R6-33c — the old empty-filter re-fill branch here was dead:
+            // a null/empty modulesFilter already iterates AllModuleChars
+            // above, so allowed can never be empty on that path.)
             return allowed;
         }
 

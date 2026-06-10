@@ -209,7 +209,7 @@ namespace LacertMCP.Tests.Session
         }
 
         [Fact]
-        public void Snapshot_DuringConcurrentWrites_DoesNotThrow()
+        public async Task Snapshot_DuringConcurrentWrites_DoesNotThrow()
         {
             // ARRANGE — CloneRow in Snapshot iterates `src.Fields`. Concurrent
             // writers used to break this enumeration; ConcurrentDictionary
@@ -237,7 +237,7 @@ namespace LacertMCP.Tests.Session
                 Assert.NotNull(snap);
             }
 
-            writer.Wait();
+            await writer;
         }
     }
 }

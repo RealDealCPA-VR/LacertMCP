@@ -98,6 +98,17 @@ namespace LacertMCP.Tests.Resilience
         }
 
         [Fact]
+        public void IsTransient_RpcCallCanceled_0x80010002_IsNotRetried_R6_27()
+        {
+            // R6-27 — 0x80010001 is RPC_E_CALL_REJECTED (retryable message-
+            // filter busy case); the REAL RPC_E_CALL_CANCELED is 0x80010002
+            // and represents an intentional abort, which must NOT auto-retry.
+            // Pin the intent so a future "fix" doesn't whitelist it.
+            Assert.False(AutoReconnect.IsTransient(
+                new COMException("call canceled", unchecked((int)0x80010002))));
+        }
+
+        [Fact]
         public void IsTransient_LacerteSDKError_AlwaysFalse()
         {
             Assert.False(AutoReconnect.IsTransient(new LacerteSDKError(StatusCodes.NotSignedIn)));
@@ -108,13 +119,14 @@ namespace LacertMCP.Tests.Resilience
         /// P14-023: pin all 4 whitelisted HRESULTs for COMException — the
         /// AutoReconnect.cs:43-46 contract. Previously only the first two
         /// (RpcUnavailable + RpcDisconnected) were tested; RPC_E_SERVERCALL_RETRYLATER
-        /// (0x8001010A) and RPC_E_CALL_CANCELED (0x80010001) had zero coverage.
+        /// (0x8001010A) and RPC_E_CALL_REJECTED (0x80010001 — mislabeled
+        /// RPC_E_CALL_CANCELED until R6-27) had zero coverage.
         /// </summary>
         [Theory]
         [InlineData(unchecked((int)0x800706BA))] // RPC_S_SERVER_UNAVAILABLE
         [InlineData(unchecked((int)0x80010108))] // RPC_E_DISCONNECTED
         [InlineData(unchecked((int)0x8001010A))] // RPC_E_SERVERCALL_RETRYLATER
-        [InlineData(unchecked((int)0x80010001))] // RPC_E_CALL_CANCELED
+        [InlineData(unchecked((int)0x80010001))] // RPC_E_CALL_REJECTED (R6-27: not CANCELED)
         public void IsTransient_COMException_TrueForAllWhitelisted(int hresult)
         {
             var ex = new COMException("x", hresult);

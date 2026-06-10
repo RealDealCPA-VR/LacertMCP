@@ -124,9 +124,10 @@ namespace LacertMCP.Server.Errors
         // tool. Context carries {op, clientNumber, replaceIndex}.
         public const int LiveReplaceIndexUnsupported = 9019;
 
-        // 9020 — lacerte_field_write_bulk entries.Length exceeds the per-call
-        // cap (default 500, override via LACERTE_BULK_WRITE_MAX). The bulk
-        // write tool fans out N writes through the live SDK from a single MCP
+        // 9020 — a bulk tool's entries.Length exceeds its per-call cap
+        // (field/detail bulk: default 500 via LACERTE_BULK_WRITE_MAX;
+        // create bulk: default 100 via LACERTE_BULK_CREATE_MAX). Bulk
+        // tools fan out N writes through the live SDK from a single MCP
         // call; without an upper bound a fuzzy LLM-constructed payload can
         // mutate thousands of rows with no per-row inspection. The project's
         // own pagination layer (Pagination.MaxLimit=1000) bounds every read
@@ -280,8 +281,8 @@ namespace LacertMCP.Server.Errors
             [BulkBatchTooLarge] = new StatusInfo(
                 "BulkBatchTooLarge",
                 Severity.Error,
-                "lacerte_field_write_bulk received more entries than the per-call cap allows. See context.entryCount and context.maxAllowed for the specific numbers.",
-                "Split the batch into chunks of <= maxAllowed entries and submit sequentially with a shared idempotencyKey prefix — succeeded rows replay from cache on resubmit, so chunked submission stays safe under retry. Override the cap (default 500) via the LACERTE_BULK_WRITE_MAX environment variable if your operator workflow genuinely needs larger batches; do NOT loop the call client-side without an idempotencyKey."),
+                "The bulk tool received more entries than the per-call cap allows. See context.op for the originating tool, and context.entryCount / context.maxAllowed for the specific numbers.",
+                "Split the batch into chunks of <= maxAllowed entries and submit sequentially with a shared idempotencyKey prefix — succeeded rows replay from cache on resubmit, so chunked submission stays safe under retry. Override the cap via the env var in context.envOverride (LACERTE_BULK_WRITE_MAX for field/detail bulk, default 500; LACERTE_BULK_CREATE_MAX for client create bulk, default 100) if your operator workflow genuinely needs larger batches; do NOT loop the call client-side without an idempotencyKey."),
 
             [BulkBatchCountMismatch] = new StatusInfo(
                 "BulkBatchCountMismatch",

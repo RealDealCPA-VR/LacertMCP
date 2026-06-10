@@ -49,6 +49,8 @@ namespace LacertMCP.Server.Tools
                     total = page.Total,
                     limit = page.Limit,
                     offset = page.Offset,
+                    // R6-19 — rows-on-this-page count (Pagination P16-074).
+                    returnedCount = page.ReturnedCount,
                     hasMore = page.HasMore,
                     nextOffset = page.NextOffset,
                     // legacy (v0.1) — remove in v0.2:

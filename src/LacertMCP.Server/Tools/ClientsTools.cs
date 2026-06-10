@@ -99,6 +99,9 @@ namespace LacertMCP.Server.Tools
                         total = probe.Total,
                         limit = 0,
                         offset = probe.Offset,
+                        // R6-19 — rows-on-this-page count per the Pagination
+                        // contract (P16-074); 0 on the count-only probe.
+                        returnedCount = 0,
                         hasMore = probe.Total > probe.Offset,
                         nextOffset = probe.Total > probe.Offset ? (int?)probe.Offset : null,
                         // legacy (v0.1) — remove in v0.2:
@@ -118,6 +121,9 @@ namespace LacertMCP.Server.Tools
                     total = page.Total,
                     limit = page.Limit,
                     offset = page.Offset,
+                    // R6-19 — rows-on-this-page count per the Pagination
+                    // contract (P16-074).
+                    returnedCount = page.ReturnedCount,
                     hasMore = page.HasMore,
                     nextOffset = page.NextOffset,
                     // legacy (v0.1) — remove in v0.2:

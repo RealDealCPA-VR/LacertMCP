@@ -44,6 +44,16 @@ namespace LacertMCP.Tests.Cli
             var stdout = sw.ToString();
             Assert.Contains("LacertMCP.FieldAccessDumper.exe", stdout);
             Assert.Contains("not exposed", stdout);
+            // R6-39(a): the redirect must advertise the dumper's REAL flags
+            // (--overwrite/--live/--year/--out per FieldAccessDumper/Program.cs
+            // ParseArgs) — the old hint named --module/--table, which the
+            // dumper rejects (and now exits 1 on).
+            Assert.Contains("--overwrite", stdout);
+            Assert.Contains("--live", stdout);
+            Assert.Contains("--year", stdout);
+            Assert.Contains("--out", stdout);
+            Assert.DoesNotContain("--module <I|C|P|S|F|R|T|N|B>", stdout);
+            Assert.DoesNotContain("--table <1..7>", stdout);
         }
 
         [Fact]
@@ -165,12 +175,15 @@ namespace LacertMCP.Tests.Cli
         }
 
         /// <summary>
-        /// P16-021: the universal-rule message must use the queried module letter
-        /// (not the hard-coded `C` prefix that was wrong on non-C modules and read
-        /// like a typo when the user queried module=I).
+        /// R6-28(b): the universal rule is ONLY the exact <c>C{table}_0</c>
+        /// ClientNumber field (the literal letter C on EVERY module — see
+        /// FieldAccessMapLoader.IsClientNumberField). The prior message printed
+        /// <c>{module}{table}_0</c> (e.g. N7_0, which the loader classifies
+        /// Unknown, not ReadOnly) and claimed "any field ending in _0" — both
+        /// wrong. Supersedes the P16-021 pin that asserted the broken form.
         /// </summary>
         [Fact]
-        public void RunList_EmptyTable_UniversalRule_UsesQueriedModuleLetter()
+        public void RunList_EmptyTable_UniversalRule_NamesClientNumberFieldOnly()
         {
             var stdout = new StringWriter();
             var stderr = new StringWriter();
@@ -183,12 +196,60 @@ namespace LacertMCP.Tests.Cli
             var output = stdout.ToString();
             // Either the module had no entries (universal-rule branch) OR it had
             // entries (header branch). The universal-rule line, when emitted,
-            // must NOT contain the bare `C7_0` form — it should use the queried
-            // module letter (N).
+            // must name the literal C7_0 (ClientNumber) — NOT the queried module
+            // letter form N7_0 (Unknown access, not ReadOnly) — and must NOT
+            // claim that any field ending in _0 is covered.
             if (output.Contains("Universal rule"))
             {
-                Assert.Contains("N7_0", output);
-                Assert.DoesNotContain("C7_0", output);
+                Assert.Contains("C7_0", output);
+                Assert.DoesNotContain("N7_0", output);
+                Assert.DoesNotContain("any field ending in _0", output);
+            }
+        }
+
+        // ----- R6-28(a): uppercase normalization on set -----
+
+        /// <summary>
+        /// R6-28(a): <c>set --field c1_5</c> previously wrote a lowercase shard
+        /// key the loader (which uppercases field names on lookup) could never
+        /// read — a permanently dead row. RunSet must uppercase-normalize the
+        /// module char and field name before writing. Lowercase module input is
+        /// normalized too (Modules.GetByChar is case-sensitive).
+        /// </summary>
+        [Fact]
+        public void RunSet_LowercaseModuleAndField_NormalizedToUppercaseShardKey()
+        {
+            var shardPath = FieldAccessCommand.ShardPath(Modules.FileBasenameFor('B')!);
+            var hadShard = File.Exists(shardPath);
+            var originalJson = hadShard ? File.ReadAllText(shardPath) : null;
+            try
+            {
+                var stdout = new StringWriter();
+                var stderr = new StringWriter();
+                var exit = FieldAccessCommand.RunSet(
+                    module: 'b', table: 7, field: "b7_123",
+                    accessRaw: "ReadWrite",
+                    dataType: null, maxLength: null, source: "manual", note: null,
+                    force: false, stdout, stderr);
+
+                Assert.Equal(0, exit);
+                var json = File.ReadAllText(shardPath);
+                // Key must be fully uppercase — the loader's lookup shape.
+                Assert.Contains("B|7|B7_123", json);
+                Assert.DoesNotContain("b7_123", json);
+                Assert.DoesNotContain("b|7|", json);
+                // The operator-facing diff echo must show the normalized key too.
+                Assert.Contains("B|7|B7_123", stdout.ToString());
+            }
+            finally
+            {
+                // Restore the shard so this test never pollutes sibling tests
+                // (the CLI and loader share the test bin's Schema tree), and
+                // drop the loader's in-memory cache so no other test sees the
+                // transient B7_123 entry.
+                if (hadShard) File.WriteAllText(shardPath, originalJson!);
+                else if (File.Exists(shardPath)) File.Delete(shardPath);
+                FieldAccessMapLoader.ResetCacheForTests();
             }
         }
     }

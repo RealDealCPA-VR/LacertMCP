@@ -178,10 +178,12 @@ namespace LacertMCP.Server.Tools
             },
         };
 
-        // Each tool name listed here MUST be a real registered tool. The
-        // assembly-discovery parity test in HelpToolsTests asserts that every
-        // name here appears in WithToolsFromAssembly discovery so the categorization
-        // can't silently drift away from reality.
+        // Each tool name listed here MUST be a real registered tool, AND
+        // every [McpServerTool] registered in the assembly MUST be listed
+        // here — the parity test in HelpToolsTests is bidirectional (R6-08)
+        // so the categorization can't silently drift away from reality in
+        // either direction (a future tool added without a catalog row fails
+        // the suite).
         private static Dictionary<string, string[]> ToolsByCategory() => new Dictionary<string, string[]>
         {
             ["session"] = new[]
@@ -198,7 +200,9 @@ namespace LacertMCP.Server.Tools
                 "lacerte_client_list",
                 "lacerte_client_read",
                 "lacerte_client_find",
+                "lacerte_client_query",
                 "lacerte_client_create",
+                "lacerte_client_create_bulk",
                 "lacerte_client_summary",
                 "lacerte_export_client",
             },
@@ -218,6 +222,7 @@ namespace LacertMCP.Server.Tools
                 "lacerte_field_write_bulk",
                 "lacerte_update_return",
                 "lacerte_detail_write",
+                "lacerte_detail_write_bulk",
             },
             ["efile"] = new[]
             {
@@ -227,12 +232,33 @@ namespace LacertMCP.Server.Tools
             {
                 "lacerte_firm_dashboard",
             },
+            // R6-08 — round-5 analysis/accelerator surface. These were
+            // registered tools missing from the catalog, so lacerte_help
+            // under-reported the server's capability set by 9 tools.
+            ["accelerators"] = new[]
+            {
+                "lacerte_diff_clients",
+                "lacerte_pre_filing_check",
+                "lacerte_year_over_year",
+                "lacerte_field_history",
+            },
+            // R6-08 — round-5 observability surface (in-process ring log,
+            // request stats, cache/lock introspection).
+            ["observability"] = new[]
+            {
+                "lacerte_recent_log",
+                "lacerte_request_stats",
+                "lacerte_cache_state",
+                "lacerte_resource_usage",
+                "lacerte_active_locks",
+            },
             ["meta"] = new[]
             {
                 "lacerte_field_access_map",
                 "lacerte_return_codes",
                 "lacerte_reload_schema",
                 "lacerte_help",
+                "lacerte_prompts",
             },
         };
 
@@ -301,7 +327,7 @@ namespace LacertMCP.Server.Tools
                 name = "LACERTE_HEARTBEAT_SECONDS",
                 required = "optional",
                 defaultValue = "30",
-                purpose = "Heartbeat JSON write cadence to %TEMP%/lacerte-mcp-heartbeat.json. Set 0 to disable.",
+                purpose = "Heartbeat JSON write cadence to %TEMP%/lacerte-mcp-heartbeat-{pid}.json. 0, negative, or unparseable disables; clamped to 86400 max.",
             },
             new
             {

@@ -29,14 +29,26 @@
     <FileVersion>0.1.0.0</FileVersion>
     <!--
       P17-009 — Include the short git SHA in InformationalVersion when
-      $(SourceRevisionId) is populated. Populated by:
+      $(SourceRevisionId) is populated AT EVALUATION TIME, i.e. only when it
+      is passed on the command line:
         - .github/workflows/ci.yml: `-p:SourceRevisionId=${{ github.sha }}`
         - scripts/release.ps1: `-p:SourceRevisionId=$(git rev-parse HEAD)`
-      Local `dotnet build` without that arg produces the bare $(Version)
-      fallback — intentional for non-git contexts (sim/tarball/hand-built).
+      Local `dotnet build` without that arg produces the bare $(Version) —
+      intentional: SourceLink does set SourceRevisionId mid-build in a git
+      checkout, but that happens after property evaluation, so the +sha7
+      suffix below never applies locally. Only CI/release builds get
+      `0.1.0+<sha7>`.
       The Substring(0,7) guard never trips because the outer Length >= 7
       condition gates entry to the .Substring expression.
+
+      R6-16 — IncludeSourceRevisionInInformationalVersion=false stops the
+      SDK's GenerateAssemblyInfo target from appending the FULL 40-char SHA
+      on top of this props-level value (which produced
+      `0.1.0+abc1234.<full-40-char-sha>` in CI and `0.1.0+<full-40-char-sha>`
+      locally). With it false, the stamp is exactly `0.1.0+<sha7>` when
+      SourceRevisionId is passed, and bare `0.1.0` otherwise.
     -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <InformationalVersion Condition="'$(SourceRevisionId)' != '' AND $(SourceRevisionId.Length) &gt;= 7">$(Version)+$(SourceRevisionId.Substring(0,7))</InformationalVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>
   </PropertyGroup>

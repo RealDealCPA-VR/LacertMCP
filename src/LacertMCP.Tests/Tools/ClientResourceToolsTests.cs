@@ -25,9 +25,10 @@ namespace LacertMCP.Tests.Tools
     ///   <item>Not-found returns <c>found=false</c>, <c>client=null</c>, the
     ///     same <c>uri</c> + context echo, and a hint matching the
     ///     <c>LacerteClientRead</c> hint contract.</item>
-    ///   <item>The <c>module</c> echo is the lowercase basename
-    ///     (<c>"individual"</c>, <c>"corporate"</c>), not the DBF character —
-    ///     matches the wire-convention "lowercase enum strings" rule.</item>
+    ///   <item>R6-18 — the <c>module</c> echo is the canonical single-char
+    ///     DBF code (<c>"I"</c>, <c>"C"</c>) matching every other tool; the
+    ///     lowercase basename (<c>"individual"</c>, <c>"corporate"</c>)
+    ///     moved to <c>moduleFileBasename</c>.</item>
     ///   <item>Parity with <c>LacerteClientRead</c> — the inner <c>client</c>
     ///     row is byte-identical, locking in observational identity.</item>
     /// </list>
@@ -102,9 +103,10 @@ namespace LacertMCP.Tests.Tools
             var ctx = result.GetProperty("context");
             Assert.Equal(SeedData.DataPathIData2024, ctx.GetProperty("dataPath").GetString());
             Assert.Equal(2024, ctx.GetProperty("taxYear").GetInt32());
-            // Module echo is the lowercase basename (not the DBF char) —
-            // matches the "lowercase enum strings" wire convention.
-            Assert.Equal("individual", ctx.GetProperty("module").GetString());
+            // R6-18 — `module` carries the canonical single-char DBF code;
+            // the lowercase basename moved to `moduleFileBasename`.
+            Assert.Equal("I", ctx.GetProperty("module").GetString());
+            Assert.Equal("individual", ctx.GetProperty("moduleFileBasename").GetString());
 
             // Inner client row carries the same shape as LacerteClientRead
             // (camelCase clientId per P17-011 / P16-054).
@@ -139,7 +141,7 @@ namespace LacertMCP.Tests.Tools
         }
 
         [Fact]
-        public async Task ExportClient_CorporateModule_EmitsLowercaseModuleName()
+        public async Task ExportClient_CorporateModule_EmitsCanonicalModuleCode()
         {
             var mgr = ToolTestHelpers.NewSimManager();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
@@ -152,9 +154,10 @@ namespace LacertMCP.Tests.Tools
             Assert.True(result.GetProperty("found").GetBoolean());
 
             var ctx = result.GetProperty("context");
-            // Corporate module's FileBasename is "corporate" — the lowercase
-            // basename, not the DBF char 'C'.
-            Assert.Equal("corporate", ctx.GetProperty("module").GetString());
+            // R6-18 — canonical single-char code on `module`; the lowercase
+            // basename info is preserved under `moduleFileBasename`.
+            Assert.Equal("C", ctx.GetProperty("module").GetString());
+            Assert.Equal("corporate", ctx.GetProperty("moduleFileBasename").GetString());
             Assert.Equal(SeedData.DataPathCData2024, ctx.GetProperty("dataPath").GetString());
 
             // Same URI shape regardless of module — the URI binds to active
@@ -208,7 +211,8 @@ namespace LacertMCP.Tests.Tools
 
             var ctx = result.GetProperty("context");
             Assert.Equal(2024, ctx.GetProperty("taxYear").GetInt32());
-            Assert.Equal("individual", ctx.GetProperty("module").GetString());
+            // R6-18 — canonical single-char module code.
+            Assert.Equal("I", ctx.GetProperty("module").GetString());
         }
     }
 }

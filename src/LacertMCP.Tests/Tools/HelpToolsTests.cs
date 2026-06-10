@@ -191,21 +191,25 @@ namespace LacertMCP.Tests.Tools
         }
 
         // -----------------------------------------------------------------
-        // Parity test: every tool name in toolsByCategory MUST exist as a
-        // real [McpServerTool] on the assembly. Locks the categorization
-        // against drift — if a tool is renamed or removed without updating
-        // HelpTools, this test fails loudly.
+        // Parity test (R6-08 — now BIDIRECTIONAL): every tool name in
+        // toolsByCategory MUST exist as a real [McpServerTool] on the
+        // assembly, AND every [McpServerTool] discoverable via reflection
+        // (including tools living outside the Tools namespace, e.g.
+        // lacerte_prompts) MUST appear in toolsByCategory. Locks the
+        // categorization against drift in both directions — a renamed/
+        // removed tool AND a newly added tool without a catalog row both
+        // fail loudly.
         // -----------------------------------------------------------------
 
         [Fact]
-        public async Task Help_ToolsByCategory_AllListedToolsExistOnAssembly()
+        public async Task Help_ToolsByCategory_BidirectionalParityWithAssembly()
         {
             var asm = typeof(SessionTools).Assembly;
             var realTools = asm.GetTypes()
                 .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() != null)
                 .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
                 .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() != null)
-                .Select(m => ToSnakeCase(m.Name))
+                .Select(RegisteredToolName)
                 .ToHashSet();
 
             var tool = new HelpTools();
@@ -224,10 +228,24 @@ namespace LacertMCP.Tests.Tools
             }
 
             Assert.NotEmpty(listed);
+            Assert.NotEmpty(realTools);
+
+            // Direction 1 — listed ⊆ registered (no phantom catalog rows).
             var missing = listed.Where(t => !realTools.Contains(t)).ToList();
             Assert.True(missing.Count == 0,
                 $"toolsByCategory lists tools that don't exist on the assembly: {string.Join(", ", missing)}. " +
                 $"Either the tool was removed/renamed (update HelpTools) or the listing is a typo.");
+
+            // Direction 2 (R6-08) — registered ⊆ listed (no invisible tools;
+            // lacerte_help previously omitted 9 of the registered tools).
+            var listedSet = listed.ToHashSet();
+            var unlisted = realTools.Where(t => !listedSet.Contains(t)).OrderBy(t => t).ToList();
+            Assert.True(unlisted.Count == 0,
+                $"Registered [McpServerTool]s missing from HelpTools.ToolsByCategory(): {string.Join(", ", unlisted)}. " +
+                $"Add each to the appropriate category so lacerte_help reflects the real capability surface (R6-08).");
+
+            // No duplicates across categories.
+            Assert.Equal(listed.Count, listedSet.Count);
         }
 
         // -----------------------------------------------------------------
@@ -274,6 +292,21 @@ namespace LacertMCP.Tests.Tools
         // -----------------------------------------------------------------
         // Helpers
         // -----------------------------------------------------------------
+
+        /// <summary>
+        /// Resolve the wire name a tool method registers under: an explicit
+        /// <c>[McpServerTool(Name = ...)]</c> wins (e.g. lacerte_prompts);
+        /// otherwise the SDK's snake_case-of-method-name convention applies.
+        /// </summary>
+        private static string RegisteredToolName(MethodInfo m)
+        {
+            var attr = m.GetCustomAttribute<McpServerToolAttribute>();
+            if (attr != null && !string.IsNullOrEmpty(attr.Name))
+            {
+                return attr.Name!;
+            }
+            return ToSnakeCase(m.Name);
+        }
 
         /// <summary>
         /// MCP tools register under their C# method name converted to

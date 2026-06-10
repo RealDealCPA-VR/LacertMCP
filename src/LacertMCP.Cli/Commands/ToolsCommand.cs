@@ -274,6 +274,13 @@ namespace LacertMCP.Cli.Commands
 
                     foreach (var p in method.GetParameters())
                     {
+                        // R6-38: CancellationToken is host-injected plumbing the MCP
+                        // wire schema never exposes — the SDK binds it from the
+                        // request context, not from tool arguments. Listing it here
+                        // made the CLI surface disagree with what an MCP client
+                        // actually sees in tools/list.
+                        if (p.ParameterType == typeof(System.Threading.CancellationToken)) continue;
+
                         entry.Parameters.Add(new ParamEntry
                         {
                             Name = p.Name ?? "(unnamed)",

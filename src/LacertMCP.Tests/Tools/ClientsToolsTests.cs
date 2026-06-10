@@ -456,7 +456,7 @@ namespace LacertMCP.Tests.Tools
             var matches = result.GetProperty("matches").EnumerateArray().ToArray();
             if (total > 1)
             {
-                Assert.Equal(1, matches.Length);
+                Assert.Single(matches);
                 Assert.True(result.GetProperty("truncated").GetBoolean());
             }
         }

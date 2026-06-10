@@ -63,7 +63,7 @@ namespace LacertMCP.Server
             // until Phase 9 wires the COM client.
             builder.Services.AddSingleton<LacerteSessionManager>();
 
-            // P15-054 — periodic liveness signal file at %TEMP%/lacerte-mcp-heartbeat.json
+            // P15-054 — periodic liveness signal file at %TEMP%/lacerte-mcp-heartbeat-{pid}.json
             // so external watchers (Task Scheduler, NSSM, an operator
             // PowerShell snippet) can detect a hung / dead server without
             // implementing the MCP JSON-RPC handshake. Gated on a positive

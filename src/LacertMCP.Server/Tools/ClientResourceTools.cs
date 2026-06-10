@@ -157,13 +157,14 @@ namespace LacertMCP.Server.Tools
                         dataPath = ctx.DataPath,
                         // P16-069/P16-079 — canonical wire name `taxYear`.
                         taxYear = ctx.Year,
-                        // Lowercase module name from Modules.FileBasename
-                        // (e.g. 'I' -> "individual", 'S' -> "scorp"). The
-                        // single-char DBF code is canonical inside the
-                        // session but the wire convention for exports is
-                        // the human-readable lowercase basename so an LLM
-                        // can render it without a lookup table.
-                        module = Modules.FileBasenameFor(ctx.Module),
+                        // R6-18 — the `module` wire key carries the canonical
+                        // single-character DBF code ("I"), matching every
+                        // other tool so cross-tool joins work. The lowercase
+                        // file basename ('I' -> "individual", 'S' -> "scorp")
+                        // still carries rendering info, so it moves to its
+                        // own key instead of overloading `module`.
+                        module = ctx.Module.ToString(),
+                        moduleFileBasename = Modules.FileBasenameFor(ctx.Module),
                     };
 
                 var uri = $"lacerte://client/{clientNumber}";

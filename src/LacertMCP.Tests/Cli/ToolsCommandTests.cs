@@ -88,6 +88,30 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal("", ToolsCommand.ToSnakeCase(""));
         }
 
+        // ----- R6-38: CancellationToken params excluded from listed signatures -----
+
+        /// <summary>
+        /// R6-38: CancellationToken parameters are host-injected plumbing the MCP
+        /// wire schema never exposes (the SDK binds them from the request context,
+        /// not tool arguments) — so `lacerte-mcp tools` must not list them, or the
+        /// CLI surface disagrees with what an MCP client sees in tools/list.
+        /// </summary>
+        [Fact]
+        public void DiscoverTools_ExcludesCancellationTokenParameters()
+        {
+            var tools = ToolsCommand.DiscoverTools();
+            Assert.NotEmpty(tools);
+            foreach (var tool in tools)
+            {
+                foreach (var p in tool.Parameters)
+                {
+                    Assert.False(
+                        string.Equals(p.Type, "CancellationToken", StringComparison.Ordinal),
+                        $"Tool '{tool.Name}' lists a CancellationToken parameter '{p.Name}' — the MCP wire schema excludes these.");
+                }
+            }
+        }
+
         // ----- P15-066: filtering surface -----
 
         [Fact]

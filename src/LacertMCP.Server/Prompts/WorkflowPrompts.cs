@@ -72,8 +72,9 @@ Step 4 — Seed core address / phone fields (if collected during intake)
   Only the three name/email fields are confirmed off-spec today; every other
   code below is marked TBD pending the live FieldAccessDumper introspection
   pass (Todo.md item F5). Do NOT invent codes — if the operator hands you a
-  column not in this table, call `lacerte_field_access_map` (it returns the
-  per-field access enum) and STOP if the field is missing from the map.
+  column not in this table, call `lacerte_field_access_map` with the active
+  module, table, and taxYear (the `taxYear` parameter is REQUIRED — it returns
+  the per-field access enum) and STOP if the field is missing from the map.
 
     | CSV column           | Lacerte field | Confirmed?           |
     | -------------------- | ------------- | -------------------- |
@@ -114,7 +115,7 @@ Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at
   • A W-2 row looks like:
       `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", source: ""W2"", tsj: ""T"" }})`
     Series cheat-sheet: 11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners. `tsj` is one of T/S/J/"""" (taxpayer/spouse/joint/unspecified). `stateAbbrev` is """" or a 2-letter postal code (validated ^[A-Z]{{2}}$).
-  • For idempotent retries pass `idempotencyKey: ""intake-<clientId>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true`.
+  • For idempotent retries pass `idempotencyKey: ""intake-<clientId>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true` — and if you dry-run first, use a DIFFERENT key for the real write (e.g. append `-preview` to the dry-run key): `dryRun` is part of the idempotency fingerprint and dry-run results are cached, so reusing one key across a dry-run and a real write throws `IdempotencyConflict (9102)`.
   • The SDK does NOT validate detail-row shape; this tool's client-side validation is the only safeguard. Read the error message verbatim — series/code/stateAbbrev/tsj each surface a per-field `reason` in the error context if rejected.
 
 Step 6 — Verify the new client appears in the roster
@@ -151,7 +152,7 @@ If any step fails, surface the structured `statusCode` + `userMessage` + `remedi
             int? taxYear = null)
         {
             var yearNote = taxYear.HasValue
-                ? $"Filter results to tax year {taxYear.Value}."
+                ? $"Target tax year {taxYear.Value}: EF rows carry NO year field, so you cannot filter rows after the fact — set the context to that year FIRST (call `lacerte_set_context` with taxYear {taxYear.Value}) before pulling any EF data."
                 : "Use whatever year the active context already has.";
 
             var text =
@@ -164,8 +165,10 @@ Step 1 — Confirm the session + context
 Step 2 — Pull the join
   • Call `lacerte_ef_status` (no arguments — it uses the active context).
   • EF status is available TY19+. If the active year is older, surface that to the operator and STOP.
+  • FOLLOW PAGINATION: if the response says `hasMore: true`, call `lacerte_ef_status` again with `offset: <nextOffset>` and repeat until `hasMore` is false. Collect ALL pages before moving on — bucket counts computed from a single page are wrong for any roster larger than one page.
 
 Step 3 — Group the rows by `Status`
+  • Only group once pagination is complete (every page collected in Step 2).
   • Buckets are typically: ""Transmitted"", ""Accepted"", ""Rejected"", ""Pending"" (plus any other Status strings the SDK returns).
   • Count the rows in each bucket. Report the counts first so the operator gets the shape at a glance.
 
@@ -225,7 +228,7 @@ Step 1 — Confirm session + context
   • Confirm `context` matches the module + year the operator intended. If wrong, `lacerte_set_context`.
 
 Step 2 — Sanity-check the field is writable
-  • Call `lacerte_field_access_map` with the active module + table. The response's `fields` dict only contains entries for fields whose access is NOT `Unknown` (the loader filters Unknown to reduce noise).
+  • Call `lacerte_field_access_map` with the active module, table, AND taxYear (the `taxYear` parameter is REQUIRED — pass the active context's year). The response's `fields` dict only contains entries for fields whose access is NOT `Unknown` (the loader filters Unknown to reduce noise).
   • Confirm `{fieldLabel}` appears in `fields` AND its access is exactly `ReadWrite`. STOP if any of: field is ABSENT from `fields` / access is `Unknown` / `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`. (NOTE: until Todo.md F5 lands full shard introspection, only `C{table}_0` is cataloged ReadWrite for every module — every other field on a v1 module returns Unknown and will be absent from the response. If you don't see `{fieldLabel}` listed, that IS the STOP signal — do NOT proceed and bulk-write entries that the chokepoint will reject with `UnknownFieldAccess` 9012.)
 
 Step 3 — Build the target client list
@@ -235,19 +238,19 @@ Step 3 — Build the target client list
 
 Step 4 — Dry-run preview (first {previewCount})
   • Build an `entries` array with the first {previewCount} clients: `[{{ clientNumber, field: ""{fieldLabel}"", value }}, ...]`. For DATA2/4 add `subClientId`; for DATA3/4 add `stateAbbrev`.
-  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: true, continueOnError: false, idempotencyKey: ""bulk-<batchId>"" }}`. The tool synthesizes per-row keys as `""<prefix>-<clientNumber>-<field>""` automatically — never aliases across fields.
+  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: true, continueOnError: false, idempotencyKey: ""bulk-<batchId>-preview"" }}`. The tool synthesizes per-row keys as `""<prefix>-<index>-<clientNumber>-<field>""` automatically (positional — keys never alias, even for repeated client+field pairs in one batch).
   • Inspect `perItem[]`. If ANY row's `success` is false (or `statusCode` is non-Success), STOP and report the failed clientNumber + the structured error. Do not proceed to the real write.
 
 Step 5 — Real write (only if preview was 100% clean)
-  • Build the full `entries` array for every target client (same per-row shape as Step 4).
-  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: false, continueOnError: false, idempotencyKey: ""bulk-<batchId>"" }}`. SAME prefix as Step 4 — the session-side idempotency lock replays cached results for the preview rows instead of re-writing them, so the previewed rows are skipped automatically.
+  • Build the full `entries` array for every target client (same per-row shape as Step 4). Previewed rows are NOT skipped — every row in this commit array is written for real.
+  • Call `lacerte_field_write_bulk` ONCE: `{{ table: {table}, entries, dryRun: false, continueOnError: false, idempotencyKey: ""bulk-<batchId>"" }}`. This is a DIFFERENT prefix than Step 4 (`bulk-<batchId>`, not `bulk-<batchId>-preview`) and that is mandatory: `dryRun` is part of every row's idempotency fingerprint and dry-run results ARE cached, so reusing the preview prefix here would make the commit's first previewed row throw `IdempotencyConflict (9102)` — and with `continueOnError: false` the whole real write stops at row 0. Never reuse one idempotency key across a dry-run and a real write.
   • If `errorCount > 0` in the response envelope, STOP. The first failing row's `index` + `statusCode` + `userMessage` tell the operator exactly where the batch stopped. Remaining rows after the failure are marked `skipped: true` (stop-on-first-error posture).
 
 Step 6 — Verify a sample
   • Pick 3 random clients from the batch's successful `perItem[]` rows. Call `lacerte_client_read` for each and confirm `{fieldLabel}` now holds the new value.
   • Report `totalCount` / `successCount` / `errorCount` from the bulk response plus the sample-verified count.
 
-Idempotency note: per-row keys are `""<prefix>-<clientNumber>-<field>""`. If a retry replays the same prefix with the same per-row payload, the session manager returns the cached result without re-writing. If the per-row payload differs, that row throws `IdempotencyConflict (9102)` and the batch stops (or continues, depending on `continueOnError`). Pick a fresh `batchId` for a genuinely new run.";
+Idempotency note: per-row keys are `""<prefix>-<index>-<clientNumber>-<field>""` (the index is the row's position in the batch, so identical client+field pairs in one batch get distinct keys). If a retry replays the same prefix with the same per-row payload (INCLUDING the same `dryRun` value), the session manager returns the cached result without re-writing. If the per-row payload differs — including flipping `dryRun` — that row throws `IdempotencyConflict (9102)` and the batch stops (or continues, depending on `continueOnError`). That is why the preview pass (`bulk-<batchId>-preview`) and the commit pass (`bulk-<batchId>`) MUST use different prefixes: a dry-run and a real write of the same row have different fingerprints, so a shared key can only ever conflict. To RETRY a failed commit, reuse the SAME `bulk-<batchId>` prefix (succeeded rows replay from cache; failed/skipped rows re-execute). Pick a fresh `batchId` for a genuinely new run.";
 
             return new GetPromptResult
             {
@@ -295,7 +298,7 @@ Step 1 — Confirm session + context
 Step 2 — Declare the column → field mapping ONCE
   • Ask the operator (or read the CSV header row) for the column names present in `{label}`.
   • Build a mapping dictionary `{{ csvColumn: lacerteField }}` per the canonical table in the `lacerte_client_intake` prompt's Step 4 (firstName=C1_1, lastName=C1_2, emailId=C1_3 are confirmed; address/phone/DOB/SSN are TBD pending Todo.md F5).
-  • For each TBD field the operator wants to seed, call `lacerte_field_access_map` to confirm the field exists and is `ReadWrite` on the active module. STOP if any of: field is ABSENT from `fields` / `Unknown` / `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`, and tell the operator that field cannot be bulk-seeded yet.
+  • For each TBD field the operator wants to seed, call `lacerte_field_access_map` (with the active module, table, and taxYear — the `taxYear` parameter is REQUIRED) to confirm the field exists and is `ReadWrite` on the active module. STOP if any of: field is ABSENT from `fields` / `Unknown` / `ReadOnly` / `Hidden` / `NotExposed` / `NotSupported`, and tell the operator that field cannot be bulk-seeded yet.
 
 Step 3 — Validate the row payloads BEFORE any write
   • For each CSV row, build `{{ clientId, taxType, firstName, lastName, emailId }}` plus a `seedFields` dict from the column mapping.

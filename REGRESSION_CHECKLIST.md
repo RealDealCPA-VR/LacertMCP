@@ -10,19 +10,19 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 ## Tests
 
-- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports `0 failed` with `skipped` matching the count documented in `HANDOFF.md` "Verify Before Continuing" (currently **10**, all live-only). The pass count grows over time as tests land — the operative invariants are 0 failed + skip count stable at 10.
-- [ ] The 10 skips are the 9 `[Fact(Skip = "Requires real Lacerte SDK …")]` cases under `Tests/Bridge/` (Reader, Writer, Registration, CanUseNewApisProbe, LacerteAccessClient) plus the one Windows-only Credential Manager P/Invoke round-trip in `Tests/Cli/AppIdStoreTests.cs`.
+- [ ] `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` reports `0 failed` with `skipped` matching the count documented in `HANDOFF.md` "Verify Before Continuing" (currently **11**, all live-only / fixture-gated). The pass count grows over time as tests land — the operative invariants are 0 failed + the documented skip set.
+- [ ] The 11 skips are the 9 `[Fact(Skip = "Requires real Lacerte SDK …")]` cases under `Tests/Bridge/` (Reader, Writer, Registration, CanUseNewApisProbe, LacerteAccessClient), the one Windows-only Credential Manager P/Invoke round-trip in `Tests/Cli/AppIdStoreTests.cs`, plus `LiveLegParityPlaceholder.LiveLeg_AwaitsRecordedReplayFixture` (flips green when a parity recording lands under `tests/Parity/fixtures/`).
 
 ## Server startup
 
 - [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` starts the stdio MCP server without throwing (kill after confirming startup).
 - [ ] Simulation banner prints when expected (off-Windows or `LACERTE_SIMULATION=1`).
-- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` (22 tools today — count `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` rather than a hard-coded number, since this drifts every time a tool is added).
+- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` plus `Prompts/PromptsCatalogTool.cs` (42 tools today — count the decorated methods rather than trusting a hard-coded number, since this drifts every time a tool is added; `HelpTools.ToolsByCategory()` must list the same set, enforced by the bidirectional parity test in `HelpToolsTests`).
 
 ## CLI smoke
 
 - [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` exits **0** with a JSON payload.
-- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor` is expected to exit **2** off-Windows = PARTIAL (Windows-only probes skipped, no real failures); exit 1 means a probe genuinely failed (e.g. AppID missing on a fresh checkout — run `lacerte-mcp register` to fix); exit 0 = all green (Windows + Lacerte install). Per DoctorCommand.cs:14-20.
+- [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor` is expected to exit **2** off-Windows = PARTIAL (Windows-only probes skipped, no real failures); exit 1 means a probe genuinely failed (e.g. AppID missing on a fresh checkout — run `lacerte-mcp register` to fix); exit 0 = all green, no warns (Windows + Lacerte install). Warn-only runs also exit 2 (PARTIAL) and print per-warn remediation lines (R6-29). Per DoctorCommand.cs XML doc.
 
 ## Dumper smoke
 
@@ -119,11 +119,25 @@ Mark each box `[x]` only after the operator personally observed the tool succeed
 - [ ] `lacerte_client_create` rejects ClientID > 8 chars BEFORE any wire call. Exercised end-to-end.
 - [ ] `lacerte_client_create` rejects TaxYear < 2018 BEFORE any wire call. Exercised end-to-end.
 
-### Auth lifecycle (Phase 9)
+### Auth lifecycle (Phase 9 + R6-05 CLI ceremony wiring)
 
-- [ ] `lacerte-mcp register` ceremony on a fresh box: GUID minted, persisted in Credential Manager, dialogs pop, AccessGranted returned. Exercised end-to-end on a fresh Windows install.
+- [ ] `lacerte-mcp register` ceremony on a fresh box: GUID minted, persisted in Credential Manager, Intuit consent + sign-in dialogs pop on the interactive desktop, operator clicks through, command prints `AccessGranted (201) — consent ceremony complete.` and exits **0**. Exercised end-to-end on a fresh Windows + Lacerte install.
+- [ ] `lacerte-mcp register` with the operator declining the consent dialog: command prints `FAIL: consent ceremony returned ConsentDenied (200)` with the catalog remediation on stderr and exits **1** (no exit 3 — that code is retired for register/login). Exercised end-to-end on the Windows + Lacerte box.
+- [ ] `lacerte-mcp register` on Windows WITHOUT the Lacerte SDK MSI installed: command prints the `PARTIAL:` block on stderr (AppID persisted; pointer at `lacerte-mcp doctor` + the 64-bit MSI) and exits **2**. Exercised end-to-end on a Windows box with no SDK.
+- [ ] `lacerte-mcp login` within a valid consent window: refreshes the 24h ticket silently (no dialogs), prints `AccessGranted (201)`, exits **0**; MCP tools reach the live SDK afterwards. Exercised end-to-end on the Windows + Lacerte box.
+- [ ] `lacerte-mcp login` with no persisted AppID: prints `No AppID found. Run lacerte-mcp register first.` and exits **1**. (Sim-verifiable off-Windows; the full exit-code matrix is also pinned by `Cli/RegisterLoginCeremonyExitCodeTests.cs` via the injectable ceremony seam.)
 - [ ] MCP server startup within the 24h cache window: `Register()` returns silently (no dialogs). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] After 24h elapse OR explicit logout: every tool call that touches `RequireContext` short-circuits to synthetic `9007 LoginExpired` with the `lacerte-mcp register` / `lacerte-mcp login` remediation message; calls that bypass `RequireContext` (e.g. `lacerte_session_status`) still succeed and report `registered: false`. Exercised end-to-end.
+
+### Round-6 tools (bulk create / bulk detail / client query)
+
+Sim-mode behavior for all three tools is pinned by the test suite (`Tools/ClientCreateBulkToolsTests.cs` / `Tools/DetailWriteBulkToolsTests.cs` / `Tools/ClientQueryToolsTests.cs` — caps, positional per-row idempotency keys, continueOnError/skipped accounting, dry-run rollback, cancellation). The items below are the live-wire halves an operator must observe on the Windows + Lacerte box:
+
+- [ ] `lacerte_client_create_bulk` with 3 entries + `idempotencyKey` prefix: 3 real clients created (verify via `lacerte_client_list`); resubmitting the identical batch with the same prefix replays from cache with the ORIGINAL clientNumbers and creates no duplicates. Exercised end-to-end on the `C:\Lacerte\24data` datapath / TY24 Individual.
+- [ ] `lacerte_client_create_bulk` exceeding `LACERTE_BULK_CREATE_MAX` (default 100): throws `9020 BulkBatchTooLarge` BEFORE any row runs (no partial creates on disk). Exercised end-to-end.
+- [ ] `lacerte_detail_write_bulk` with 3 W-2 rows + `idempotencyKey` prefix: rows append and persist (verify via `lacerte_detail_read`); resubmitting the identical batch does NOT double the rows. Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
+- [ ] `lacerte_detail_write_bulk` with an entry carrying `replaceIndex` in live mode: that row fails `9019 LiveReplaceIndexUnsupported`; with `continueOnError:false` the remainder is marked skipped. Exercised end-to-end.
+- [ ] `lacerte_client_query(fieldName: "C1_3", op: "empty")` against the real roster returns exactly the clients with no email (spot-check 3 against `lacerte_client_read`), and `total` matches the matched count, not the table size. Exercised end-to-end on the `C:\Lacerte\24data` datapath / TY24 Individual.
 
 ### Sanity / observability
 

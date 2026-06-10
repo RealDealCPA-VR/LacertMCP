@@ -69,16 +69,43 @@ namespace LacertMCP.Server.Odbc
         /// IM002 (DSN/driver not found), HY* (driver-side error), S1* (legacy
         /// driver-side error). Per P15-045 — exposed as a predicate so
         /// <see cref="LacerteDsnReader"/> doesn't duplicate the classification.
+        /// <para>
+        /// R6-36 — timeout (HYT00/HYT01/S1T00) and cancel (HY008/S1008)
+        /// SQLSTATEs are excluded: the connection is still healthy after a
+        /// slow or aborted query, so recycling it would just churn the
+        /// provider pool.
+        /// </para>
         /// </summary>
         public static bool IsConnectionFatal(string? sqlState)
         {
             if (string.IsNullOrEmpty(sqlState)) return false;
+            // R6-36 — timeouts (HYT00 login timeout / HYT01 query timeout,
+            // legacy S1T00) and operator cancellation (HY008, legacy S1008)
+            // are NOT connection-fatal: the handle is still usable and
+            // recycling it needlessly drops the provider-pool slot on every
+            // slow query / cancel. They must be carved out BEFORE the broad
+            // HY*/S1* families below.
+            if (IsTimeoutOrCanceled(sqlState!)) return false;
             if (sqlState!.StartsWith("08", StringComparison.OrdinalIgnoreCase)) return true;
             if (sqlState.Equals("IM002", StringComparison.OrdinalIgnoreCase)) return true;
             if (sqlState.StartsWith("HY", StringComparison.OrdinalIgnoreCase)) return true;
             if (sqlState.StartsWith("S1", StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         }
+
+        // R6-36 — shared SQLSTATE classification for the timeout/cancel
+        // carve-out used by both IsConnectionFatal and MapSqlState.
+        private static bool IsTimeoutOrCanceled(string sqlState)
+            => IsTimeout(sqlState) || IsCanceled(sqlState);
+
+        private static bool IsTimeout(string sqlState)
+            => sqlState.Equals("HYT00", StringComparison.OrdinalIgnoreCase)
+               || sqlState.Equals("HYT01", StringComparison.OrdinalIgnoreCase)
+               || sqlState.Equals("S1T00", StringComparison.OrdinalIgnoreCase); // legacy alias of HYT00
+
+        private static bool IsCanceled(string sqlState)
+            => sqlState.Equals("HY008", StringComparison.OrdinalIgnoreCase)
+               || sqlState.Equals("S1008", StringComparison.OrdinalIgnoreCase); // legacy alias of HY008
 
         /// <summary>
         /// Pure SQLSTATE → TAPIStatus mapping. Public so tests can fabricate
@@ -116,6 +143,41 @@ namespace LacertMCP.Server.Odbc
             if (sqlState.Equals("42000", StringComparison.OrdinalIgnoreCase))
             {
                 return new SqlStateMapping(StatusCodes.Error, "Error", message);
+            }
+
+            // R6-36 — timeouts and cancellation MUST be carved out BEFORE the
+            // generic HY*/S1* → CodeBaseError bucket. CodeBaseError's catalog
+            // remediation is "run File -> Repair Indexes" — actively wrong for
+            // a slow share (timeout) and absurd for an intentional cancel.
+            //
+            // HYT00 (login timeout) / HYT01 (connection/query timeout) /
+            // S1T00 (legacy): map to DBFNotAccessable — the catalog's
+            // transient "file is missing, locked, or unreachable" code whose
+            // remediation (check the data path, close the file in Lacerte,
+            // retry) is the right operator move for a timed-out DBF read.
+            // There is no dedicated timeout code in StatusCodes /
+            // SyntheticStatusCodes; DBFNotAccessable is the closest
+            // retry-after-unblocking semantic (it's also where 08*
+            // connection failures land).
+            if (IsTimeout(sqlState))
+            {
+                return new SqlStateMapping(
+                    StatusCodes.DBFNotAccessable,
+                    "DBFNotAccessable",
+                    "ODBC timeout (" + sqlState.ToUpperInvariant() + "): " + message
+                    + " — transient; verify the Lacerte data share is reachable and the DBF is not locked, then retry.");
+            }
+
+            // HY008 (operation canceled) / S1008 (legacy): the caller (or a
+            // statement timeout) intentionally aborted the query. Generic
+            // Error — not an index-corruption signal, and retry guidance is
+            // the caller's call, not the catalog's.
+            if (IsCanceled(sqlState))
+            {
+                return new SqlStateMapping(
+                    StatusCodes.Error,
+                    "Error",
+                    "ODBC operation canceled (" + sqlState.ToUpperInvariant() + "): " + message);
             }
 
             // General driver errors — HY* (current) and S1* (legacy alias before SQL-92).

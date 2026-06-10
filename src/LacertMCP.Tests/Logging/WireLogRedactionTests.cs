@@ -357,6 +357,110 @@ namespace LacertMCP.Tests.Logging
             Assert.DoesNotContain("111-22-3333", redacted);
         }
 
+        // -----------------------------------------------------------------
+        // R6-12 — disk-log PII gap: raw SQL with name literals + raw-column-
+        // keyed identity fields (C1_1/C1_2, address block, entity-module
+        // equivalents) bypassed redaction. "sql" / "lastNameFilter" /
+        // "nameFilter" join the DISK keyset, and every non-C{t}_0 raw column
+        // code is scrubbed at DISK scope (P15-058-mirroring denylist —
+        // there is no enumerable per-module catalog of name/address codes).
+        // Wire scope is unchanged: the LLM still sees the SQL it can replay
+        // and the row fields read tools exist to surface.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public void Redact_OdbcQueryRecord_SqlScrubbedAtDiskScope_R6_12()
+        {
+            // Exact shape LacerteDsnReader.Query logs: args.sql carries the
+            // operator's name literal verbatim.
+            var raw = JsonSerializer.Serialize(new
+            {
+                op = "Odbc.Query",
+                args = new { sql = "select top 50 * from [DATA1-Client Info] where C1_2 like 'Smith%'" },
+                durationMs = 3,
+            });
+
+            var diskRedacted = WireLog.Redact(raw, RedactionScope.Disk);
+
+            Assert.DoesNotContain("Smith", diskRedacted);
+            Assert.Contains("\"sql\":\"***\"", diskRedacted);
+            // Op name survives so the record stays greppable.
+            Assert.Contains("\"op\":\"Odbc.Query\"", diskRedacted);
+        }
+
+        [Fact]
+        public void Redact_OdbcQueryRecord_SqlPreservedAtWireScope_R6_12()
+        {
+            var raw = "{\"op\":\"Odbc.Query\",\"args\":{\"sql\":\"select * from [DATA1-Client Info] where C1_2 like 'Smith%'\"}}";
+            var wireRedacted = WireLog.Redact(raw, RedactionScope.Wire);
+            // The LLM consumer keeps the replayable SQL on the wire.
+            Assert.Contains("Smith", wireRedacted);
+        }
+
+        [Fact]
+        public void Redact_ListClientsArgs_LastNameFilterScrubbedAtDiskScope_R6_12()
+        {
+            var raw = JsonSerializer.Serialize(new
+            {
+                op = "ListClients",
+                args = new { lastNameFilter = "Smith", limit = 100 },
+            });
+
+            var diskRedacted = WireLog.Redact(raw, RedactionScope.Disk);
+            var wireRedacted = WireLog.Redact(raw, RedactionScope.Wire);
+
+            Assert.DoesNotContain("Smith", diskRedacted);
+            Assert.Contains("\"lastNameFilter\":\"***\"", diskRedacted);
+            // limit survives at disk; filter survives on the wire.
+            Assert.Contains("\"limit\":100", diskRedacted);
+            Assert.Contains("Smith", wireRedacted);
+        }
+
+        [Fact]
+        public void Redact_RowWithIdentityColumnCodes_ScrubbedAtDiskScope_PreservedAtWireScope_R6_12()
+        {
+            // The R6-12 dict-row gap: C1_1/C1_2 (names) and address-block
+            // codes are identity prose the friendly-key disk set (FirstName/
+            // LastName/City/Zip) would scrub — but raw-column keys bypassed
+            // it. Disk scope now scrubs every C{t}_N code except the C{t}_0
+            // client-number anchor; wire scope preserves them so read tools
+            // stay useful.
+            var raw = JsonSerializer.Serialize(new
+            {
+                C1_0 = "1001",         // ClientNumber — diagnostic anchor
+                C1_1 = "Jane",         // FirstName / entity name
+                C1_2 = "Smith",        // LastName
+                C1_4 = "MFJ",          // FilingStatus — over-redacted at disk by design
+                C2_7 = "123 Main St",  // hypothetical entity-module address slot
+            });
+
+            var diskRedacted = WireLog.Redact(raw, RedactionScope.Disk);
+            var wireRedacted = WireLog.Redact(raw, RedactionScope.Wire);
+
+            // Disk: identity prose gone, anchor preserved.
+            Assert.DoesNotContain("Jane", diskRedacted);
+            Assert.DoesNotContain("Smith", diskRedacted);
+            Assert.DoesNotContain("123 Main St", diskRedacted);
+            Assert.Contains("\"C1_2\":\"***\"", diskRedacted);
+            Assert.Contains("\"C1_0\":\"1001\"", diskRedacted);
+
+            // Wire: names/addresses preserved (true secrets are covered by
+            // _piiFieldCodes, which these are not).
+            Assert.Contains("\"C1_1\":\"Jane\"", wireRedacted);
+            Assert.Contains("\"C1_2\":\"Smith\"", wireRedacted);
+            Assert.Contains("\"C1_0\":\"1001\"", wireRedacted);
+        }
+
+        [Fact]
+        public void Redact_MalformedJsonWithSqlKey_FallbackScrubsAtDiskKeyset_R6_12()
+        {
+            // Regex fallback mirrors the broad disk alternation; sql joined it.
+            var raw = "garbage \"sql\":\"where C1_2 like 'Smith%'\" trailing";
+            var redacted = WireLog.Redact(raw);
+            Assert.DoesNotContain("Smith", redacted);
+            Assert.Contains("\"sql\":\"***\"", redacted);
+        }
+
         [Fact]
         public void WriteForTest_RedactsExpandedKeyset_BeforeDisk()
         {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
@@ -34,10 +35,13 @@ namespace LacertMCP.Server.Tools
     /// </para>
     ///
     /// <para>
-    /// Per-row idempotency key shape: <c>$"{idempotencyKey}-{clientNumber}-{field}"</c>
-    /// when an <c>idempotencyKey</c> prefix is supplied. Suffixing with both
-    /// clientNumber and field lets a single batch span multiple fields per
-    /// client without aliasing keys.
+    /// Per-row idempotency key shape: <c>$"{idempotencyKey}-{i}-{clientNumber}-{field}"</c>
+    /// when an <c>idempotencyKey</c> prefix is supplied. Suffixing with the
+    /// row index plus clientNumber and field lets a single batch span
+    /// multiple fields per client AND repeat the same (client, field) pair
+    /// at different positions without aliasing keys (R6-20a). Per-row keys
+    /// are therefore POSITIONAL — a retry must resubmit the same entries[]
+    /// in the same order.
     /// </para>
     /// </summary>
     [McpServerToolType]
@@ -130,7 +134,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Bulk-update a single DBF table across many clients in one MCP call. Iterates the existing field-write chokepoint per entry (DATA6/DATA7 still rejected, access-map gate still applied, dry-run undo still honored, idempotency-lock still serialized per key) and aggregates per-row outcomes into {totalCount, successCount, errorCount, perItem[]}. Default continueOnError=false stops at the first failure; pass continueOnError=true to keep going and collect every row's status. When idempotencyKey is supplied it acts as a prefix - each row uses '{prefix}-{clientNumber}-{field}' so a retry of the whole batch replays cleanly without aliasing across fields. P17-008 - entries.Length is capped at 500 by default (override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge. Pass optional expectedCount to assert entries.Length equals an operator-intended target (throws 9021 BulkBatchCountMismatch on drift) - catches fuzzy LLM payload construction before any row runs.")]
+        [Description("Bulk-update a single DBF table across many clients in one MCP call. Iterates the existing field-write chokepoint per entry (DATA6/DATA7 still rejected, access-map gate still applied, dry-run undo still honored, idempotency-lock still serialized per key) and aggregates per-row outcomes into {totalCount, successCount, errorCount, perItem[]}. Default continueOnError=false stops at the first failure; pass continueOnError=true to keep going and collect every row's status. When idempotencyKey is supplied it acts as a prefix - each row uses '{prefix}-{index}-{clientNumber}-{field}' (per-row keys are POSITIONAL: a retry must resubmit the same entries[] in the same order) so a retry of the whole batch replays cleanly even when the same (client, field) pair appears more than once. P17-008 - entries.Length is capped at 500 by default (override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge. Pass optional expectedCount to assert entries.Length equals an operator-intended target (throws 9021 BulkBatchCountMismatch on drift) - catches fuzzy LLM payload construction before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
         public Task<string> LacerteFieldWriteBulk(
             [Description("DBF table number applied to every entry. 1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status are writable; 6=Display and 7=Forms are read-only per spec §2 and will be rejected with ExposedForRead.")] int table,
             [Description("Array of per-row writes. Each entry: {clientNumber, field, value, subClientId?, stateAbbrev?}. Empty array returns a no-op envelope with totalCount=0. Capped at 500 entries by default (override via LACERTE_BULK_WRITE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkWriteEntry[] entries,
@@ -142,13 +146,14 @@ namespace LacertMCP.Server.Tools
             [Description("Optional - validates that the active session context's readOnly flag matches this value before iterating. Null skips the check.")] bool? readOnly = null,
             [Description("If true, run the full validation + access-map gate per entry then roll back without persisting. Each row returns its would-be TAPIStatus.")] bool dryRun = false,
             [Description("If true, a failed row records its error and the loop continues to the next entry. If false (default), the loop stops at the first failure and remaining entries are marked skipped (matches the canonical bulk-write prompt's stop-on-first-error posture).")] bool continueOnError = false,
-            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent; the server uses it as a per-row prefix ('{prefix}-{clientNumber}-{field}') so a retry of the whole batch replays succeeded rows from cache and re-executes failed/skipped rows. Without a prefix, an MCP transport retry will re-execute every row including the ones that already succeeded. Same prefix + same per-row payload: cached replay (idempotent for 24h). Same prefix + different payload: 9102 IdempotencyConflict for that row only.")] string? idempotencyKey = null,
+            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent; the server uses it as a per-row prefix ('{prefix}-{index}-{clientNumber}-{field}' — per-row keys are POSITIONAL, so a retry must resubmit the same entries[] in the same order) so a retry of the whole batch replays succeeded rows from cache and re-executes failed/skipped rows. Without a prefix, an MCP transport retry will re-execute every row including the ones that already succeeded. Same prefix + same per-row payload: cached replay (idempotent for 24h). Same prefix + different payload: 9102 IdempotencyConflict for that row only. NOTE: dry-run results are also cached (dryRun is part of the fingerprint) — use a DIFFERENT prefix for the preview pass ('bulk-<batchId>-preview') than the commit pass ('bulk-<batchId>') or the commit fails with 9102.")] string? idempotencyKey = null,
             // P17-008 — optional cross-check that catches LLM-vs-operator
             // intent drift BEFORE any row runs. The operator's prompt may
             // say "write to exactly 47 NY clients" — passing expectedCount=47
             // lets the system enforce it instead of the operator scanning a
             // 200-row perItem afterwards. Null skips the check.
-            [Description("Optional - validates that entries.Length equals this caller-supplied value before iterating. Null skips the check. Use to catch 'I meant 47 clients but the LLM emitted 200' drift; throws 9021 BulkBatchCountMismatch on mismatch.")] int? expectedCount = null)
+            [Description("Optional - validates that entries.Length equals this caller-supplied value before iterating. Null skips the check. Use to catch 'I meant 47 clients but the LLM emitted 200' drift; throws 9021 BulkBatchCountMismatch on mismatch.")] int? expectedCount = null,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -271,9 +276,21 @@ namespace LacertMCP.Server.Tools
                 // the batch tripped. Set on first failure only; later failures
                 // (in continueOnError mode) are still visible via perItem.
                 int? firstFailureIndex = null;
+                // R6-20b — MCP cancellation between rows. When the host
+                // cancels mid-batch we stop BEFORE the next mutation and
+                // return a clear partial-result envelope instead of either
+                // throwing away the completed rows' outcomes or continuing
+                // to mutate after the operator asked us to stop.
+                bool stoppedEarly = false;
 
                 for (int i = 0; i < entries.Length; i++)
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        stoppedEarly = true;
+                        break;
+                    }
+
                     var entry = entries[i];
 
                     // If a prior entry failed in stop-on-error mode, mark
@@ -315,13 +332,19 @@ namespace LacertMCP.Server.Tools
                         continue;
                     }
 
-                    // Per-row idempotency key: '{prefix}-{clientNumber}-{field}'.
-                    // Without a prefix the per-row write goes through with no
-                    // idempotency - matches the single-write tool's contract
-                    // when idempotencyKey is null.
+                    // Per-row idempotency key: '{prefix}-{i}-{clientNumber}-{field}'.
+                    // R6-20a — the index component makes keys POSITIONAL so
+                    // two entries targeting the same (client, field) in one
+                    // batch (e.g. write-then-correct) no longer alias to one
+                    // key (which produced a 9102 or a silent cached replay
+                    // for the second row). A retry must resubmit the same
+                    // entries[] in the same order. Without a prefix the
+                    // per-row write goes through with no idempotency -
+                    // matches the single-write tool's contract when
+                    // idempotencyKey is null.
                     string? rowKey = string.IsNullOrEmpty(idempotencyKey)
                         ? null
-                        : $"{idempotencyKey}-{entry.ClientNumber}-{entry.Field}";
+                        : $"{idempotencyKey}-{i}-{entry.ClientNumber}-{entry.Field}";
 
                     try
                     {
@@ -333,7 +356,8 @@ namespace LacertMCP.Server.Tools
                             entry.SubClientId,
                             entry.StateAbbrev,
                             dryRun,
-                            rowKey).ConfigureAwait(false);
+                            rowKey,
+                            cancellationToken).ConfigureAwait(false);
 
                         var info = StatusCodes.GetStatusInfo(status);
                         successCount++;
@@ -365,6 +389,17 @@ namespace LacertMCP.Server.Tools
                             context = sdkErr.Context,
                         });
                         if (!continueOnError) stopped = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // R6-20b — cancellation surfaced from inside the
+                        // session call. Stop the batch; the partial envelope
+                        // below carries stoppedEarly + processedCount. The
+                        // in-flight row is NOT recorded as an error — its
+                        // outcome is unknown and a keyed retry will replay
+                        // or re-execute it safely.
+                        stoppedEarly = true;
+                        break;
                     }
                     catch (Exception ex)
                     {
@@ -412,11 +447,16 @@ namespace LacertMCP.Server.Tools
                     {
                         canResumeViaSameBatch = canResume,
                         idempotencyKeyPrefix = string.IsNullOrEmpty(idempotencyKey) ? null : idempotencyKey,
-                        perRowKeyShape = "{prefix}-{clientNumber}-{field}",
+                        // R6-20a — keys are positional (index component).
+                        perRowKeyShape = "{prefix}-{index}-{clientNumber}-{field}",
                         note = canResume
-                            ? "Resubmit the same entries[] with the same idempotencyKey: succeeded rows replay from cache, failed/skipped rows re-execute. Do NOT slice entries[] — that loses the cache replay and the audit envelope."
+                            ? "Resubmit the same entries[] (same order — per-row keys are positional) with the same idempotencyKey: succeeded rows replay from cache, failed/skipped rows re-execute. Do NOT slice or reorder entries[] — that breaks the positional key alignment, loses the cache replay, and loses the audit envelope."
                             : (dryRun
-                                ? "Dry-run mode bypasses the idempotency cache, so there is no resume primitive. Re-run with dryRun=false (and an idempotencyKey) to enable safe retries."
+                                // R6-02 — post-P18, dry-run results ARE
+                                // cached (dryRun is in the fingerprint), so
+                                // the commit pass MUST use a different
+                                // prefix or every previewed row 9102s.
+                                ? "Dry-run results ARE stored in the idempotency cache (dryRun is part of the payload fingerprint), so the commit pass MUST use a DIFFERENT idempotencyKey prefix than this preview pass — reusing the preview prefix fails every previewed row with 9102 IdempotencyConflict. Convention: preview with 'bulk-<batchId>-preview', then commit with dryRun=false and prefix 'bulk-<batchId>'."
                                 : "No idempotencyKey was supplied, so a resubmit would re-execute every row including the ones that already succeeded. Re-run the batch with an idempotencyKey prefix to enable safe retries on future failures."),
                         replayedRowsCount = successCount,
                         retryRowsCount = errorCount + skippedCount,
@@ -432,6 +472,12 @@ namespace LacertMCP.Server.Tools
                     successCount,
                     errorCount,
                     skippedCount,
+                    // R6-20b — partial-result markers for MCP cancellation.
+                    // processedCount = rows with a recorded outcome
+                    // (success / error / skipped); rows after a cancel have
+                    // no perItem entry at all.
+                    processedCount = perItem.Count,
+                    stoppedEarly,
                     // P16-064 — first-failure hoist + structured recovery hint.
                     firstFailureIndex,
                     firstFailure,

@@ -21,8 +21,8 @@ namespace LacertMCP.Tests.Cli
             new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Fail, "bad", "fix it");
         private static DoctorCommand.ProbeResult Skip(string n = "p") =>
             new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Skipped, "skipped: x");
-        private static DoctorCommand.ProbeResult Warn(string n = "p") =>
-            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Warn, "warn");
+        private static DoctorCommand.ProbeResult Warn(string n = "p", string? remediation = null) =>
+            new DoctorCommand.ProbeResult(n, DoctorCommand.ProbeStatus.Warn, "warn", remediation);
 
         /// <summary>
         /// P14-071: all-Pass results → exit 0. Pins the green-path contract.
@@ -35,13 +35,27 @@ namespace LacertMCP.Tests.Cli
         }
 
         /// <summary>
-        /// P14-071: a Warn alongside Passes still counts as green (Warn is advisory).
+        /// R6-29: a Warn alongside Passes lands in the PARTIAL bucket (exit 2).
+        /// Previously a warn-only run exited 0 "all probes green" with visible
+        /// ⚠ rows, so scripts gating on the exit code never saw advisory
+        /// problems. This also makes the in-code comment in ProbeAppId
+        /// ("Warn keeps exit code in the PARTIAL bucket (2)") true.
         /// </summary>
         [Fact]
-        public void ComputeExitCode_PassesPlusWarn_Returns0()
+        public void ComputeExitCode_PassesPlusWarn_Returns2()
         {
             var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Warn("b"), Pass("c") };
-            Assert.Equal(0, DoctorCommand.ComputeExitCode(results));
+            Assert.Equal(2, DoctorCommand.ComputeExitCode(results));
+        }
+
+        /// <summary>
+        /// R6-29: Fail still trumps Warn — a red probe wins over an advisory one.
+        /// </summary>
+        [Fact]
+        public void ComputeExitCode_FailTrumpsWarn_Returns1()
+        {
+            var results = new List<DoctorCommand.ProbeResult> { Warn("a"), Fail("b"), Pass("c") };
+            Assert.Equal(1, DoctorCommand.ComputeExitCode(results));
         }
 
         /// <summary>
@@ -551,27 +565,19 @@ namespace LacertMCP.Tests.Cli
         [Fact]
         public void Doctor_DataRoot_Unset_Remediation_Names_DataRoot_Not_SetContext()
         {
-            var savedRoot = Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT");
-            try
-            {
-                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", null);
-                var results = DoctorCommand.RunAllProbes();
-                var dataRoot = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_ROOT env");
-                Assert.NotNull(dataRoot);
-                // Either the warn carries the remediation OR (if downgraded to pass
-                // because DATA_ROOT IS set elsewhere) the test is a no-op.
-                if (dataRoot!.Status == DoctorCommand.ProbeStatus.Warn)
-                {
-                    Assert.False(string.IsNullOrEmpty(dataRoot.Remediation),
-                        "DATA_ROOT unset warn must carry a remediation.");
-                    Assert.Contains("LACERTE_DATA_ROOT", dataRoot.Remediation!);
-                    Assert.Contains("NOT settable via lacerte_set_context", dataRoot.Remediation);
-                }
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", savedRoot);
-            }
+            // R6 flake fix: pin the env via the RunAllProbes override seam
+            // instead of mutating the process-wide var — SetContext in
+            // concurrently-running test collections reads LACERTE_DATA_ROOT
+            // at call time and a transient mutation here fails THEIR tests.
+            var results = DoctorCommand.RunAllProbes(
+                new Dictionary<string, string?> { ["LACERTE_DATA_ROOT"] = null });
+            var dataRoot = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_ROOT env");
+            Assert.NotNull(dataRoot);
+            Assert.Equal(DoctorCommand.ProbeStatus.Warn, dataRoot!.Status);
+            Assert.False(string.IsNullOrEmpty(dataRoot.Remediation),
+                "DATA_ROOT unset warn must carry a remediation.");
+            Assert.Contains("LACERTE_DATA_ROOT", dataRoot.Remediation!);
+            Assert.Contains("NOT settable via lacerte_set_context", dataRoot.Remediation);
         }
 
         /// <summary>
@@ -584,45 +590,40 @@ namespace LacertMCP.Tests.Cli
         [Fact]
         public void Doctor_DataPath_Unset_With_DataRoot_Set_Downgrades_To_Pass()
         {
-            var savedRoot = Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT");
-            var savedPath = Environment.GetEnvironmentVariable("LACERTE_DATA_PATH");
-            try
-            {
-                // Use the temp dir as a guaranteed-existing path for DATA_ROOT.
-                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", Path.GetTempPath());
-                Environment.SetEnvironmentVariable("LACERTE_DATA_PATH", null);
-
-                var results = DoctorCommand.RunAllProbes();
-                var dataPath = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_PATH env");
-                Assert.NotNull(dataPath);
-                Assert.Equal(DoctorCommand.ProbeStatus.Pass, dataPath!.Status);
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("LACERTE_DATA_ROOT", savedRoot);
-                Environment.SetEnvironmentVariable("LACERTE_DATA_PATH", savedPath);
-            }
+            // R6 flake fix: env pinned via the override seam (see the test
+            // above). Temp dir = guaranteed-existing path for DATA_ROOT.
+            var results = DoctorCommand.RunAllProbes(
+                new Dictionary<string, string?>
+                {
+                    ["LACERTE_DATA_ROOT"] = Path.GetTempPath(),
+                    ["LACERTE_DATA_PATH"] = null,
+                });
+            var dataPath = results.FirstOrDefault(r => r.Name == "LACERTE_DATA_PATH env");
+            Assert.NotNull(dataPath);
+            Assert.Equal(DoctorCommand.ProbeStatus.Pass, dataPath!.Status);
         }
 
-        // ----- P16-058: AppID probe acknowledges Phase 9 stub on Win32NT+Live -----
+        // ----- R6-05: AppID probe no longer carries Phase-9-stub caveats -----
 
         /// <summary>
-        /// P16-058: off-Windows (or on Windows in sim mode), the Absent
-        /// remediation must remain terse (no Phase-9 noise — operator can't
-        /// complete the ceremony anyway in dev environments).
+        /// R6-05 (supersedes P16-058): now that `lacerte-mcp register` actually runs
+        /// the ITPRegistration.Register ceremony, the AppID probe's detail/remediation
+        /// must NOT mention the retired Phase-9 stub on ANY platform/mode — the
+        /// P16-058 Win32NT+Live caveat branches were deleted per their own
+        /// PHASE-9-CLEANUP note.
         /// </summary>
         [Fact]
-        public void Doctor_ProbeAppId_OffWindows_NoAppId_RemediationDoesNotMentionPhase9()
+        public void Doctor_ProbeAppId_DetailAndRemediation_DoNotMentionPhase9Stub()
         {
-            if (Environment.OSVersion.Platform == PlatformID.Win32NT) return;
-
             var results = DoctorCommand.RunAllProbes();
             var appId = results.FirstOrDefault(r => r.Name == "AppID GUID");
             Assert.NotNull(appId);
-            if (appId!.Status == DoctorCommand.ProbeStatus.Fail)
+            Assert.DoesNotContain("Phase 9", appId!.Detail);
+            Assert.DoesNotContain("[partial]", appId.Detail);
+            if (!string.IsNullOrEmpty(appId.Remediation))
             {
-                Assert.False(string.IsNullOrEmpty(appId.Remediation));
                 Assert.DoesNotContain("Phase 9", appId.Remediation!);
+                Assert.DoesNotContain("[partial]", appId.Remediation!);
             }
         }
 
@@ -652,6 +653,85 @@ namespace LacertMCP.Tests.Cli
             // Sanity: still parseable JSON.
             using var doc = JsonDocument.Parse(output);
             Assert.True(doc.RootElement.TryGetProperty("probes", out _));
+        }
+
+        // ----- R6-29: Warn rendering (remediation line + PARTIAL summary) -----
+
+        /// <summary>
+        /// R6-29(a): Warn rows must print their remediation in the human table
+        /// (previously only Fail rows surfaced the `→` hint, leaving ⚠ rows
+        /// with no guidance). Uses the results-injectable Run seam.
+        /// </summary>
+        [Fact]
+        public void Doctor_HumanOutput_PrintsWarnRemediation()
+        {
+            var sw = new StringWriter();
+            var results = new List<DoctorCommand.ProbeResult>
+            {
+                Pass("a"),
+                Warn("b", remediation: "tighten the flux capacitor"),
+            };
+            var exit = DoctorCommand.Run(sw, asJson: false, results);
+
+            Assert.Equal(2, exit);
+            Assert.Contains("tighten the flux capacitor", sw.ToString());
+        }
+
+        /// <summary>
+        /// R6-29(b): a warn-only run must NOT claim "all probes green" — the
+        /// summary line is "Result: PARTIAL (N warning(s)). Exit 2."
+        /// </summary>
+        [Fact]
+        public void Doctor_WarnOnly_SummaryIsPartialNotGreen()
+        {
+            var sw = new StringWriter();
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Warn("b"), Warn("c") };
+            var exit = DoctorCommand.Run(sw, asJson: false, results);
+
+            Assert.Equal(2, exit);
+            var output = sw.ToString();
+            Assert.Contains("Result: PARTIAL (2 warning(s)). Exit 2.", output);
+            Assert.DoesNotContain("all probes green", output);
+        }
+
+        /// <summary>
+        /// R6-29(b): warn + skip mix reports both counts in the PARTIAL summary.
+        /// Skip-only keeps the original off-Windows wording.
+        /// </summary>
+        [Fact]
+        public void Doctor_WarnPlusSkip_SummaryReportsBothCounts()
+        {
+            var sw = new StringWriter();
+            var results = new List<DoctorCommand.ProbeResult> { Warn("a"), Skip("b"), Pass("c") };
+            var exit = DoctorCommand.Run(sw, asJson: false, results);
+
+            Assert.Equal(2, exit);
+            Assert.Contains("Result: PARTIAL (1 warning(s), 1 probe(s) skipped). Exit 2.", sw.ToString());
+        }
+
+        [Fact]
+        public void Doctor_SkipOnly_SummaryKeepsOffWindowsWording()
+        {
+            var sw = new StringWriter();
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Skip("b") };
+            var exit = DoctorCommand.Run(sw, asJson: false, results);
+
+            Assert.Equal(2, exit);
+            Assert.Contains("Result: PARTIAL (one or more probes skipped — not on Windows). Exit 2.", sw.ToString());
+        }
+
+        /// <summary>
+        /// R6-29: all-green path still says OK / exits 0 through the injectable seam.
+        /// </summary>
+        [Fact]
+        public void Doctor_AllPass_SummaryIsGreenExit0()
+        {
+            var sw = new StringWriter();
+            var results = new List<DoctorCommand.ProbeResult> { Pass("a"), Pass("b") };
+            var exit = DoctorCommand.Run(sw, asJson: false, results);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("Result: OK (all probes green). Exit 0.", sw.ToString());
         }
 
         // ----- P16-068: UnsafeRelaxedJsonEscaping -----

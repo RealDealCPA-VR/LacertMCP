@@ -92,6 +92,8 @@ namespace LacertMCP.Server.Tools
                     total = page.Total,
                     limit = page.Limit,
                     offset = page.Offset,
+                    // R6-19 — rows-on-this-page count (Pagination P16-074).
+                    returnedCount = page.ReturnedCount,
                     hasMore = page.HasMore,
                     nextOffset = page.NextOffset,
                     // legacy (v0.1) — remove in v0.2:
@@ -125,10 +127,16 @@ namespace LacertMCP.Server.Tools
             [Description("Import source tag. Defaults to empty — omit unless the row originated from an import workflow.")] string importSrc = "",
             [Description("Optional zero-based index to overwrite an existing row instead of appending.")] int? replaceIndex = null,
             [Description("If true, validate + simulate the write but roll back without persisting.")] bool dryRun = false,
-            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'detail_write-{clientNumber}-{series}-{code}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry will APPEND a duplicate detail row (detail writes default to append when replaceIndex is null — silently doubling a W-2/1099/dependent row). Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null)
+            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'detail_write-{clientNumber}-{series}-{code}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry will APPEND a duplicate detail row (detail writes default to append when replaceIndex is null — silently doubling a W-2/1099/dependent row). Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
+                // R6-20c — honor MCP cancellation BEFORE the mutation; the
+                // token is also passed through to the session call, which
+                // re-checks it at its own chokepoints.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // -----------------------------------------------------------
                 // Load-bearing client-side validation. Runs BEFORE the session
                 // call so both sim and live get the same gating. Failure path:
@@ -153,7 +161,8 @@ namespace LacertMCP.Server.Tools
                     Description: description ?? "");
 
                 var status = await _session.WriteDetail(
-                    clientNumber, row, replaceIndex, dryRun, idempotencyKey);
+                    clientNumber, row, replaceIndex, dryRun, idempotencyKey,
+                    cancellationToken);
 
                 var info = StatusCodes.GetStatusInfo(status);
                 return (object)new

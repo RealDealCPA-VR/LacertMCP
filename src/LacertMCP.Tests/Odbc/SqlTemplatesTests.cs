@@ -116,6 +116,54 @@ namespace LacertMCP.Tests.Odbc
         }
 
         // -------------------------------------------------------------------
+        // R6-37 — LIKE wildcard hygiene. The FoxPro-style Lacerte ODBC
+        // dialect has no [charlist] bracket classes and no reliable ESCAPE
+        // clause, so embedded % / _ are STRIPPED (documented on the method).
+        // Pre-fix, namePrefix="%" widened a prefix filter into a full-table
+        // match and "Smi_h" matched any 5th character — both silently
+        // diverging from the sim's literal StartsWith semantics.
+        // -------------------------------------------------------------------
+
+        [Fact]
+        public void Data1TopWhereName_StripsPercentWildcard_R6_37()
+        {
+            var sql = SqlTemplates.Data1TopWhereName(50, "C1_2", "Smi%");
+            // The only % left is the template's own trailing prefix wildcard.
+            Assert.Equal(
+                "select top 50 * from [DATA1-Client Info] where C1_2 like 'Smi%'",
+                sql);
+        }
+
+        [Fact]
+        public void Data1TopWhereName_StripsUnderscoreWildcard_R6_37()
+        {
+            var sql = SqlTemplates.Data1TopWhereName(50, "C1_2", "Smi_h");
+            Assert.Equal(
+                "select top 50 * from [DATA1-Client Info] where C1_2 like 'Smih%'",
+                sql);
+        }
+
+        [Fact]
+        public void Data1TopWhereName_BarePercent_CannotWidenToMatchEverything_R6_37()
+        {
+            // "%": pre-fix this emitted `like '%%'` — a full-table match
+            // disguised as a prefix filter. Now it degrades to the unfiltered
+            // prefix `like '%'`, equivalent to the sim's StartsWith("")
+            // (matches all rows EXPLICITLY, with no smuggled metacharacter).
+            var sql = SqlTemplates.Data1TopWhereName(10, "C1_2", "%");
+            Assert.Equal(
+                "select top 10 * from [DATA1-Client Info] where C1_2 like '%'",
+                sql);
+        }
+
+        [Fact]
+        public void Data1TopWhereName_QuoteEscaping_StillAppliesAfterStripping_R6_37()
+        {
+            var sql = SqlTemplates.Data1TopWhereName(10, "C1_2", "O'%Re_");
+            Assert.Contains("'O''Re%'", sql);
+        }
+
+        // -------------------------------------------------------------------
         // DATA2 pre-TY21 + TY21+ branching
         // -------------------------------------------------------------------
 

@@ -230,6 +230,16 @@ namespace LacertMCP.Server.Odbc
             {
                 _connection = _connectionFactory(_connectionString);
             }
+            // R6-36 — a Broken connection must be Close()d before re-Open().
+            // ADO.NET contract: Open() on a Broken connection throws
+            // InvalidOperationException; only Closed → Open is legal. Close()
+            // on a Broken handle is documented as safe, but swallow anyway —
+            // the handle is already in an undefined state.
+            if (_connection.State == ConnectionState.Broken)
+            {
+                try { _connection.Close(); }
+                catch { /* swallow — proceed to re-open */ }
+            }
             if (_connection.State != ConnectionState.Open)
             {
                 _connection.Open();

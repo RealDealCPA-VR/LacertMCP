@@ -20,8 +20,13 @@ namespace LacertMCP.Server.Resilience
     ///   <item><description><c>0x800706BA</c> — "The RPC server is unavailable".</description></item>
     ///   <item><description><c>0x80010108</c> — "The object invoked has disconnected from its clients".</description></item>
     ///   <item><description><c>0x8001010A</c> — "The message filter indicated that the application is busy".</description></item>
-    ///   <item><description><c>0x80010001</c> — "Call was canceled by the message filter".</description></item>
+    ///   <item><description><c>0x80010001</c> — RPC_E_CALL_REJECTED, "Call was rejected by callee" (the
+    ///   canonical message-filter retry case — the callee's IMessageFilter refused the incoming call
+    ///   because it was busy; retrying after a backoff is the documented COM recovery).</description></item>
     /// </list>
+    /// R6-27 — <c>0x80010001</c> was previously mislabeled RPC_E_CALL_CANCELED. The actual
+    /// RPC_E_CALL_CANCELED is <c>0x80010002</c> and is deliberately NOT whitelisted: a canceled
+    /// call is intentional (operator/host abort) and must not auto-retry.
     /// </para>
     ///
     /// <para>
@@ -45,7 +50,13 @@ namespace LacertMCP.Server.Resilience
             unchecked((int)0x800706BA), // RPC_S_SERVER_UNAVAILABLE
             unchecked((int)0x80010108), // RPC_E_DISCONNECTED
             unchecked((int)0x8001010A), // RPC_E_SERVERCALL_RETRYLATER
-            unchecked((int)0x80010001), // RPC_E_CALL_CANCELED
+            // R6-27 — correct name: this HRESULT is RPC_E_CALL_REJECTED ("Call
+            // was rejected by callee" — the message-filter busy case, which IS
+            // the canonical retry scenario). It was previously mislabeled
+            // RPC_E_CALL_CANCELED. The real RPC_E_CALL_CANCELED (0x80010002)
+            // is intentionally absent: cancellation is an intentional abort
+            // and must not auto-retry.
+            unchecked((int)0x80010001), // RPC_E_CALL_REJECTED
         };
 
         /// <summary>

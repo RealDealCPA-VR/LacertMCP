@@ -105,6 +105,25 @@ namespace LacertMCP.Server.Bridge
                         ["reason"] = ex.Message,
                     }, ex);
             }
+            finally
+            {
+                // R6-14 / P14-004 — release the TPRegistration RCW per-call.
+                // AutoReconnect retries (up to 4 instantiations per register)
+                // plus the 24h re-register cadence multiplied the leak.
+                // Marshal.IsComObject guards against managed fakes substituted
+                // by tests/harnesses.
+                if (regInstance != null)
+                {
+                    try
+                    {
+                        if (System.Runtime.InteropServices.Marshal.IsComObject(regInstance))
+                        {
+                            System.Runtime.InteropServices.Marshal.ReleaseComObject(regInstance);
+                        }
+                    }
+                    catch (Exception) { /* best-effort */ }
+                }
+            }
         }
 
         /// <summary>

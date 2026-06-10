@@ -35,7 +35,7 @@ namespace LacertMCP.Tests.Session
             return new LacerteSessionManager(new Dictionary<string, string?>());
         }
 
-        private static LacerteSessionManager NewSimManagerWithContext(bool readOnly = false)
+        private static async Task<LacerteSessionManager> NewSimManagerWithContextAsync(bool readOnly = false)
         {
             var mgr = NewSimManager();
             // P15-050 â€” manager-side RequireRegistered gate now fires on
@@ -45,7 +45,9 @@ namespace LacertMCP.Tests.Session
             // not the registration gate itself) still hit their target gates.
             // The pre-context guard tests below construct their managers
             // directly via NewSimManager() so they skip this Register call.
-            mgr.Register().GetAwaiter().GetResult();
+            // R6-42 â€” awaited (was .GetAwaiter().GetResult()) so the xUnit
+            // analyzer's blocking-task rule (xUnit1031) stays clean.
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I', readOnly);
             return mgr;
         }
@@ -164,7 +166,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteField_OnReadOnlySession_ThrowsFieldIsReadOnly()
         {
-            var mgr = NewSimManagerWithContext(readOnly: true);
+            var mgr = await NewSimManagerWithContextAsync(readOnly: true);
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteField(1, "1001", "C1_1", "new-name"));
             Assert.Equal(SyntheticStatusCodes.FieldIsReadOnly, ex.StatusCode);
@@ -183,7 +185,7 @@ namespace LacertMCP.Tests.Session
             // Follow-up F3: Unknown-field path now emits 9012 UnknownFieldAccess
             // (distinct from 9001 FieldIsReadOnly). The session is NOT read-only,
             // so we land in the access-map gate which sees an empty map â†’ Unknown.
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteField(1, "1001", "C1_NotInMap", "x"));
             Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, ex.StatusCode);
@@ -195,7 +197,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteDetail_OnReadOnlySession_ThrowsFieldIsReadOnly()
         {
-            var mgr = NewSimManagerWithContext(readOnly: true);
+            var mgr = await NewSimManagerWithContextAsync(readOnly: true);
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1000m == 1000m ? (double?)1000 : null, "test");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteDetail("1001", row));
@@ -205,7 +207,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task CreateClient_OnReadOnlySession_ThrowsFieldIsReadOnly()
         {
-            var mgr = NewSimManagerWithContext(readOnly: true);
+            var mgr = await NewSimManagerWithContextAsync(readOnly: true);
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.CreateClient(new CreateClientArgs("NEW1", "Individual")));
             Assert.Equal(SyntheticStatusCodes.FieldIsReadOnly, ex.StatusCode);
@@ -243,7 +245,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task ListClients_TY24Individual_FindsSeededRows()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var clients = await mgr.ListClients();
             Assert.NotEmpty(clients);
         }
@@ -251,7 +253,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task ReadClient_KnownId_ReturnsRow()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = await mgr.ReadClient("1001"); // BROW seed
             Assert.NotNull(row);
             // P17-011 — CloneRow now emits camelCase wire keys for the
@@ -264,7 +266,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task ReadClient_UnknownId_ReturnsNull()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = await mgr.ReadClient("XXXX");
             Assert.Null(row);
         }
@@ -276,7 +278,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteField_SameKey_SamePayload_DoesNotReexecute()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
 
             // First call â€” executes, returns Success, caches.
             // C1_1 (FirstName on individual). The seeded BROW row exists.
@@ -312,7 +314,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteField_SameKey_DifferentPayload_ThrowsIdempotencyConflict()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
             var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second â€” different payload");
 
@@ -330,7 +332,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteDetail_DryRun_LeavesDetailListUnchanged()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var before = (await mgr.ReadDetail("1001")).Count;
 
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 9999.0, "dry-run row");
@@ -344,7 +346,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task CreateClient_DryRun_DoesNotPersistNewClient()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             // P14-030 â€” ApplySimCreateClient now delegates to
             // SimulationStore.SimulateCreateClient which enforces the
             // NotSignedIn gate. Register first so the create succeeds.
@@ -377,7 +379,7 @@ namespace LacertMCP.Tests.Session
         [InlineData("individual")] // case-insensitive
         public async Task CreateClient_DirectCaller_AcceptsAliasOnModuleI(string taxType)
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var result = await mgr.CreateClient(new CreateClientArgs(
                 ClientId: "DIRECT1",
                 TaxType: taxType,
@@ -395,7 +397,7 @@ namespace LacertMCP.Tests.Session
             // manager leaves args.TaxType untouched so the existing sim
             // TaxModuleMismatch gate still fires with the operator's
             // original value (preserves the legacy error shape).
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.CreateClient(new CreateClientArgs(
                     ClientId: "DIRBOG",
@@ -567,7 +569,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteField_AfterExpiry_ThrowsLoginExpired9007()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             // Force the expiry stamp to the past via the internal test seam.
             mgr.SetExpiresAtForTest(DateTimeOffset.UtcNow.AddMinutes(-1));
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>
@@ -581,7 +583,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task ReadClient_AfterExpiry_ThrowsLoginExpired9007()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             mgr.SetExpiresAtForTest(DateTimeOffset.UtcNow.AddSeconds(-1));
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.ReadClient("1001"));
             Assert.Equal(SyntheticStatusCodes.LoginExpired, ex.StatusCode);
@@ -669,7 +671,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteDetail_SameKey_DifferentPayload_ConflictCarriesTimestamps()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
             var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second");
 
@@ -700,7 +702,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteDetail_SameKey_SamePayload_Concurrent_AppendsExactlyOnce()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "concurrent");
             var before = (await mgr.ReadDetail("1001")).Count;
 
@@ -725,7 +727,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task Idempotency_LockMap_BoundedByCache()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "boundtest");
             // Write 20 distinct idempotency keys.
             for (int i = 0; i < 20; i++)
@@ -745,7 +747,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task Idempotency_ExpiredEntry_ReExecutes()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "ttltest");
             var before = (await mgr.ReadDetail("1001")).Count;
 
@@ -774,7 +776,7 @@ namespace LacertMCP.Tests.Session
             // chosen "absolute, non-sliding" contract is unambiguous and a
             // future refactor that flips the inequality (>= vs >) gets
             // caught by one of the two tests.
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "ttlinside");
             var before = (await mgr.ReadDetail("1001")).Count;
 
@@ -803,7 +805,7 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task Idempotency_CapEviction_BoundsCacheCount()
         {
-            var mgr = NewSimManagerWithContext();
+            var mgr = await NewSimManagerWithContextAsync();
             // Pre-seed cache to the cap via the test seam so we don't have
             // to run 10k+ actual writes.
             for (int i = 0; i < LacerteSessionManager.IdempotencyCacheMaxEntries; i++)
@@ -873,7 +875,7 @@ namespace LacertMCP.Tests.Session
             // input is forgiving — the regex normalises via ToUpperInvariant
             // before shape-checking.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var rows = await mgr.ReadTable(3, "1001", "ca");
@@ -888,7 +890,7 @@ namespace LacertMCP.Tests.Session
             // The classic typo case: 'CA ' silently returned zero rows
             // before P16-039. After: trim makes it the same as 'CA'.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var rows = await mgr.ReadTable(3, "1001", "CA ");
@@ -902,7 +904,7 @@ namespace LacertMCP.Tests.Session
             // rows before P16-039. After: structured error the LLM can
             // self-correct from in one turn.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
@@ -919,7 +921,7 @@ namespace LacertMCP.Tests.Session
         public async Task ReadTable_StateAbbrevSingleLetter_ThrowsStructuredError()
         {
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
@@ -934,7 +936,7 @@ namespace LacertMCP.Tests.Session
             // dictionary with OrdinalIgnoreCase against no rows silently;
             // post-fix it's a structured error.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
@@ -947,7 +949,7 @@ namespace LacertMCP.Tests.Session
         {
             // Bonus polish — '1001 ' typo no longer silently returns 0 rows.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var rows = await mgr.ReadTable(3, "1001 ", null);
@@ -960,7 +962,7 @@ namespace LacertMCP.Tests.Session
         {
             // Null stateAbbrev bypasses the gate entirely; back-compat.
             var mgr = NewSimManager();
-            mgr.Register().GetAwaiter().GetResult();
+            await mgr.Register();
             mgr.SetContext(SeedData.DataPathCData2024, 2024, 'C');
 
             var rows = await mgr.ReadTable(3, "1001", null);

@@ -23,7 +23,7 @@ namespace LacertMCP.Cli.Commands
     /// <list type="bullet">
     ///   <item><description>Exit 0 — every probe is green.</description></item>
     ///   <item><description>Exit 1 — at least one red (real failure).</description></item>
-    ///   <item><description>Exit 2 — at least one skipped (probe inapplicable on this OS) and no reds.</description></item>
+    ///   <item><description>Exit 2 — PARTIAL: at least one warn (advisory) or skipped (probe inapplicable on this OS), and no reds. (R6-29: Warn now lands in the PARTIAL bucket so a warn-only run no longer claims "all probes green".)</description></item>
     /// </list>
     ///
     /// <para>
@@ -115,7 +115,7 @@ namespace LacertMCP.Cli.Commands
         public static Command Build()
         {
             var cmd = new Command("doctor",
-                "Probe the install for prerequisites; exit 0 (green) / 1 (red) / 2 (skipped on this OS). " +
+                "Probe the install for prerequisites; exit 0 (green) / 1 (red) / 2 (partial: warnings, or probes skipped on this OS). " +
                 "Human table by default; pass --json for machine-parseable output.");
 
             // P15-027: machine-parseable shape so CI smoke can fail on specific probes
@@ -139,8 +139,15 @@ namespace LacertMCP.Cli.Commands
         public static int Run(TextWriter writer) => Run(writer, asJson: false);
 
         public static int Run(TextWriter writer, bool asJson)
+            => Run(writer, asJson, RunAllProbes());
+
+        /// <summary>
+        /// R6-29: results-injectable seam so tests can pin the Warn rendering
+        /// (remediation line + PARTIAL summary + exit 2) with synthetic probe
+        /// lists instead of depending on the host's real environment.
+        /// </summary>
+        public static int Run(TextWriter writer, bool asJson, IList<ProbeResult> results)
         {
-            var results = RunAllProbes();
             var exit = ComputeExitCode(results);
 
             if (asJson)
@@ -183,20 +190,33 @@ namespace LacertMCP.Cli.Commands
                 // consoles or Unicode glyph "✓" on UTF-8); keep one space between glyph
                 // and name regardless of width.
                 writer.WriteLine($" {r.Glyph} {r.Name}: {r.Detail}");
-                if (r.Status == ProbeStatus.Fail && !string.IsNullOrEmpty(r.Remediation))
+                // R6-29(a): Warn remediation is now printed too — previously only
+                // Fail rows surfaced their `→` hint, so the operator saw a ⚠ row
+                // with no guidance on what to do about it.
+                if ((r.Status == ProbeStatus.Fail || r.Status == ProbeStatus.Warn)
+                    && !string.IsNullOrEmpty(r.Remediation))
                 {
                     writer.WriteLine($"      → {r.Remediation}");
                 }
             }
             writer.WriteLine(new string('-', 60));
 
+            // R6-29(b): summary must not claim "all probes green" when warns
+            // exist — warn-only runs are PARTIAL (exit 2), same bucket as skips.
+            var warnCount = results.Count(r => r.Status == ProbeStatus.Warn);
+            var skipCount = results.Count(r => r.Status == ProbeStatus.Skipped);
             switch (exit)
             {
                 case 1:
                     writer.WriteLine("Result: FAIL (one or more probes red). Exit 1.");
                     break;
                 case 2:
-                    writer.WriteLine("Result: PARTIAL (one or more probes skipped — not on Windows). Exit 2.");
+                    if (warnCount > 0 && skipCount > 0)
+                        writer.WriteLine($"Result: PARTIAL ({warnCount} warning(s), {skipCount} probe(s) skipped). Exit 2.");
+                    else if (warnCount > 0)
+                        writer.WriteLine($"Result: PARTIAL ({warnCount} warning(s)). Exit 2.");
+                    else
+                        writer.WriteLine("Result: PARTIAL (one or more probes skipped — not on Windows). Exit 2.");
                     break;
                 default:
                     writer.WriteLine("Result: OK (all probes green). Exit 0.");
@@ -229,7 +249,16 @@ namespace LacertMCP.Cli.Commands
                     }
                     break;
                 case 2:
-                    writer.WriteLine("Next: PARTIAL is normal off-Windows — Windows-only probes are skipped. For sim/dev work: `lacerte-mcp tools` lists the surface and `$env:LACERTE_SIMULATION = \"1\"` keeps the server in in-memory fixture mode. See README.md Quick Start.");
+                    // R6-29: warn-only (or warn+skip) PARTIAL gets actionable
+                    // guidance; skip-only keeps the original off-Windows note.
+                    if (warnCount > 0)
+                    {
+                        writer.WriteLine("Next: review the warn probe(s) above (advisory — each prints a `→` remediation when one applies). Skipped probes are normal off-Windows. Re-run `lacerte-mcp doctor` after addressing warnings to confirm green.");
+                    }
+                    else
+                    {
+                        writer.WriteLine("Next: PARTIAL is normal off-Windows — Windows-only probes are skipped. For sim/dev work: `lacerte-mcp tools` lists the surface and `$env:LACERTE_SIMULATION = \"1\"` keeps the server in in-memory fixture mode. See README.md Quick Start.");
+                    }
                     break;
             }
             return exit;
@@ -237,29 +266,52 @@ namespace LacertMCP.Cli.Commands
 
         /// <summary>
         /// P14-071: pure, side-effect-free exit-code decision so the
-        /// <c>0 green / 1 red / 2 skipped</c> contract (Fail trumps Skip)
+        /// <c>0 green / 1 red / 2 partial</c> contract (Fail trumps everything)
         /// is directly testable without I/O. Public so xUnit can pin it
         /// with synthetic <see cref="ProbeResult"/> lists.
+        ///
+        /// <para>
+        /// R6-29: Warn now lands in the PARTIAL bucket (exit 2) alongside
+        /// Skipped — previously a warn-only box exited 0 "all probes green"
+        /// while showing visible ⚠ rows, so scripts gating on the exit code
+        /// could never see advisory problems.
+        /// </para>
         /// </summary>
         public static int ComputeExitCode(IList<ProbeResult> results)
         {
             if (results == null) throw new ArgumentNullException(nameof(results));
 
             var hasFail = false;
-            var hasSkip = false;
+            var hasPartial = false;
             foreach (var r in results)
             {
                 if (r.Status == ProbeStatus.Fail) hasFail = true;
-                if (r.Status == ProbeStatus.Skipped) hasSkip = true;
+                if (r.Status == ProbeStatus.Skipped || r.Status == ProbeStatus.Warn) hasPartial = true;
             }
-            // Fail trumps Skip — a red probe always wins over a skipped one.
+            // Fail trumps Warn/Skip — a red probe always wins over a partial one.
             if (hasFail) return 1;
-            if (hasSkip) return 2;
+            if (hasPartial) return 2;
             return 0;
         }
 
         public static IList<ProbeResult> RunAllProbes()
+            => RunAllProbes(envOverrides: null);
+
+        /// <summary>
+        /// Test seam: <paramref name="envOverrides"/> lets a test pin the value
+        /// of LACERTE_DATA_PATH / LACERTE_DATA_ROOT (null value = treat as
+        /// unset) WITHOUT mutating process-wide environment variables. Mutating
+        /// the real env races concurrently-running test collections whose
+        /// SetContext validation reads LACERTE_DATA_ROOT at call time.
+        /// </summary>
+        public static IList<ProbeResult> RunAllProbes(
+            IDictionary<string, string?>? envOverrides)
         {
+            string? Env(string name) =>
+                envOverrides != null && envOverrides.TryGetValue(name, out var v)
+                    ? v
+                    : Environment.GetEnvironmentVariable(name);
+
             var results = new List<ProbeResult>();
             var onWindows = Environment.OSVersion.Platform == PlatformID.Win32NT;
 
@@ -366,9 +418,10 @@ namespace LacertMCP.Cli.Commands
             //    P16-023: per-env-var remediation + bonus tier-down so an operator
             //    with LACERTE_DATA_ROOT correctly configured isn't told (falsely)
             //    that DATA_PATH must be set via `lacerte_set_context`.
-            var dataRootSet = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("LACERTE_DATA_ROOT"));
+            var dataRootSet = !string.IsNullOrEmpty(Env("LACERTE_DATA_ROOT"));
             results.AddRange(ProbeDataPathEnv(
                 "LACERTE_DATA_PATH",
+                Env("LACERTE_DATA_PATH"),
                 unsetDetail: dataRootSet
                     ? "not set; per-call dataPath will resolve from LACERTE_DATA_ROOT (current discovery covers this)"
                     : "not set (call the `lacerte_set_context` tool per-session, or set LACERTE_DATA_PATH in env for a persistent default)",
@@ -381,6 +434,7 @@ namespace LacertMCP.Cli.Commands
             //    copy-pasted message sent operators on a wild-goose chase.
             results.AddRange(ProbeDataPathEnv(
                 "LACERTE_DATA_ROOT",
+                Env("LACERTE_DATA_ROOT"),
                 unsetDetail: "not set; `lacerte_list_datapaths` will fall back to C:\\Lacerte",
                 unsetRemediation: "Set LACERTE_DATA_ROOT in the MCP client config (or Windows env) to your install root, e.g. C:\\Lacerte. NOTE: this is NOT settable via lacerte_set_context — that tool only writes the current per-session DATA_PATH.",
                 downgradeUnsetToPass: false));
@@ -739,11 +793,11 @@ namespace LacertMCP.Cli.Commands
         /// </summary>
         private static IEnumerable<ProbeResult> ProbeDataPathEnv(
             string envVar,
+            string? val,
             string unsetDetail,
             string? unsetRemediation,
             bool downgradeUnsetToPass)
         {
-            var val = Environment.GetEnvironmentVariable(envVar);
             if (string.IsNullOrEmpty(val))
             {
                 yield return new ProbeResult($"{envVar} env",
@@ -845,45 +899,20 @@ namespace LacertMCP.Cli.Commands
         /// corruption — they'd see "not persisted" and re-mint, masking the bug.
         ///
         /// <para>
-        /// P16-058: when running on Windows + Live mode, the Absent and Ok branches
-        /// both acknowledge that <c>register</c> is currently a Phase 9 stub — the
-        /// AppID persists but the Intuit consent ceremony does not yet fire. Without
-        /// this honesty doctor would tell the operator "run register" (Absent) or
-        /// silently report Pass (Ok), then the first tool call would return
-        /// AppNotRegistered (9006) or LoginExpired (9007) and the operator would have
-        /// no idea why. Off-Windows or in sim mode we keep the original terse messages
-        /// (the operator can't complete the ceremony anyway and the Phase 9 caveat
-        /// is just noise in dev environments).
-        /// </para>
-        ///
-        /// <para>
-        /// PHASE-9-CLEANUP: when Phase 9 task #63 lands and
-        /// <c>ITPRegistration.Register()</c> actually fires in
-        /// <see cref="LacertMCP.Cli.Commands.RegisterCommand"/>, delete the Win32NT-Live
-        /// branches in both cases here — the canonical Absent remediation can return
-        /// to "Run `lacerte-mcp register` to mint and store one." and the Ok branch
-        /// can return to Pass without the Phase-9-stub caveat.
+        /// R6-05: the P16-058 Win32NT-Live "register is a Phase 9 stub" branches are
+        /// deleted per their own PHASE-9-CLEANUP note — <c>lacerte-mcp register</c>
+        /// now actually runs <c>ITPRegistration.Register()</c> (via
+        /// <c>Bridge/Registration.cs</c>), so the canonical Absent remediation is
+        /// simply "run register" and the Ok branch is a plain Pass again.
         /// </para>
         /// </summary>
         private static ProbeResult ProbeAppId()
         {
             var diag = AppIdStore.GetDiagnostic(out var id, out var raw);
-            var onWindowsLive = Environment.OSVersion.Platform == PlatformID.Win32NT
-                                && Environment.GetEnvironmentVariable("LACERTE_LIVE") == "1"
-                                && Environment.GetEnvironmentVariable("LACERTE_SIMULATION") != "1";
 
             switch (diag)
             {
                 case AppIdStore.AppIdDiagnostic.Ok:
-                    if (onWindowsLive)
-                    {
-                        // Warn (not Pass) — the AppID is persisted but doctor can't verify
-                        // a successful ITPRegistration.Register() ever ran (Phase 9 stub).
-                        // Warn keeps exit code in the PARTIAL bucket (2), not FAIL (1).
-                        return new ProbeResult("AppID GUID",
-                            ProbeStatus.Warn,
-                            $"persisted ({AppIdStore.Mask(id)}) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")} — consent ceremony status unknown (Phase 9 stub: cannot verify a successful ITPRegistration.Register() ever ran). If first tool call returns AppNotRegistered (9006) or LoginExpired (9007), this is why.");
-                    }
                     return new ProbeResult("AppID GUID",
                         ProbeStatus.Pass,
                         $"persisted ({AppIdStore.Mask(id)}) via {(AppIdStore.UsesCredentialManager ? "Credential Manager" : "file")}");
@@ -894,13 +923,10 @@ namespace LacertMCP.Cli.Commands
                         "Run `lacerte-mcp unregister --confirm` followed by `lacerte-mcp register` to re-mint a fresh AppID.");
                 case AppIdStore.AppIdDiagnostic.Absent:
                 default:
-                    var remediation = onWindowsLive
-                        ? "Run `lacerte-mcp register` to mint and store one. NOTE: on Windows + live mode this command is currently a Phase 9 stub — it persists the AppID and exits 3 with `[partial]`, but the Intuit consent ceremony is not yet wired (Todo.md Phase 9 task #63 / Bridge/Registration.cs). First MCP tool call will return AppNotRegistered (9006) or LoginExpired (9007) until that ships."
-                        : "Run `lacerte-mcp register` to mint and store one.";
                     return new ProbeResult("AppID GUID",
                         ProbeStatus.Fail,
                         "not persisted",
-                        remediation);
+                        "Run `lacerte-mcp register` to mint and store one (the Intuit consent ceremony runs as part of it on Windows + Lacerte).");
             }
         }
     }

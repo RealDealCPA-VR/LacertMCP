@@ -48,12 +48,12 @@ namespace LacertMCP.Server.Tools
             };
 
         [McpServerTool]
-        [Description("Read the audit history for one (clientNumber, field) pair from the WireLog JSONL records. Requires LACERTE_DEBUG_WIRE=1 — when disabled, returns an empty rows list with a hint pointing at the env var. Counts only the OUTER op='WriteField' records (skips the inner Bridge.* mirrors to avoid double-counting). The `value` column is the redacted '***' sentinel for every row by design (disk-scope redaction is unconditional per the WireLog policy) — the operator's original write payload is recoverable from their input record, not from this tool. sinceUtc defaults to (now - 14 days); limit defaults to 100. Malformed JSONL lines are skipped silently; a missing log dir surfaces the same disabled-WireLog hint.")]
+        [Description("Read the audit history for one (clientNumber, field) pair from the WireLog JSONL records. Requires LACERTE_DEBUG_WIRE=1 — when disabled, returns an empty rows list with a hint pointing at the env var. Counts only the OUTER op='WriteField' records (skips the inner Bridge.* mirrors to avoid double-counting). Each row carries succeeded=true/false — failed writes (WireLog error records) surface with succeeded=false plus the error text, so a rejected write is distinguishable from a landed one. Rows are returned oldest-first; when total exceeds limit the NEWEST rows are kept (the truncated older tail is the recoverable-from-archives part). limit defaults to 100, clamped to Pagination.MaxLimit (1000). The `value` column is the redacted '***' sentinel for every row by design (disk-scope redaction is unconditional per the WireLog policy) — the operator's original write payload is recoverable from their input record, not from this tool. sinceUtc defaults to (now - 14 days). Malformed JSONL lines are skipped silently; a missing log dir surfaces the same disabled-WireLog hint.")]
         public Task<string> LacerteFieldHistory(
             [Description("ClientNumber (SDK-minted monotonic ID, e.g. '1001') whose write history to retrieve.")] string clientNumber,
             [Description("Lacerte field code (e.g. 'C1_3' for email). The history is keyed by EXACT field name — not by friendly-alias.")] string field,
             [Description("Optional ISO-8601 timestamp (yyyy-MM-dd | yyyy-MM-ddTHH:mm:ss | yyyy-MM-ddTHH:mm:ssZ). Default = (now - 14 days). Rows with ts < sinceUtc are skipped.")] string? sinceUtc = null,
-            [Description("Maximum rows to return after filtering. Default 100. <= 0 returns rows=[] with the unfiltered total and truncated=true so an LLM can still see the count.")] int limit = DefaultLimit,
+            [Description("Maximum rows to return after filtering. Default 100, clamped to Pagination.MaxLimit (1000). When total exceeds limit, the NEWEST rows are kept (display order stays oldest-first). <= 0 returns rows=[] with the unfiltered total and truncated=true so an LLM can still see the count.")] int limit = DefaultLimit,
             CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(() =>
             {
@@ -184,7 +184,9 @@ namespace LacertMCP.Server.Tools
                 allMatches.Sort((a, b) => string.CompareOrdinal(a.Ts, b.Ts));
 
                 var total = allMatches.Count;
-                int effectiveLimit = limit;
+                // R6-21b — clamp to the project-wide pagination ceiling so a
+                // hallucinated limit=999999 can't blow the wire budget.
+                int effectiveLimit = Math.Min(limit, Pagination.Pagination.MaxLimit);
                 List<RowParsed> capped;
                 if (effectiveLimit <= 0)
                 {
@@ -196,8 +198,14 @@ namespace LacertMCP.Server.Tools
                 }
                 else
                 {
+                    // R6-21a — keep the NEWEST rows on truncation: the list
+                    // is sorted ascending by ts, so take the LAST
+                    // effectiveLimit rows (display stays oldest-first). The
+                    // old GetRange(0, N) kept the oldest window, making the
+                    // most recent writes — the ones an auditor actually
+                    // wants — unreachable with no offset parameter.
                     capped = total > effectiveLimit
-                        ? allMatches.GetRange(0, effectiveLimit)
+                        ? allMatches.GetRange(total - effectiveLimit, effectiveLimit)
                         : allMatches;
                 }
 
@@ -207,7 +215,13 @@ namespace LacertMCP.Server.Tools
                     cid = r.Cid,
                     value = r.Value,
                     dryRun = r.DryRun,
+                    // R6-21c — failed writes are first-class: WireLog error
+                    // records surface with succeeded=false + the error text
+                    // so a rejected write is distinguishable from a landed
+                    // one (both used to render as statusCode:null).
+                    succeeded = r.Succeeded,
                     statusCode = r.StatusCode,
+                    error = r.Error,
                     durationMs = r.DurationMs,
                 }).ToList();
 
@@ -313,6 +327,23 @@ namespace LacertMCP.Server.Tools
             var result = obj["result"];
             if (result is JsonValue rv && rv.TryGetValue<int>(out var rvInt)) statusCode = rvInt;
 
+            // R6-21c — WireLog writes an `error` object (instead of
+            // `result`) when the write threw. Parse it so failed writes are
+            // distinguishable from successes: succeeded=false + the error
+            // type/message (message may itself be the redacted sentinel —
+            // that's the disk-scope policy, not a parse failure).
+            bool succeeded = true;
+            string? errorText = null;
+            if (obj["error"] is JsonObject errObj)
+            {
+                succeeded = false;
+                var errType = errObj["type"]?.GetValue<string>();
+                var errMessage = (errObj["message"] as JsonValue)?.ToString();
+                errorText = string.IsNullOrEmpty(errType)
+                    ? (errMessage ?? "unknown error")
+                    : (string.IsNullOrEmpty(errMessage) ? errType : errType + ": " + errMessage);
+            }
+
             long? durationMs = null;
             var dur = obj["durationMs"];
             if (dur is JsonValue dv && dv.TryGetValue<long>(out var dvLong)) durationMs = dvLong;
@@ -323,7 +354,9 @@ namespace LacertMCP.Server.Tools
                 Cid = cid,
                 Value = redactedValue,
                 DryRun = dryRun,
+                Succeeded = succeeded,
                 StatusCode = statusCode,
+                Error = errorText,
                 DurationMs = durationMs,
             };
             return true;
@@ -363,7 +396,9 @@ namespace LacertMCP.Server.Tools
             public string? Cid { get; set; }
             public string Value { get; set; } = "***";
             public bool DryRun { get; set; }
+            public bool Succeeded { get; set; } = true;
             public int? StatusCode { get; set; }
+            public string? Error { get; set; }
             public long? DurationMs { get; set; }
         }
     }

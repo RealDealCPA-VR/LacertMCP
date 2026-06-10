@@ -363,9 +363,13 @@ namespace LacertMCP.Tests.Session
                 await mgr.WriteDetail("1001", row, idempotencyKey: "p18-replace-2");
                 mgr.ForcePersistIdempotencyCacheForTest();
                 Assert.True(File.Exists(canonical), "canonical must remain after File.Replace");
-                // .tmp must not be left behind after a successful persist.
-                Assert.False(File.Exists(canonical + ".tmp"),
-                    "P18: .tmp must not linger after File.Replace succeeds");
+                // No tmp of ANY shape may be left behind after a successful
+                // persist — neither the legacy bare ".tmp" nor the R6-11
+                // per-PID "<name>.<pid>.tmp".
+                var lingering = Directory.GetFiles(tmpDir, "*.tmp");
+                Assert.True(lingering.Length == 0,
+                    "P18/R6-11: no .tmp may linger after File.Replace succeeds; found: "
+                    + string.Join(", ", lingering));
             }
             finally
             {

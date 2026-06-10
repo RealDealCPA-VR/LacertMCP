@@ -473,7 +473,8 @@ namespace LacertMCP.Tests.Tools
             Assert.True(hint.GetProperty("canResumeViaSameBatch").GetBoolean());
             Assert.Equal("recovery-test-batch-A",
                 hint.GetProperty("idempotencyKeyPrefix").GetString());
-            Assert.Equal("{prefix}-{clientNumber}-{field}",
+            // R6-20a — per-row keys carry the row index (positional).
+            Assert.Equal("{prefix}-{index}-{clientNumber}-{field}",
                 hint.GetProperty("perRowKeyShape").GetString());
             // replayedRowsCount = successCount (rows that already landed).
             Assert.Equal(2, hint.GetProperty("replayedRowsCount").GetInt32());
@@ -718,6 +719,106 @@ namespace LacertMCP.Tests.Tools
             {
                 Environment.SetEnvironmentVariable(FieldWriteBulkTools.BulkWriteMaxEnvName, prior);
             }
+        }
+
+        // (r) R6-20a — two entries targeting the SAME (client, field) in one
+        //     keyed batch no longer alias to one idempotency key: the index
+        //     component makes the keys positional, so both rows execute and
+        //     the LAST write wins (write-then-correct pattern). Pre-fix the
+        //     second row either 9102'd or silently replayed the first row's
+        //     cached result.
+        [Fact]
+        public async Task BulkWrite_DuplicateClientFieldPair_BothRowsExecute_R6_20()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = "1001", Field = AccessMapTestFixture.WritableField, Value = "first-pass" },
+                new() { ClientNumber = "1001", Field = AccessMapTestFixture.WritableField, Value = "corrected" },
+            };
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries,
+                idempotencyKey: "dup-pair-batch");
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            var result = root.GetProperty("result");
+            Assert.Equal(2, result.GetProperty("successCount").GetInt32());
+            Assert.Equal(0, result.GetProperty("errorCount").GetInt32());
+
+            // The second (corrected) value is what persisted.
+            var row = await mgr.ReadClient("1001");
+            row!.TryGetValue(AccessMapTestFixture.WritableField, out var v);
+            Assert.Equal("corrected", v);
+        }
+
+        // (s) R6-20b — a cancelled token stops the batch BEFORE the next
+        //     mutation and returns a partial-result envelope with
+        //     stoppedEarly=true + processedCount, instead of continuing to
+        //     mutate after the operator cancelled. With a pre-cancelled
+        //     token, zero rows run.
+        [Fact]
+        public async Task BulkWrite_PreCancelledToken_StopsEarlyWithPartialEnvelope_R6_20()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = "1001", Field = AccessMapTestFixture.WritableField, Value = "never-lands-1" },
+                new() { ClientNumber = "1002", Field = AccessMapTestFixture.WritableField, Value = "never-lands-2" },
+            };
+
+            using var cts = new System.Threading.CancellationTokenSource();
+            cts.Cancel();
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries,
+                cancellationToken: cts.Token);
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            var result = root.GetProperty("result");
+            Assert.True(result.GetProperty("stoppedEarly").GetBoolean());
+            Assert.Equal(0, result.GetProperty("processedCount").GetInt32());
+            Assert.Equal(0, result.GetProperty("successCount").GetInt32());
+            Assert.Equal(2, result.GetProperty("totalCount").GetInt32());
+            Assert.Equal(0, result.GetProperty("perItem").GetArrayLength());
+
+            // Nothing was mutated.
+            var row = await mgr.ReadClient("1001");
+            row!.TryGetValue(AccessMapTestFixture.WritableField, out var v);
+            Assert.NotEqual("never-lands-1", v);
+        }
+
+        // (t) Uncancelled batches report stoppedEarly=false and
+        //     processedCount == totalCount — the partial-result markers are
+        //     additive, not noisy.
+        [Fact]
+        public async Task BulkWrite_NoCancellation_StoppedEarlyFalse_R6_20()
+        {
+            using var fixture = new AccessMapTestFixture();
+            var (mgr, tool) = NewToolWithContext();
+
+            var entries = new FieldWriteBulkTools.BulkWriteEntry[]
+            {
+                new() { ClientNumber = "1001", Field = AccessMapTestFixture.WritableField, Value = "lands" },
+            };
+
+            var json = await tool.LacerteFieldWriteBulk(
+                table: AccessMapTestFixture.Table,
+                entries: entries);
+
+            var root = Parse(json);
+            Assert.True(root.GetProperty("success").GetBoolean(), json);
+            var result = root.GetProperty("result");
+            Assert.False(result.GetProperty("stoppedEarly").GetBoolean());
+            Assert.Equal(1, result.GetProperty("processedCount").GetInt32());
         }
     }
 }

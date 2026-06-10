@@ -257,7 +257,11 @@ namespace LacertMCP.Server.Session
         // locked by ToggleLock. Called before LookupRow in SimulateFieldWrite,
         // before the WriteDetail mutation, and against table 1 in
         // SimulateCreateClient (which always writes DATA1 implicitly).
-        private bool IsTableLocked(int year, char module, int table)
+        // R6-23 — internal (was private) so LacerteSessionManager's sim
+        // adapters (ApplySimFieldWriteWithUndo / ApplySimDetailWriteWithUndo),
+        // which bypass the store chokepoint methods for gate-ordering
+        // reasons, can honor the same latch on the real tool path.
+        internal bool IsTableLocked(int year, char module, int table)
         {
             lock (_lockedTablesGate) return _lockedTables.Contains((year, module, table));
         }

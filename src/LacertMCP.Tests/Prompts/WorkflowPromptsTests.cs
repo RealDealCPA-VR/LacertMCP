@@ -352,6 +352,92 @@ namespace LacertMCP.Tests.Prompts
         }
 
         // ----------------------------------------------------------------
+        // R6-02 — Step 4 (dry-run preview) and Step 5 (real write) MUST use
+        // DIFFERENT idempotency-key prefixes (`bulk-<batchId>-preview` vs
+        // `bulk-<batchId>`). Post-P18, dryRun is part of the idempotency
+        // fingerprint and dry-run results ARE cached — so the old "SAME
+        // prefix as Step 4" instruction guaranteed the commit pass's first
+        // previewed row threw IdempotencyConflict (9102) and, with
+        // continueOnError:false, the canonical workflow could never complete.
+        // ----------------------------------------------------------------
+        [Fact]
+        public void BulkFieldUpdate_Step5_CommitUsesDistinctPrefixFromPreview()
+        {
+            var text = ((TextContentBlock)WorkflowPrompts.BulkFieldUpdate().Messages[0].Content).Text;
+            // Step 4 preview prefix and Step 5 commit prefix must both appear
+            // and be distinct.
+            Assert.Contains("bulk-<batchId>-preview", text);
+            // The commit prefix appears quote-delimited (the closing quote
+            // distinguishes it from the preview prefix's leading substring).
+            Assert.Contains("\"bulk-<batchId>\"", text);
+            // The rationale must be spelled out (dryRun in the fingerprint;
+            // shared key across dry-run + real write throws 9102).
+            Assert.Contains("DIFFERENT prefix", text);
+            Assert.Contains("9102", text);
+            // Stale pre-P18 claims must be gone: previewed rows are NOT
+            // skipped, and the commit must NOT reuse the preview prefix.
+            Assert.DoesNotContain("SAME prefix as Step 4", text);
+            Assert.DoesNotContain("skipped automatically", text);
+        }
+
+        // ----------------------------------------------------------------
+        // R6-40(a) — lacerte_field_access_map requires the taxYear parameter;
+        // all three prompts that reference the tool must say so.
+        // ----------------------------------------------------------------
+        [Fact]
+        public void BulkFieldUpdate_Step2_FieldAccessMapMentionsRequiredTaxYear()
+        {
+            var text = ((TextContentBlock)WorkflowPrompts.BulkFieldUpdate().Messages[0].Content).Text;
+            Assert.Contains("taxYear", text);
+        }
+
+        [Fact]
+        public void ClientIntake_FieldAccessMapMentionsRequiredTaxYear()
+        {
+            var text = ((TextContentBlock)WorkflowPrompts.ClientIntake().Messages[0].Content).Text;
+            Assert.Contains("taxYear", text);
+        }
+
+        [Fact]
+        public void CsvIntake_Step2_FieldAccessMapMentionsRequiredTaxYear()
+        {
+            var text = ((TextContentBlock)WorkflowPrompts.CsvIntake().Messages[0].Content).Text;
+            Assert.Contains("taxYear", text);
+        }
+
+        // ----------------------------------------------------------------
+        // R6-40(b) — lacerte_ef_status is paginated ({rows, total, limit,
+        // offset, hasMore, nextOffset}); the prompt must instruct following
+        // pagination to completion BEFORE computing bucket counts, or any
+        // roster >1 page yields confidently-wrong triage counts. And the
+        // taxYear argument can only be honored by setting context to that
+        // year first (EF rows carry no year field).
+        // ----------------------------------------------------------------
+        [Fact]
+        public void ReviewEfStatus_Step2_InstructsPaginationUntilComplete()
+        {
+            var text = ((TextContentBlock)WorkflowPrompts.ReviewEfStatus().Messages[0].Content).Text;
+            Assert.Contains("hasMore", text);
+            Assert.Contains("nextOffset", text);
+            // Grouping must be gated on pagination completion.
+            Assert.Contains("pagination is complete", text);
+        }
+
+        [Fact]
+        public void ReviewEfStatus_WithYear_InstructsSetContextFirstNotRowFiltering()
+        {
+            var result = WorkflowPrompts.ReviewEfStatus(taxYear: 2023);
+            var text = ((TextContentBlock)result.Messages[0].Content).Text;
+            // The year note must route through lacerte_set_context (EF rows
+            // carry no year field, so post-hoc filtering is impossible).
+            Assert.Contains("2023", text);
+            Assert.Contains("lacerte_set_context", text);
+            Assert.Contains("NO year field", text);
+            // The stale "Filter results to tax year" wording must be gone.
+            Assert.DoesNotContain("Filter results to tax year", text);
+        }
+
+        // ----------------------------------------------------------------
         // P18-017 / P18-023 — `lacerte_prompts` tool: when called with no
         // arguments must list every workflow prompt available on this MCP,
         // and when called with a name must return the full body so hosts

@@ -313,8 +313,8 @@ namespace LacertMCP.Tests.Errors
             var offenders = allEntries
                 .SelectMany(e => new[]
                 {
-                    new { e.Code, e.Catalog, Field = "UserMessage", Text = e.Info.UserMessage },
-                    new { e.Code, e.Catalog, Field = "Remediation", Text = e.Info.Remediation },
+                    new { e.Code, e.Catalog, Field = "UserMessage", Text = (string?)e.Info.UserMessage },
+                    new { e.Code, e.Catalog, Field = "Remediation", Text = (string?)e.Info.Remediation },
                 })
                 .Where(x => x.Text != null && banned.IsMatch(x.Text!))
                 .Select(x => $"[{x.Catalog} {x.Code}].{x.Field}: \"{x.Text}\"")

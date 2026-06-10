@@ -104,6 +104,63 @@ namespace LacertMCP.Tests.Odbc
         }
 
         // -------------------------------------------------------------------
+        // R6-36 — timeouts + cancel carved out of the HY*/S1* bucket.
+        // CodeBaseError's remediation ("run File -> Repair Indexes") is wrong
+        // for a slow share and absurd for an intentional cancel.
+        // -------------------------------------------------------------------
+
+        [Theory]
+        [InlineData("HYT00")] // login timeout
+        [InlineData("HYT01")] // connection/query timeout
+        [InlineData("hyt01")] // case-insensitive
+        [InlineData("S1T00")] // legacy alias of HYT00
+        public void MapSqlState_Timeouts_Map_To_DBFNotAccessable_Not_CodeBaseError_R6_36(string sqlState)
+        {
+            var result = OdbcErrorMapper.MapSqlState(sqlState, "timeout expired");
+            Assert.Equal(StatusCodes.DBFNotAccessable, result.StatusCode);
+            Assert.Equal("DBFNotAccessable", result.StatusName);
+            // Message carries the timeout framing + the original driver text.
+            Assert.Contains("timeout", result.Message, System.StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("timeout expired", result.Message);
+        }
+
+        [Theory]
+        [InlineData("HY008")] // operation canceled
+        [InlineData("hy008")]
+        [InlineData("S1008")] // legacy alias
+        public void MapSqlState_Canceled_Maps_To_GenericError_Not_CodeBaseError_R6_36(string sqlState)
+        {
+            var result = OdbcErrorMapper.MapSqlState(sqlState, "operation canceled");
+            Assert.Equal(StatusCodes.Error, result.StatusCode);
+            Assert.Equal("Error", result.StatusName);
+            Assert.Contains("canceled", result.Message, System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Theory]
+        [InlineData("HYT00")]
+        [InlineData("HYT01")]
+        [InlineData("S1T00")]
+        [InlineData("HY008")]
+        [InlineData("S1008")]
+        [InlineData("hyt00")]
+        public void IsConnectionFatal_FalseForTimeoutAndCancel_R6_36(string sqlState)
+        {
+            // A timed-out or canceled query leaves the connection healthy —
+            // recycling it just churns the provider pool.
+            Assert.False(OdbcErrorMapper.IsConnectionFatal(sqlState));
+        }
+
+        [Theory]
+        [InlineData("HY000")]
+        [InlineData("HY010")]
+        [InlineData("S1000")]
+        public void IsConnectionFatal_StillTrueForOtherDriverErrors_R6_36(string sqlState)
+        {
+            // The carve-out must not loosen the rest of the HY*/S1* families.
+            Assert.True(OdbcErrorMapper.IsConnectionFatal(sqlState));
+        }
+
+        // -------------------------------------------------------------------
         // Unknown / empty → generic Error
         // -------------------------------------------------------------------
 

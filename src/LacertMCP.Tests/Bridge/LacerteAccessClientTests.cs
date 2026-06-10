@@ -170,6 +170,47 @@ namespace LacertMCP.Tests.Bridge
         }
 
         // -----------------------------------------------------------------
+        // R6-15 — DBF name construction (ListClients latent fix)
+        // -----------------------------------------------------------------
+
+        [Theory]
+        [InlineData(1, 'I', 2024, "DATA1I24.DBF")]
+        [InlineData(1, 'C', 2020, "DATA1C20.DBF")]
+        [InlineData(5, 'P', 2018, "DATA5P18.DBF")]
+        [InlineData(1, 'i', 2024, "DATA1I24.DBF")] // module uppercased defensively
+        public void FormatDbfName_BuildsCanonicalShape_R6_15(int table, char module, int year, string expected)
+        {
+            Assert.Equal(expected, LacerteAccessClient.FormatDbfName(table, module, year));
+        }
+
+        [Theory]
+        [InlineData('I', 2024)]
+        [InlineData('C', 2018)]
+        [InlineData('P', 2030)]
+        public void FormatDbfName_Data1Name_PassesBridgeDbfValidator_R6_15(char module, int year)
+        {
+            // The R6-15 bug: ListClients passed bare "DATA1", which
+            // BridgeInputValidation.ValidateDbfName rejects (NAME.EXT shape
+            // required) — so the live path could only ever throw
+            // DBNotSupported. The name ListClients now builds must clear the
+            // same validator it will hit inside Reader.ReadFromDBFData.
+            var dbf = LacerteAccessClient.FormatDbfName(1, module, year);
+            // Should not throw.
+            BridgeInputValidation.ValidateDbfName(dbf, "ListClients");
+        }
+
+        [Fact]
+        public void ValidateDbfName_RejectsBareData1_R6_15()
+        {
+            // Regression sentinel for the original bug shape: the validator
+            // MUST keep rejecting the bare table token so a revert of the
+            // ListClients fix fails loudly here.
+            var ex = Assert.Throws<LacerteSDKError>(() =>
+                BridgeInputValidation.ValidateDbfName("DATA1", "ListClients"));
+            Assert.Equal(StatusCodes.DBNotSupported, ex.StatusCode);
+        }
+
+        // -----------------------------------------------------------------
         // Disposal
         // -----------------------------------------------------------------
 

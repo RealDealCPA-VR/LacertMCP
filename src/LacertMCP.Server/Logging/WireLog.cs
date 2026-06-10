@@ -225,6 +225,16 @@ namespace LacertMCP.Server.Logging
             // put ex.Message under "message". Both are scrubbed wholesale at
             // disk scope.
             "odbcMessage", "message",
+            // R6-12 — raw SQL text + name filters. LacerteDsnReader.Query logs
+            // its full SQL under args.sql, and SqlTemplates.Data1TopWhereName
+            // inlines the operator's name prefix as a quoted literal
+            // (`... where C1_2 like 'Smith%'`) — taxpayer-identity prose that
+            // must not land verbatim in an archived debug log. The session
+            // layer likewise logs the operator's `lastNameFilter` /
+            // `nameFilter` args on ListClients records. All three are
+            // scrubbed wholesale at DISK scope only; the wire envelope keeps
+            // them so the LLM can replay/refine diagnostic queries.
+            "sql", "lastNameFilter", "nameFilter",
         };
 
         // P15-001 — narrow on-wire keyset. Anything not in this set
@@ -285,6 +295,7 @@ namespace LacertMCP.Server.Logging
         private static readonly HashSet<string> _piiFieldCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             // DATA1 (module 1, Individual)
+            "C1_3",   // Email (sim/seed convention — see SimulationStore.Seed)
             "C1_14",  // SpouseSSN
             "C1_15",  // TaxpayerSSN
             "C1_19",  // DateOfBirth
@@ -297,16 +308,53 @@ namespace LacertMCP.Server.Logging
             "C1_72",  // RoutingNumber
         };
 
+        // R6-12 — DISK-scope-only coverage for raw-column-keyed dict rows.
+        //
+        // _piiFieldCodes above covers TRUE secrets (SSN/DOB/bank/email/phone)
+        // and applies to BOTH scopes. But the ODBC dict-row shape
+        // `{"C1_2":"Smith"}` also carries identity/address prose (first/last
+        // name, entity name, address block, city, zip) under raw column
+        // names — exactly the data the friendly-key disk set (FirstName /
+        // LastName / Address1 / City / Zip) scrubs when keyed by friendly
+        // name. There is no enumerable per-module catalog of which C{t}_N
+        // codes hold names vs addresses vs statuses (the Schema shards are
+        // unpopulated stubs and the spec defers the per-module catalog), so
+        // we mirror the P15-058 denylist posture for the write shape: at
+        // DISK scope, over-redact EVERY C{t}_N-shaped key — names, address
+        // blocks, and entity-module equivalents included — EXCEPT the
+        // C{t}_0 client-number column, which is the row's diagnostic anchor
+        // (join key, not identity prose). Wire scope is untouched: the LLM
+        // consumer still sees full rows (minus true secrets) so read tools
+        // stay useful.
+        //
+        // Production cost is zero on the wire and over-redaction on an
+        // archived debug log is strictly safer — the operator can re-derive
+        // row contents by re-running the logged op.
+        private static readonly Regex _rawColumnCodeRegex = new Regex(
+            "^C[1-8]_[A-Z0-9]+$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex _rawColumnClientNumberRegex = new Regex(
+            "^C[1-8]_0$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static bool IsDiskScrubbedRawColumnCode(string name)
+            => _rawColumnCodeRegex.IsMatch(name)
+               && !_rawColumnClientNumberRegex.IsMatch(name);
+
         // Fallback regex: used only when the input is not parseable JSON.
         // Matches "Key":"value"|number|true|false|null for the scalar-only
         // shapes that legitimate JSON serializers emit; the JsonNode walker
         // handles arrays + nested objects above. Mirrors the broad disk-scope
-        // keyset PLUS the PII field codes (P15-018) and the ODBC driver-echo
-        // message keys (P15-019). The regex pass only fires on malformed input,
-        // which is the conservative path — covering the broader alternation
-        // here is intentional.
+        // keyset PLUS the PII field codes (P15-018, generalized to every
+        // C{t}_N code by R6-12 — including C{t}_0, which is acceptable
+        // over-redaction on the malformed-input path) and the ODBC
+        // driver-echo message keys (P15-019). R6-12 also adds sql /
+        // lastNameFilter / nameFilter. The regex pass only fires on
+        // malformed input, which is the conservative path — covering the
+        // broader alternation here is intentional.
         private static readonly Regex _redactRegex = new Regex(
-            "\"(?<key>SSN|TaxpayerSSN|SpouseSSN|DependentSSN|TIN|ITIN|PTIN|EIN|EmployerEIN|FederalID|FedEIN|BankAccountNumber|RoutingNumber|DateOfBirth|DOB|BirthDate|EmailID|Email|HomePhone|WorkPhone|CellPhone|PhoneNumber|FirstName|LastName|MiddleName|Address1|Address2|StreetAddress|City|ZipCode|Zip|Description|rawError|reason|odbcMessage|message|C1_14|C1_15|C1_19|C1_21|C1_27|C1_28|C1_29|C1_32|C1_71|C1_72)\"\\s*:\\s*(?:\"[^\"]*\"|-?\\d+(?:\\.\\d+)?|true|false|null)",
+            "\"(?<key>SSN|TaxpayerSSN|SpouseSSN|DependentSSN|TIN|ITIN|PTIN|EIN|EmployerEIN|FederalID|FedEIN|BankAccountNumber|RoutingNumber|DateOfBirth|DOB|BirthDate|EmailID|Email|HomePhone|WorkPhone|CellPhone|PhoneNumber|FirstName|LastName|MiddleName|Address1|Address2|StreetAddress|City|ZipCode|Zip|Description|rawError|reason|odbcMessage|message|sql|lastNameFilter|nameFilter|C[1-8]_[A-Z0-9]+)\"\\s*:\\s*(?:\"[^\"]*\"|-?\\d+(?:\\.\\d+)?|true|false|null)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>
@@ -555,6 +603,7 @@ namespace LacertMCP.Server.Logging
             if (string.IsNullOrEmpty(json)) return json;
 
             var keys = scope == RedactionScope.Wire ? _wireRedactionKeys : _diskRedactionKeys;
+            var diskScope = scope == RedactionScope.Disk;
 
             // First try the JsonNode walker — covers arrays, nested objects,
             // and whitespace-padded shapes that the regex can't reach.
@@ -563,7 +612,7 @@ namespace LacertMCP.Server.Logging
                 var node = JsonNode.Parse(json);
                 if (node != null)
                 {
-                    RedactNode(node, keys);
+                    RedactNode(node, keys, diskScope);
                     // The field/value sibling-pair pass targets WriteField
                     // payloads carrying PII field-codes; the relevant codes
                     // are true secrets (SSN/DOB/email/bank) so the pass
@@ -664,7 +713,7 @@ namespace LacertMCP.Server.Logging
         // Redaction helpers
         // -----------------------------------------------------------------
 
-        private static void RedactNode(JsonNode node, HashSet<string> keys)
+        private static void RedactNode(JsonNode node, HashSet<string> keys, bool diskScope)
         {
             switch (node)
             {
@@ -692,11 +741,22 @@ namespace LacertMCP.Server.Logging
                             obj[name] = JsonValue.Create("***");
                             continue;
                         }
+                        // R6-12 — at DISK scope only, scrub every other
+                        // C{t}_N-shaped key (names, address block, entity-
+                        // module equivalents) except the C{t}_0 client-number
+                        // anchor. See the _rawColumnCodeRegex comment for the
+                        // P15-058-mirroring rationale. Wire scope passes these
+                        // through so read tools stay useful to the LLM.
+                        if (diskScope && IsDiskScrubbedRawColumnCode(name))
+                        {
+                            obj[name] = JsonValue.Create("***");
+                            continue;
+                        }
                         var child = obj[name];
                         if (child is JsonObject || child is JsonArray)
                         {
                             // Recurse in-place — no detach/reattach needed.
-                            RedactNode(child!, keys);
+                            RedactNode(child!, keys, diskScope);
                         }
                     }
                     return;
@@ -708,7 +768,7 @@ namespace LacertMCP.Server.Logging
                         var child = arr[i];
                         if (child is JsonObject || child is JsonArray)
                         {
-                            RedactNode(child, keys);
+                            RedactNode(child, keys, diskScope);
                         }
                     }
                     return;

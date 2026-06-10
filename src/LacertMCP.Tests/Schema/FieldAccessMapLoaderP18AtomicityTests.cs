@@ -154,7 +154,7 @@ namespace LacertMCP.Tests.Schema
         // ============================================================
 
         [Fact]
-        public void ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader()
+        public async Task ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader()
         {
             // Seed both base and overlay so a stale snapshot would have
             // entries to be "blended" against. The contract: every result
@@ -210,7 +210,9 @@ namespace LacertMCP.Tests.Schema
                 Interlocked.Exchange(ref stopReader, 1);
             });
 
-            Task.WaitAll(new[] { readerTask, reloaderTask }, TimeSpan.FromSeconds(15));
+            await Task.WhenAny(
+                Task.WhenAll(readerTask, reloaderTask),
+                Task.Delay(TimeSpan.FromSeconds(15)));
 
             // Contract: no observable blended state. The legal result is
             // NotSupported (overlay wins on any snapshot, fresh or warmed).
@@ -269,7 +271,7 @@ namespace LacertMCP.Tests.Schema
         }
 
         [Fact]
-        public void ReloadCaches_ConcurrentInvocations_DoNotThrow_AndConvergeToEmpty()
+        public async Task ReloadCaches_ConcurrentInvocations_DoNotThrow_AndConvergeToEmpty()
         {
             // 32 parallel ReloadCaches calls should never throw and should
             // converge to a single empty snapshot (Interlocked.Exchange is
@@ -283,7 +285,9 @@ namespace LacertMCP.Tests.Schema
             {
                 tasks[i] = Task.Run(() => FieldAccessMapLoader.ReloadCaches());
             }
-            Task.WaitAll(tasks, TimeSpan.FromSeconds(5));
+            await Task.WhenAny(
+                Task.WhenAll(tasks),
+                Task.Delay(TimeSpan.FromSeconds(5)));
 
             var (modules, overlays) = GetSnapshotDicts();
             Assert.NotNull(modules);

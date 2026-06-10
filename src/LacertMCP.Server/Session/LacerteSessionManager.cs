@@ -250,8 +250,14 @@ namespace LacertMCP.Server.Session
         // worst case is a long-lived map keyed by every ClientNumber the
         // operator's tax-pro flow ever touched, which is bounded by the
         // operator's client roster (low thousands).
+        //
+        // R6-24 — keyed OrdinalIgnoreCase to match every client map in
+        // ModuleStore (Clients/Statuses/Displays/Forms/Details are all
+        // OrdinalIgnoreCase). With Ordinal, "brow" and "BROW" resolved to
+        // DIFFERENT monitors while mutating the SAME underlying rows,
+        // silently voiding the P18 per-client write serialization.
         private readonly ConcurrentDictionary<string, object> _clientWriteLocks =
-            new ConcurrentDictionary<string, object>(StringComparer.Ordinal);
+            new ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
         private object GetClientWriteLock(string clientNumber)
             => _clientWriteLocks.GetOrAdd(clientNumber, _ => new object());
@@ -358,24 +364,54 @@ namespace LacertMCP.Server.Session
                 _bridge = new LacerteAccessClient();
             }
 
-            // P17-004 — wire up idempotency cache persistence. Default OFF
-            // for v0.1 (opt-in) so the new disk dependency doesn't surprise
-            // operators on first upgrade and so test/CI runs stay hermetic
-            // without per-test cleanup. Set LACERTE_IDEMPOTENCY_PERSIST=1
-            // to close the cross-restart corruption hazard the finding
-            // describes — recommended for any operator running batched
-            // writes through Claude Desktop or another auto-restart host.
+            // P17-004 / R6-26 — wire up idempotency cache persistence.
+            // Default ON (persistence protects against duplicate tax-return
+            // writes across host restarts — the safer posture is the
+            // default); disable with LACERTE_IDEMPOTENCY_PERSIST=0. The
+            // doc-block at the persistence section below and HANDOFF.md
+            // always documented default-on; the code shipped opt-in by
+            // mistake (R6-26) — the code now matches the documented intent.
             // LACERTE_IDEMPOTENCY_PERSIST_PATH overrides the storage
             // location (default: %APPDATA%/lacerte-mcp/idempotency-cache.json
             // on Windows, $XDG_CONFIG_HOME/lacerte-mcp/idempotency-cache.json
             // or ~/.config/lacerte-mcp/idempotency-cache.json on POSIX).
+            // See ResolveIdempotencyPersistEnabled for the hermetic-env
+            // carve-out (an injected env dict that names no storage
+            // location stays ephemeral).
             var persistFlag = TryGet(resolved, "LACERTE_IDEMPOTENCY_PERSIST");
-            _idempotencyPersistEnabled = persistFlag == "1";
+            _idempotencyPersistEnabled = ResolveIdempotencyPersistEnabled(persistFlag, resolved);
             if (_idempotencyPersistEnabled)
             {
                 _idempotencyCachePath = ResolveIdempotencyCachePath(resolved);
                 LoadIdempotencyCacheFromDisk();
             }
+        }
+
+        // R6-26 — persistence default resolution, shared by both ctors.
+        //   "0"  → OFF (explicit opt-out; test isolation / strict-ephemeral ops).
+        //   "1"  → ON  (explicit opt-in; legacy spelling, still honored).
+        //   unset → ON, but only when the supplied environment can actually
+        //           site the cache file: an explicit
+        //           LACERTE_IDEMPOTENCY_PERSIST_PATH, or the per-user base
+        //           dir key for this OS (APPDATA on Windows;
+        //           XDG_CONFIG_HOME/HOME on POSIX). A real process env
+        //           always carries those keys, so production gets the safe
+        //           default-on. An injected hermetic env dict (tests,
+        //           embedders) that names no storage location stays
+        //           ephemeral instead of silently writing into the host
+        //           user's real profile.
+        private static bool ResolveIdempotencyPersistEnabled(
+            string? flag, IDictionary<string, string?> env)
+        {
+            if (flag == "0") return false;
+            if (flag == "1") return true;
+            if (!string.IsNullOrEmpty(TryGet(env, "LACERTE_IDEMPOTENCY_PERSIST_PATH"))) return true;
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+            {
+                return !string.IsNullOrEmpty(TryGet(env, "APPDATA"));
+            }
+            return !string.IsNullOrEmpty(TryGet(env, "XDG_CONFIG_HOME"))
+                || !string.IsNullOrEmpty(TryGet(env, "HOME"));
         }
 
         /// <summary>
@@ -394,12 +430,13 @@ namespace LacertMCP.Server.Session
             _bridge = bridge;
             _sim = null;
 
-            // P17-004 — test ctor honors LACERTE_IDEMPOTENCY_PERSIST too so
-            // a persistence-specific test can pin the behavior. Default
-            // OFF for the test ctor (hermetic) — tests that opt in pass
-            // LACERTE_IDEMPOTENCY_PERSIST=1 explicitly via the env dict.
+            // P17-004 / R6-26 — test ctor honors LACERTE_IDEMPOTENCY_PERSIST
+            // through the same default-ON resolution as the public ctor.
+            // In practice the bare `env ?? new Dictionary<...>()` dict names
+            // no storage location, so persistence stays OFF (hermetic)
+            // unless the test passes an explicit flag/path via the env dict.
             var persistFlag = TryGet(resolved, "LACERTE_IDEMPOTENCY_PERSIST");
-            _idempotencyPersistEnabled = persistFlag == "1";
+            _idempotencyPersistEnabled = ResolveIdempotencyPersistEnabled(persistFlag, resolved);
             if (_idempotencyPersistEnabled)
             {
                 _idempotencyCachePath = ResolveIdempotencyCachePath(resolved);
@@ -539,11 +576,25 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public SessionStatusSnapshot SessionStatus()
         {
+            // R6-25 — compute the EFFECTIVE registration state for the
+            // snapshot without side effects. The IsRegistered latch only
+            // flips on the next gated call (ThrowIfAuthExpired); until then
+            // a post-24h snapshot used to report IsRegistered=true with
+            // MinutesUntilExpiry=0, telling the operator they were signed
+            // in when every subsequent wire call would reject. The latch
+            // itself is intentionally NOT mutated here: SessionStatus is a
+            // pure status read (the operator's escape hatch) and must never
+            // change session state.
             double? minutesUntilExpiry = null;
+            bool effectiveRegistered = IsRegistered;
             if (ExpiresAt.HasValue)
             {
-                minutesUntilExpiry = Math.Max(0,
-                    (ExpiresAt.Value - DateTimeOffset.UtcNow).TotalMinutes);
+                var remainingMinutes = (ExpiresAt.Value - DateTimeOffset.UtcNow).TotalMinutes;
+                minutesUntilExpiry = Math.Max(0, remainingMinutes);
+                if (remainingMinutes <= 0)
+                {
+                    effectiveRegistered = false;
+                }
             }
 
             // F14 — populate the edition triple. Probe is lazy + one-shot so
@@ -565,7 +616,7 @@ namespace LacertMCP.Server.Session
 
             return new SessionStatusSnapshot(
                 Mode: Mode,
-                IsRegistered: IsRegistered,
+                IsRegistered: effectiveRegistered,
                 RegisteredAt: RegisteredAt,
                 ExpiresAt: ExpiresAt,
                 MinutesUntilExpiry: minutesUntilExpiry,
@@ -1193,9 +1244,17 @@ namespace LacertMCP.Server.Session
                 // dry-runs replay, two real writes replay) is preserved; the
                 // cross-mode same-key reuse now correctly surfaces as
                 // 9102 IdempotencyConflict instead of silent no-op.
+                // R6-03 — the session context triple (dataPath, taxYear,
+                // module) is part of the fingerprint at all three BuildPayload
+                // call sites. Without it, the recommended stable-key pattern
+                // plus a lacerte_set_context year/module switch produced a
+                // SILENT cached replay: Success returned, the wire never
+                // fired, and the new-context write never landed. Same key +
+                // same args + different context now surfaces 9102.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("WriteField", table, clientNumber, field, value, subClientId, stateAbbrev, dryRun);
+                    : BuildPayload("WriteField", ctx.DataPath, ctx.Year, ctx.Module.ToString(),
+                        table, clientNumber, field, value, subClientId, stateAbbrev, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
@@ -1320,7 +1379,18 @@ namespace LacertMCP.Server.Session
                     return inner;
                 }).ConfigureAwait(false);
 
-                StoreIdempotent(idempotencyKey, payload, result);
+                // R6-04 — only cache Success. The sim throws on failure so
+                // only Success ever reached here in sim, but the live bridge
+                // RETURNS raw status ints (e.g. DBFNotAccessable 2 when the
+                // return is open in the Lacerte UI). Caching a failure made
+                // it sticky for 24h: the operator closed the file, retried
+                // the same key + same payload, and replayed the cached
+                // FAILURE without touching the wire. A non-Success result
+                // stays uncached so the retry actually executes.
+                if (result == StatusCodes.Success)
+                {
+                    StoreIdempotent(idempotencyKey, payload, result);
+                }
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1352,9 +1422,12 @@ namespace LacertMCP.Server.Session
                 cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
                 // P18 — dryRun in the fingerprint; see WriteField for context.
+                // R6-03 — session context triple in the fingerprint; see
+                // WriteField for the silent-cross-context-replay rationale.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("WriteDetail", clientNumber, row, replaceIndex, dryRun);
+                    : BuildPayload("WriteDetail", ctx.DataPath, ctx.Year, ctx.Module.ToString(),
+                        clientNumber, row, replaceIndex, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
@@ -1464,7 +1537,13 @@ namespace LacertMCP.Server.Session
                     return inner;
                 }).ConfigureAwait(false);
 
-                StoreIdempotent(idempotencyKey, payload, result);
+                // R6-04 — only cache Success; see WriteField for rationale
+                // (live bridge returns raw status ints; a cached failure was
+                // sticky for 24h and the retry could never succeed).
+                if (result == StatusCodes.Success)
+                {
+                    StoreIdempotent(idempotencyKey, payload, result);
+                }
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1479,6 +1558,14 @@ namespace LacertMCP.Server.Session
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            // R6-22 — registration gate at the chokepoint, matching
+            // WriteField/WriteDetail. Previously only the sim path enforced
+            // NotSignedIn (via SimulationStore.SimulateCreateClient), so a
+            // live dryRun CreateClient — which short-circuits before the
+            // wire — skipped the gate entirely and reported Success to an
+            // unregistered operator while sim threw NotSignedIn. Two-mode
+            // discipline requires the modes to agree.
+            RequireRegistered();
             // CreateClient writes a whole DATA1 row (5-field ctor on the SDK
             // side); there is no single field to surface, so the read-only
             // rejection just carries the operation + active module/year.
@@ -1499,9 +1586,15 @@ namespace LacertMCP.Server.Session
                 // because the cached `(Success, ClientNumber=null)` makes the
                 // real-write retry return Success with no ClientNumber — the
                 // operator silently never gets a client created.
+                // R6-03 — session context triple in the fingerprint; see
+                // WriteField. For CreateClient the cross-context replay was
+                // the worst of the three: same key across modules replayed
+                // the module-I result and no client was ever created in
+                // module C.
                 string payload = string.IsNullOrEmpty(idempotencyKey)
                     ? string.Empty
-                    : BuildPayload("CreateClient", args, dryRun);
+                    : BuildPayload("CreateClient", ctx.DataPath, ctx.Year, ctx.Module.ToString(),
+                        args, dryRun);
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out CreateClientResult cached))
                 {
@@ -1597,6 +1690,14 @@ namespace LacertMCP.Server.Session
                         {
                             undo?.Invoke();
                         }
+                        // R6-22 — sim dryRun returns a null ClientNumber to
+                        // match live dryRun (which short-circuits before the
+                        // wire and cannot mint). The undo above already
+                        // rolled the mint back, so the number the sim minted
+                        // refers to nothing — returning it would leak an
+                        // identifier a follow-up read can never resolve, and
+                        // the two modes would be trivially distinguishable.
+                        inner = new CreateClientResult(inner.Status, null);
                     }
                     else
                     {
@@ -1605,7 +1706,14 @@ namespace LacertMCP.Server.Session
                     return inner;
                 }).ConfigureAwait(false);
 
-                StoreIdempotent(idempotencyKey, payload, result);
+                // R6-04 — only cache Success; see WriteField for rationale.
+                // The live bridge can RETURN a non-Success status (e.g.
+                // DuplicateClient, DBFNotAccessable) without throwing;
+                // caching it made the failure sticky under the key for 24h.
+                if (result.Status == StatusCodes.Success)
+                {
+                    StoreIdempotent(idempotencyKey, payload, result);
+                }
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1784,6 +1892,26 @@ namespace LacertMCP.Server.Session
             undo = null;
             var module = RequireSimModule(ctx);
 
+            // P18-022 / R6-23 — DBF-lock latch. SimulationStore.SimulateFieldWrite
+            // checks IsTableLocked before its row lookup so the sim can
+            // rehearse the live "return is open in Lacerte's UI" failure
+            // (TAPIStatus 2 DBFNotAccessable). This adapter bypasses the
+            // store method, so without the same check the latch was dead on
+            // the actual lacerte_field_write tool path. Fires before the row
+            // lookup to match the store's ordering (a locked DBF can't even
+            // surface row metadata).
+            if (_sim!.IsTableLocked(ctx.Year, ctx.Module, table))
+            {
+                throw new LacerteSDKError(StatusCodes.DBFNotAccessable,
+                    new Dictionary<string, object?>
+                    {
+                        ["table"] = table,
+                        ["clientNumber"] = clientNumber,
+                        ["module"] = ctx.Module.ToString(),
+                        ["taxYear"] = ctx.Year,
+                    });
+            }
+
             DbfRow? row = null;
             switch (table)
             {
@@ -1868,7 +1996,43 @@ namespace LacertMCP.Server.Session
         {
             undo = null;
             var module = RequireSimModule(ctx);
-            var list = module.Details.GetOrAdd(clientNumber, _ => new List<DetailRow>());
+
+            // P18-022 / R6-23 — DBF-lock latch for the per-client detail
+            // file. Mirrors SimulationStore.WriteDetail (detail files are
+            // not numbered DATA1-7; the convention is table=0). Fires
+            // before the client-existence check to match the store's
+            // ordering.
+            if (_sim!.IsTableLocked(ctx.Year, ctx.Module, 0))
+            {
+                throw new LacerteSDKError(StatusCodes.DBFNotAccessable,
+                    new Dictionary<string, object?>
+                    {
+                        ["clientNumber"] = clientNumber,
+                        ["module"] = ctx.Module.ToString(),
+                        ["taxYear"] = ctx.Year,
+                        ["reason"] = "The per-client detail file is locked (open in Lacerte's UI). Close the return and retry.",
+                    });
+            }
+
+            // R6-10 — never auto-vivify a detail list for a nonexistent
+            // client. SimulationStore.WriteDetail (the tested contract)
+            // returns DetailCreationError when the client has no detail
+            // file; the prior GetOrAdd here returned Success for a typo'd
+            // clientNumber AND seeded a permanent orphan list that
+            // subsequent reads surfaced. Live returns DetailCreationError
+            // for an unknown client — two-mode discipline requires the sim
+            // tool path to agree.
+            if (!module.Details.TryGetValue(clientNumber, out var list))
+            {
+                throw new LacerteSDKError(StatusCodes.DetailCreationError,
+                    new Dictionary<string, object?>
+                    {
+                        ["clientNumber"] = clientNumber,
+                        ["reason"] = "Client has no detail file in the active (dataPath, taxYear, module) cell. " +
+                                     "Verify clientNumber via lacerte_list_clients — detail files are created on the " +
+                                     "create-client path, never implicitly by a detail write.",
+                    });
+            }
             lock (list)
             {
                 if (replaceIndex.HasValue)
@@ -2259,23 +2423,22 @@ namespace LacertMCP.Server.Session
                 // 9102 context dict so the operator sees BOTH timestamps
                 // when triaging a key collision; P15-074 — fingerprint-
                 // mismatch branch USED TO carry cachedFingerprintPrefix +
-                // requestedFingerprintPrefix.
+                // requestedFingerprintPrefix unconditionally.
                 //
-                // P17-007 — those prefixes ARE keyed-HMAC now (random
-                // process-local key) so they're no longer an offline
-                // brute-force oracle on small-search-space PII
-                // (SSN ~30 bits, DOB ~15 bits, routing ~26 bits). The
-                // additional belt-and-suspenders here: the prefix keys
-                // ship in the wire envelope only when LACERTE_DEBUG_WIRE=1
-                // is enabled. In the default ops posture the operator
-                // triages via existingEntryCreatedAt + existingEntryAgeMs
-                // (most actionable signal anyway), and the prefix never
-                // touches the wire. Turning on LACERTE_DEBUG_WIRE is an
-                // explicit operator action that already enables wire
-                // payload logging — adding the HMAC prefix to that
-                // controlled diagnostic surface is consistent. Avoids the
-                // P17-007 disclosure even in the unlikely event a future
-                // refactor un-HMACs the function.
+                // P17-007 / R6-01 — the prefixes ship in the wire envelope
+                // ONLY when LACERTE_DEBUG_WIRE=1 is enabled. In the default
+                // ops posture the operator triages via
+                // existingEntryCreatedAt + existingEntryAgeMs (the most
+                // actionable signal anyway) and no fingerprint material
+                // touches the wire. The fingerprints themselves are plain
+                // SHA-256 again (R6-01 removed the per-process HMAC key
+                // because it broke P17-004 cross-restart replay); the
+                // debug-wire gate here is what forecloses the P17-007
+                // offline brute-force on small-search-space PII — turning
+                // on LACERTE_DEBUG_WIRE is an explicit operator action that
+                // already enables full wire-payload logging, so an 8-char
+                // truncated-SHA prefix on that controlled diagnostic
+                // surface adds no new exposure.
                 var data = new Dictionary<string, object?>
                 {
                     ["idempotencyKey"] = key,
@@ -2406,7 +2569,9 @@ namespace LacertMCP.Server.Session
         // ===================================================================
         // P17-004 — Idempotency cache disk persistence
         //
-        // Default ON; disable via LACERTE_IDEMPOTENCY_PERSIST=0. Storage at
+        // Default ON (R6-26 — the code now matches this long-documented
+        // intent; see ResolveIdempotencyPersistEnabled); disable via
+        // LACERTE_IDEMPOTENCY_PERSIST=0. Storage at
         // %APPDATA%/lacerte-mcp/idempotency-cache.json (Windows) or
         // ~/.config/lacerte-mcp/idempotency-cache.json (POSIX). Overridable
         // via LACERTE_IDEMPOTENCY_PERSIST_PATH for tests + ops who want a
@@ -2418,7 +2583,33 @@ namespace LacertMCP.Server.Session
         // skip unknown result-type discriminators rather than throwing,
         // so a forward-compat file (written by a newer build) loads
         // partially in an older build rather than crashing the cold start.
+        //
+        // R6-11 — multi-instance discipline (Claude Desktop + Cursor both
+        // running their own server against the same profile, the scenario
+        // P17-014 explicitly supports for heartbeat):
+        //   * each instance writes a PER-PID tmp file
+        //     (idempotency-cache.json.<pid>.tmp) so two instances never
+        //     race the same tmp;
+        //   * every persist is merge-on-write — the current disk file is
+        //     re-read and its non-expired entries merged under ours
+        //     (in-memory wins on key collision), so instance B's entries
+        //     survive instance A's persist;
+        //   * cold-start tmp cleanup only touches the legacy bare ".tmp"
+        //     name, OUR pid's tmp, or tmps older than 1 hour — a recent
+        //     other-pid tmp may belong to a live instance mid-persist.
+        // Residual races (accepted): the read→merge→Replace window is not
+        // atomic across processes, so two simultaneous persists can each
+        // miss entries the other added inside that window — the loser's
+        // entries reappear on its own next merge-on-write persist; and a
+        // cold-starting instance that promotes another instance's
+        // in-flight tmp makes that instance's File.Replace fail once
+        // (caught by the best-effort handler, retried on its next Store).
+        // Full cross-process atomicity would need a named mutex or lock
+        // file; not worth it for the single-operator profile.
         // ===================================================================
+
+        // R6-11 — cached once; used for the per-PID tmp name.
+        private static readonly int s_processId = Process.GetCurrentProcess().Id;
 
         private string ResolveIdempotencyCachePath()
             => ResolveIdempotencyCachePath(ReadProcessEnv());
@@ -2484,36 +2675,9 @@ namespace LacertMCP.Server.Session
             if (string.IsNullOrEmpty(_idempotencyCachePath)) return;
             try
             {
-                // P18 — one-shot orphaned-.tmp recovery. A prior persist
-                // that crashed during the legacy Delete-then-Move window (or
-                // any future torn write) leaves canonical missing while the
-                // .tmp file holds the most recent successfully-serialized
-                // snapshot. Promote it to canonical before the normal read
-                // so the cold start can salvage prior writes instead of
-                // losing them.
-                var tmpPath = _idempotencyCachePath + ".tmp";
-                if (!File.Exists(_idempotencyCachePath) && File.Exists(tmpPath))
-                {
-                    try
-                    {
-                        File.Move(tmpPath, _idempotencyCachePath);
-                        try
-                        {
-                            WireLog.RecordSync<bool>("Idempotency.recoveredFromOrphanedTmp",
-                                new { path = _idempotencyCachePath }, () => true);
-                        }
-                        catch { /* logging is best-effort */ }
-                    }
-                    catch { /* fall through to cold start */ }
-                }
-                else if (File.Exists(_idempotencyCachePath) && File.Exists(tmpPath))
-                {
-                    // Both exist (e.g. crash mid-WriteAllText before the
-                    // Replace was reached). The .tmp is partial/torn; delete
-                    // it to keep the directory clean and avoid confusing
-                    // future cold starts.
-                    try { File.Delete(tmpPath); } catch { /* best-effort */ }
-                }
+                // P18 / R6-11 — orphaned-tmp recovery + multi-instance-aware
+                // cleanup. See RecoverOrCleanupTmpFiles for the rules.
+                RecoverOrCleanupTmpFiles();
                 if (!File.Exists(_idempotencyCachePath)) return;
                 var json = File.ReadAllText(_idempotencyCachePath);
                 if (string.IsNullOrWhiteSpace(json)) return;
@@ -2571,6 +2735,108 @@ namespace LacertMCP.Server.Session
             }
         }
 
+        // R6-11 — cold-start .tmp handling, multi-instance aware.
+        //
+        // 1. If the canonical file is MISSING but tmp candidates exist
+        //    (our pid-shaped tmp, another instance's, or the legacy bare
+        //    ".tmp" from a pre-R6-11 build), promote the NEWEST candidate:
+        //    it holds the most recent successfully-serialized snapshot from
+        //    a persist that crashed between WriteAllText and Replace/Move.
+        // 2. Delete leftover tmps only when they are (a) the legacy bare
+        //    ".tmp" name — this build never writes it, so it is always
+        //    orphaned (a concurrently-running PRE-R6-11 build mid-persist
+        //    could lose one tmp write here; accepted, it re-persists on
+        //    its next Store); (b) OUR pid's tmp — a freshly-constructed
+        //    manager cannot have an in-flight persist yet, so a same-pid
+        //    tmp is definitionally stale (pid reuse after reboot included);
+        //    or (c) older than 1 hour — no persist takes an hour, the
+        //    owner is gone. A RECENT other-pid tmp is left alone: it may
+        //    belong to a live instance mid-persist.
+        private void RecoverOrCleanupTmpFiles()
+        {
+            var canonical = _idempotencyCachePath!;
+            string? dir;
+            try { dir = Path.GetDirectoryName(canonical); }
+            catch { return; }
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+
+            var fileName = Path.GetFileName(canonical);
+            var legacyTmp = canonical + ".tmp";
+            var ourTmp = canonical + "." + s_processId.ToString(CultureInfo.InvariantCulture) + ".tmp";
+
+            var candidates = new List<string>();
+            if (File.Exists(legacyTmp)) candidates.Add(legacyTmp);
+            try
+            {
+                // Matches "<name>.<something>.tmp" (the pid-shaped tmps).
+                // The legacy "<name>.tmp" does NOT match this pattern (the
+                // wildcard segment sits between two literal dots), so it is
+                // only ever added once via the explicit check above.
+                foreach (var f in Directory.GetFiles(dir!, fileName + ".*.tmp"))
+                {
+                    if (!string.Equals(f, legacyTmp, StringComparison.OrdinalIgnoreCase))
+                    {
+                        candidates.Add(f);
+                    }
+                }
+            }
+            catch { /* enumeration is best-effort */ }
+            if (candidates.Count == 0) return;
+
+            if (!File.Exists(canonical))
+            {
+                string? newest = null;
+                var newestUtc = DateTime.MinValue;
+                foreach (var f in candidates)
+                {
+                    try
+                    {
+                        var ts = File.GetLastWriteTimeUtc(f);
+                        if (newest == null || ts > newestUtc)
+                        {
+                            newest = f;
+                            newestUtc = ts;
+                        }
+                    }
+                    catch { /* skip unreadable candidate */ }
+                }
+                if (newest != null)
+                {
+                    try
+                    {
+                        File.Move(newest, canonical);
+                        candidates.Remove(newest);
+                        try
+                        {
+                            WireLog.RecordSync<bool>("Idempotency.recoveredFromOrphanedTmp",
+                                new { path = canonical, promotedFrom = newest }, () => true);
+                        }
+                        catch { /* logging is best-effort */ }
+                    }
+                    catch { /* fall through to cold start */ }
+                }
+            }
+
+            foreach (var f in candidates)
+            {
+                bool isLegacy = string.Equals(f, legacyTmp, StringComparison.OrdinalIgnoreCase);
+                bool isOurs = string.Equals(f, ourTmp, StringComparison.OrdinalIgnoreCase);
+                bool stale = false;
+                if (!isLegacy && !isOurs)
+                {
+                    try
+                    {
+                        stale = DateTime.UtcNow - File.GetLastWriteTimeUtc(f) > TimeSpan.FromHours(1);
+                    }
+                    catch { stale = false; }
+                }
+                if (isLegacy || isOurs || stale)
+                {
+                    try { File.Delete(f); } catch { /* best-effort */ }
+                }
+            }
+        }
+
         private static object? TryRehydrateResult(string resultType, JsonElement value)
         {
             // Two well-known result types live in the manager today; future
@@ -2611,13 +2877,47 @@ namespace LacertMCP.Server.Session
             if (Interlocked.CompareExchange(ref _persistingIdempotency, 1, 0) != 0) return;
             try
             {
-                var snapshot = new PersistedCache();
+                // R6-11 — merge-on-write. Re-read the current disk file and
+                // carry its non-expired entries under ours (in-memory wins
+                // on key collision) so a sibling instance's persisted
+                // entries survive OUR persist instead of being clobbered by
+                // a full-cache overwrite. A torn/corrupt disk file degrades
+                // to "our snapshot only" — same as pre-R6-11.
+                var merged = new Dictionary<string, PersistedEntry>(StringComparer.Ordinal);
+                try
+                {
+                    if (File.Exists(_idempotencyCachePath))
+                    {
+                        var diskJson = File.ReadAllText(_idempotencyCachePath);
+                        if (!string.IsNullOrWhiteSpace(diskJson))
+                        {
+                            var diskCache = JsonSerializer.Deserialize<PersistedCache>(diskJson, s_persistJsonOptions);
+                            if (diskCache?.Entries != null)
+                            {
+                                var now = DateTimeOffset.UtcNow;
+                                foreach (var e in diskCache.Entries)
+                                {
+                                    if (string.IsNullOrEmpty(e.Key) || string.IsNullOrEmpty(e.Fingerprint)) continue;
+                                    if (now - e.CreatedAt > IdempotencyTtl) continue;
+                                    merged[e.Key] = e;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { /* disk merge is best-effort; our snapshot still lands */ }
+
                 foreach (var kv in _idempotencyCache)
                 {
-                    var entry = kv.Value;
-                    var persisted = TryPersistEntry(kv.Key, entry);
-                    if (persisted != null) snapshot.Entries.Add(persisted);
+                    var persisted = TryPersistEntry(kv.Key, kv.Value);
+                    if (persisted != null) merged[kv.Key] = persisted; // in-memory wins
                 }
+                var snapshot = new PersistedCache();
+                foreach (var kv in merged)
+                {
+                    snapshot.Entries.Add(kv.Value);
+                }
+
                 var dir = Path.GetDirectoryName(_idempotencyCachePath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 {
@@ -2636,7 +2936,12 @@ namespace LacertMCP.Server.Session
                 // destinationBackupFileName=null skips creating a .bak
                 // sibling; ignoreMetadataErrors=true tolerates ACL
                 // inheritance quirks on %APPDATA% under Windows Defender.
-                var tmp = _idempotencyCachePath + ".tmp";
+                //
+                // R6-11 — the tmp is PER-PID so two concurrently-running
+                // instances never WriteAllText into the same tmp path (the
+                // old shared ".tmp" raced: one instance's Replace could
+                // consume the other's half-written serialization).
+                var tmp = _idempotencyCachePath + "." + s_processId.ToString(CultureInfo.InvariantCulture) + ".tmp";
                 var json = JsonSerializer.Serialize(snapshot, s_persistJsonOptions);
                 File.WriteAllText(tmp, json);
                 if (File.Exists(_idempotencyCachePath))
@@ -2734,6 +3039,11 @@ namespace LacertMCP.Server.Session
             ExpiresAt = value ? DateTimeOffset.UtcNow.AddHours(24) : (DateTimeOffset?)null;
         }
         internal void SetExpiresAtForTest(DateTimeOffset? expiresAt) => ExpiresAt = expiresAt;
+
+        // R6-23 — internal test seam: exposes the sim backend so tests can
+        // flip SimulationStore.ToggleLock / ToggleExpired through the SAME
+        // store instance the manager routes writes to. Null in live mode.
+        internal SimulationStore? SimulationStoreForTest => _sim;
 
         // P15-062 — internal test seam. Lets tests pin the eviction +
         // expiry behavior via a real entry without round-tripping every
@@ -2846,59 +3156,51 @@ namespace LacertMCP.Server.Session
         // writes, but the options cache is essentially free.
         private static readonly JsonSerializerOptions s_payloadJsonOptions = new JsonSerializerOptions();
 
-        // P17-007 — process-local HMAC key for idempotency payload fingerprints.
-        // Round-3 P15-074 added `cachedFingerprintPrefix` (8 hex chars / 48
-        // bits) to the 9102 IdempotencyConflict envelope as a triage aid.
-        // That prefix is a deterministic SHA-256 of the (op, args) tuple,
-        // where args for WriteField includes the raw `value` — so an
-        // attacker (or an injection-controlled LLM) who guesses the
-        // idempotency key naming convention can iterate guesses on `value`
-        // and brute-force a cached secret (SSN ~30 bits, DOB ~15 bits,
-        // routing number ~26 bits effective). 48 bits is wider than every
-        // small-search-space PII space.
+        // R6-01 — payload fingerprints are UNKEYED SHA-256, hex-encoded.
         //
-        // Switching to HMAC-SHA-256 keyed with a process-local random byte
-        // string foreclosed the offline brute-force: the attacker has the
-        // prefix but not the key. The triage UX is preserved — two distinct
-        // payloads still produce two distinct prefixes within the same
-        // process — and the in-memory cache lookup at TryReplayIdempotent
-        // still works because both sides of the equality check go through
-        // the same keyed function. Process-local scope is correct: cross-
-        // restart cache misses are already inevitable (cache is in-memory
-        // only; P17-004 cold-start surfacing makes this explicit), so
-        // there's no cross-restart key-rotation problem.
+        // History: P17-007 keyed these with a per-process random HMAC key
+        // to foreclose an offline brute-force on the 9102 envelope's
+        // fingerprint prefix (small-search-space PII like SSN ~30 bits).
+        // That key made every fingerprint persisted by P17-004 structurally
+        // dead across a REAL restart: the key regenerated, a byte-identical
+        // retry hashed differently, and the operator got 9102
+        // IdempotencyConflict whose remediation ("pick a fresh key")
+        // re-executed the write — producing the exact duplicate row the
+        // persistence feature exists to prevent. The same-process round-trip
+        // test passed only because both managers shared the static key.
         //
-        // Generated lazily on first BuildPayload call so test-only paths
-        // that never compute a fingerprint don't pay the RNG cost.
-        private static readonly Lazy<byte[]> s_idempotencyHmacKey = new Lazy<byte[]>(() =>
-        {
-            var key = new byte[32];
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                rng.GetBytes(key);
-            }
-            return key;
-        }, isThreadSafe: true);
-
+        // The fingerprint must therefore be stable across processes:
+        // deterministic SHA-256 of the canonical (op, context, args) JSON.
+        // P17-007's disclosure concern is handled at the DISCLOSURE site
+        // instead of the hash function: the prefix only ships in the 9102
+        // envelope when LACERTE_DEBUG_WIRE=1 (see TryReplayIdempotent), an
+        // explicit operator diagnostic posture that already writes full
+        // wire payloads to the debug log. In the default posture no
+        // fingerprint material reaches the wire, so a deterministic hash
+        // is not an offline oracle.
         private static string BuildPayload(string op, params object?[] args)
         {
-            // Canonicalize the operation + args to a JSON blob, then keyed
-            // HMAC-SHA-256 it. Deterministic for primitive args within a
-            // single process (which is all the in-memory cache needs); not
-            // a public oracle of caller-controlled inputs because the key
-            // is process-local random. For complex args (DetailRow,
-            // CreateClientArgs) JsonSerializer's default contract is stable
-            // across calls in the same process.
+            // Canonicalize the operation + args to a JSON blob, then
+            // SHA-256 it. JsonSerializer's default contract is stable for
+            // the primitive/record args used at the three call sites
+            // (WriteField/WriteDetail/CreateClient), so byte-identical
+            // retries hash identically in ANY process — which is what the
+            // P17-004 disk persistence requires.
             var canon = new Dictionary<string, object?>
             {
                 ["op"] = op,
                 ["args"] = args,
             };
             var json = JsonSerializer.Serialize(canon, s_payloadJsonOptions);
-            using (var hmac = new HMACSHA256(s_idempotencyHmacKey.Value))
+            using (var sha = SHA256.Create())
             {
-                var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(json));
-                return Convert.ToBase64String(bytes);
+                var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(json));
+                var sb = new StringBuilder(bytes.Length * 2);
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    sb.Append(bytes[i].ToString("x2"));
+                }
+                return sb.ToString();
             }
         }
 

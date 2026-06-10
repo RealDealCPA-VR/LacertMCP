@@ -115,6 +115,10 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(beforeCtx.Year, afterCtx.Year);
             Assert.Equal(beforeCtx.Module, afterCtx.Module);
             Assert.Equal(beforeCtx.ReadOnly, afterCtx.ReadOnly);
+
+            // R6-09 — the context-scan gate must be back to its single free
+            // slot after the save-set-restore span completes.
+            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
         }
 
         [Fact]
@@ -138,9 +142,68 @@ namespace LacertMCP.Tests.Tools
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
             var tools = new YearOverYearTools(mgr);
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteYearOverYear("1001", 2020, 2024, scope: "ALL"));
+                await tools.LacerteYearOverYear("1001", 2020, 2024, scope: "everything"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9017, root.GetProperty("statusCode").GetInt32());
+        }
+
+        // R6-07d — scope matching is case-insensitive; the envelope echoes
+        // the canonical camelCase spelling regardless of input casing.
+        [Theory]
+        [InlineData("ALL", "all")]
+        [InlineData("detailtotals", "detailTotals")]
+        [InlineData("DetailTotals", "detailTotals")]
+        [InlineData("DEMOGRAPHICS", "demographics")]
+        public async Task YearOverYear_ScopeCaseInsensitive_NormalizesToCanonical_R6_07(
+            string input, string canonical)
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tools = new YearOverYearTools(mgr);
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteYearOverYear(
+                    SeedData.BROW.ClientNumber, 2020, 2024, scope: input));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Equal(canonical,
+                root.GetProperty("result").GetProperty("scope").GetString());
+        }
+
+        // R6-07a — a client present in both years sets both found flags and
+        // emits no hint.
+        [Fact]
+        public async Task YearOverYear_FoundFlags_TrueWhenClientExists_R6_07()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tools = new YearOverYearTools(mgr);
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteYearOverYear(SeedData.BROW.ClientNumber, 2020, 2024));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            var result = root.GetProperty("result");
+            Assert.True(result.GetProperty("foundInFromYear").GetBoolean());
+            Assert.True(result.GetProperty("foundInToYear").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                result.GetProperty("hint").ValueKind);
+        }
+
+        // R6-07a — a client missing in BOTH years must not read as a
+        // confident "no changes": both flags false + an explicit hint.
+        [Fact]
+        public async Task YearOverYear_ClientMissingInBothYears_SetsFlagsAndHint_R6_07()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tools = new YearOverYearTools(mgr);
+            var root = ToolTestHelpers.Parse(
+                await tools.LacerteYearOverYear("424242", 2020, 2024));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            var result = root.GetProperty("result");
+            Assert.False(result.GetProperty("foundInFromYear").GetBoolean());
+            Assert.False(result.GetProperty("foundInToYear").GetBoolean());
+            var hint = result.GetProperty("hint").GetString();
+            Assert.NotNull(hint);
+            Assert.Contains("424242", hint);
+            Assert.Contains("no such client", hint!);
         }
 
         [Fact]

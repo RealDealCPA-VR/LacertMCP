@@ -2,7 +2,7 @@
 
 A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as tools an LLM can call. Wraps the Lacerte SDK (`LacerteSDK_Access` COM/.NET + `LacerteDSII` ODBC) over JSON-RPC/stdio.
 
-**Status:** v0.1.0 scaffolding — all suites passing, 0 failures, 0 warnings (current pass/skip totals tracked in `HANDOFF.md` "Verify Before Continuing"; skip count is stable at 10 live-only). Read/Write/Create tools, simulation store, ODBC layer, COM bridge scaffolding, CLI, prompts, observability (correlation IDs, heartbeat writer, wire-log redaction split), bulk-write tool, schema-reload tool, doctor probe expansion, and idempotency cache all land. Live verification requires a Windows + Lacerte + SDK box (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" section).
+**Status:** v0.1.0 scaffolding — all suites passing, 0 failures, 0 warnings (current pass/skip totals tracked in `HANDOFF.md` "Verify Before Continuing"; the skips are all live-only / fixture-gated). Read/Write/Create tools, simulation store, ODBC layer, COM bridge scaffolding, CLI, prompts, observability (correlation IDs, heartbeat writer, wire-log redaction split), bulk-write tool, schema-reload tool, doctor probe expansion, and idempotency cache all land. Live verification requires a Windows + Lacerte + SDK box (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" section).
 
 ## What this is
 
@@ -68,7 +68,7 @@ Or invoke the SDK directly:
 
 # Smoke-test the CLI
 & src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status
-& src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor   # exit 2 off-Windows = PARTIAL (Windows-only probes skipped); exit 1 = a probe failed (e.g. fresh checkout with no AppID — run `lacerte-mcp register` or let a sim test fixture seed it); exit 0 = all green (Windows + Lacerte install)
+& src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor   # exit 2 = PARTIAL (warnings, or Windows-only probes skipped off-Windows); exit 1 = a probe failed (e.g. fresh checkout with no AppID — run `lacerte-mcp register` or let a sim test fixture seed it); exit 0 = all green, no warns (Windows + Lacerte install)
 ```
 
 The MCP server binary is `src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe`. It runs in simulation mode by default off-Windows or when `LACERTE_SIMULATION=1`.
@@ -152,7 +152,15 @@ env:
 | `LACERTE_APP_ID` | runtime read-only | from Credential Manager | Source of truth is Windows Credential Manager (set via `lacerte-mcp register`). |
 | `LACERTE_DEBUG_WIRE` | optional | `0` | `1` logs COM + SQL to `logs/lacerte-YYYYMMDD.log`. Secrets redacted. |
 | `LACERTE_DEBUG_LOG_PATH` | optional | `./logs` | Override the log directory. |
-| `LACERTE_HEARTBEAT_SECONDS` | optional | `30` | Heartbeat JSON write cadence to `%TEMP%/lacerte-mcp-heartbeat.json` (pid, mode, auth countdown, build version). Set `0` to disable. External watchers read the file mtime + JSON to check liveness + 24h-auth state without speaking MCP. |
+| `LACERTE_LOG_LEVEL` | optional | `Information` | Minimum host log level (`Trace`..`Critical`/`None`). |
+| `LACERTE_ALLOW_UNC` | optional | unset | `1` permits `\\server\share` UNC paths for data paths / log dir; rejected otherwise. |
+| `LACERTE_DEBUG_LOG_MAX_BYTES` / `_MAX_DIR_BYTES` / `_RETENTION_DAYS` / `_RESULT_SAMPLE` / `_FULL_RESULTS` | optional | unset | Debug-log rotation caps, retention, result sampling. See `.env.example`. |
+| `LACERTE_HEARTBEAT_SECONDS` | optional | `30` | Heartbeat JSON write cadence to `%TEMP%/lacerte-mcp-heartbeat-{pid}.json` (per-process so multiple MCP hosts don't clobber each other; pid, mode, auth countdown, build version). `0`, negative, or an unparseable value disables; values above 86400 (24h) are clamped down to 86400. External watchers enumerate `lacerte-mcp-heartbeat-*.json` and read file mtime + JSON to check liveness + 24h-auth state without speaking MCP. |
+| `LACERTE_BULK_WRITE_MAX` | optional | `500` | Per-call entry cap shared by `lacerte_field_write_bulk` + `lacerte_detail_write_bulk`; exceeding throws 9020. |
+| `LACERTE_BULK_CREATE_MAX` | optional | `100` | Per-call entry cap for `lacerte_client_create_bulk`; exceeding throws 9020. |
+| `LACERTE_RECENT_LOG_CAPACITY` | optional | `256` | In-process `lacerte_recent_log` ring capacity (clamped 16..4096). |
+| `LACERTE_IDEMPOTENCY_PERSIST` | optional | on | Idempotency-cache disk persistence (replay protection across restarts) is **default ON**; only the exact string `0` disables it. |
+| `LACERTE_IDEMPOTENCY_PERSIST_PATH` | optional | `%APPDATA%/lacerte-mcp/idempotency-cache.json` | Override the persisted idempotency-cache path. |
 | `LACERTE_SIM_EXPIRED` | testing only | unset | `1` simulates an expired 24h auth session. |
 | `LACERTE_DATA_ROOT` | optional | `C:\Lacerte` | Root scanned by `lacerte_list_datapaths` when discovering `{YY}Tax\{Module}Data` folders. |
 | `LACERTE_MCP_FORCE_FILE_STORE` | testing / dev | unset | `1` bypasses Windows Credential Manager and uses the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json` (auto-on off-Windows). |
@@ -168,13 +176,13 @@ env:
    ```powershell
    & src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe doctor
    ```
-   Exit 0 means every probe is green. The doctor surface covers OS/runtime (Windows, x64, .NET 4.8, App.config shim), install (ODBC DSN, Lacerte SDK install dir, Lacerte COM ProgID), config (operating mode, LACERTE_DATA_PATH, LACERTE_DATA_ROOT, FieldAccessMap shards), and identity (AppID GUID) — see `src/LacertMCP.Cli/Commands/DoctorCommand.cs` XML doc for the canonical, always-current list. Exit 2 (PARTIAL) means at least one probe was skipped (typical off-Windows). Exit 1 means at least one probe genuinely failed.
+   Exit 0 means every probe is green with no warnings. The doctor surface covers OS/runtime (Windows, x64, .NET 4.8, App.config shim), install (ODBC DSN, Lacerte SDK install dir, Lacerte COM ProgID), config (operating mode, LACERTE_DATA_PATH, LACERTE_DATA_ROOT, FieldAccessMap shards), and identity (AppID GUID) — see `src/LacertMCP.Cli/Commands/DoctorCommand.cs` XML doc for the canonical, always-current list. Exit 2 (PARTIAL) means at least one probe warned or was skipped, with no failures (skips are typical off-Windows; warns print their remediation line). Exit 1 means at least one probe genuinely failed.
 4. **Run the one-time registration** ceremony:
    ```powershell
    & src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe register --app-name "Operator Lacerte MCP" --tax-year 2024
    ```
-   **Phase 9 caveat (v0.1.x):** Today this mints the AppID GUID and persists it to Windows Credential Manager, then exits **3** with a `[partial]` message on stderr explaining the Intuit consent ceremony is not yet wired (tracked as Phase 9 task #63 in `Todo.md`). The full live-mode boot path is not available until Phase 9 ships. **Simulation mode (the default off-Windows and on-Windows when `LACERTE_LIVE` is unset) works fully today** — you only hit the Phase-9 gap if you try to flip `LACERTE_LIVE=1`. Once Phase 9 lands, this command will additionally call `ITPRegistration.Register()` to surface the Intuit consent + sign-in dialog and exit 0.
-5. **Within 24 hours, set `LACERTE_LIVE=1` in your MCP client config** and the server will silently re-attach to the cached session. After 24h, run `lacerte-mcp login` to refresh (today this is also a Phase 9 stub — see the troubleshooting section below).
+   This mints (or reuses) the AppID GUID, persists it to Windows Credential Manager, then runs the **real Intuit consent ceremony** via `ITPRegistration.Register()` (`Bridge/Registration.cs`, wired in R6-05) — watch the desktop for the consent + Intuit sign-in dialogs. Exit **0** = `AccessGranted` (ceremony complete); exit **1** = the ceremony ran but did not grant access (ConsentDenied, NotSignedIn, etc.) or threw; exit **2** = PARTIAL — the Lacerte SDK COM surface is unavailable on this Windows box (AppID is persisted; install the 64-bit SDK MSI, confirm `lacerte-mcp doctor` shows the COM ProgID probe green, then re-run). The end-to-end ceremony against a real Intuit dialog remains Windows + Lacerte-box verification (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification"). **Simulation mode (the default off-Windows and on-Windows when `LACERTE_LIVE` is unset) needs none of this.**
+5. **Within 24 hours, set `LACERTE_LIVE=1` in your MCP client config** and the server will silently re-attach to the cached session. After 24h, run `lacerte-mcp login` to refresh (same exit-code contract as `register`).
 
 The `App.config` next to `LacertMCP.Server.exe` carries `useLegacyV2RuntimeActivationPolicy="true"` + `supportedRuntime v4.0 / .NETFramework v4.6` — load-bearing for the Lacerte mixed-mode CLR shim. Don't delete it.
 
@@ -204,39 +212,94 @@ If the first call returns `success: false` with `statusCode: 9007 LoginExpired` 
 
 ## Tools
 
-### Read tools (Phase 5)
+The server registers **42 MCP tools**, grouped below by the same categories `lacerte_help(topic: "tools")` reports (`HelpTools.ToolsByCategory()` is the authoritative categorization; a bidirectional parity test keeps it in lock-step with the registered surface). Paginated read envelopes return `rows`, `total`, `limit`, `offset`, `returnedCount`, `hasMore`, `nextOffset` (legacy `count` + per-domain aliases retained until v0.2).
 
-| Tool | What it does | Phase |
+### Session (6)
+
+| Tool | Params | What it does |
 | --- | --- | --- |
-| `lacerte_session_status` | Snapshot of mode, registration, 24h expiry, active context. Zero wire I/O. | 5 |
-| `lacerte_set_context` | Set the active (dataPath, taxYear, module) triple + optional readOnly flag. | 5 |
-| `lacerte_can_use_new_apis` | Whether (taxYear, module) supports TY21+ `UpdateTaxReturn`; cached per pair. | 5 |
-| `lacerte_list_modules` | The 9-module catalog (I/C/P/S/F/R/T/N/B) with names + ODBC ReturnType strings. | 5 |
-| `lacerte_list_datapaths` | Discover `{YY}Tax\{Module}Data` folders under `LACERTE_DATA_ROOT` (fallback `C:\Lacerte`). | 5 |
-| `lacerte_client_list` | List clients in the active context. Optional name-prefix filter + `limit`/`offset` pagination (returns `rows`, `total`, `limit`, `offset`, `hasMore`, `nextOffset`; legacy `count`/`clients` retained until v0.2). | 5 |
-| `lacerte_client_read` | Read one client by ClientNumber from DATA1. | 5 |
-| `lacerte_table_read` | Generic DBF table reader for DATA1..DATA7. Optional client + state filters and `limit`/`offset` pagination (returns `rows`, `total`, `limit`, `offset`, `hasMore`, `nextOffset`; legacy `count` retained until v0.2). | 5 |
-| `lacerte_subclient_read` | DATA2 subclient rows (dependents, partners, shareholders, beneficiaries). | 5 |
-| `lacerte_state_read` | DATA3 state rows for one client. Optional state filter. | 5 |
-| `lacerte_state_subclient_read` | DATA4 state-subclient rows for one client. Optional state filter. | 5 |
-| `lacerte_status_read` | DATA5 F4-status rows for one client (read-only). | 5 |
-| `lacerte_forms_read` | DATA7 form rows for one client (read-only). | 5 |
-| `lacerte_detail_read` | Per-client detail file rows (Series/Code/Amount/Description). | 5 |
-| `lacerte_ef_status` | TY19+ EFilings JOIN EFStatuses for the active context. | 5 |
-| `lacerte_health` | Health probe. Returns `{ mode, status }` (mode = `"simulation"`/`"live"`, status = `"reachable"`). When `LACERTE_HEARTBEAT_SECONDS > 0` (default 30s), the envelope also surfaces `{ heartbeatPath, heartbeatSeconds }` so an external watcher (Task Scheduler / NSSM / PowerShell) can detect a hung server via file mtime without speaking MCP. Set `LACERTE_HEARTBEAT_SECONDS=0` to disable. Live HRESULT probe via `_session.HealthProbe()` is a Phase-9 follow-up. | 0 |
+| `lacerte_session_status` | none | Snapshot of mode, registration, 24h expiry, active context, `nextSteps[]` hints. Zero wire I/O — call first. |
+| `lacerte_set_context` | `dataPath`, `taxYear`, `module`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
+| `lacerte_list_modules` | none | The 9-module catalog (I/C/P/S/F/R/T/N/B) with names + ODBC ReturnType strings. |
+| `lacerte_list_datapaths` | none | Discover `{YY}Tax\{Module}Data` folders under `LACERTE_DATA_ROOT` (fallback `C:\Lacerte`). |
+| `lacerte_can_use_new_apis` | `taxYear`, `module` | Whether (taxYear, module) supports TY21+ `UpdateTaxReturn`; cached per pair. |
+| `lacerte_health` | none | Health probe: `{ mode, status }` plus `{ heartbeatPath, heartbeatSeconds }` when the heartbeat writer is enabled. |
 
-### Write / Create / Metadata tools (Phases 6-8)
+### Clients (8)
 
-| Tool | What it does | Phase |
+| Tool | Params | What it does |
 | --- | --- | --- |
-| `lacerte_field_write` | Write one DBF field (pre-TY21 entrypoint). Params: `table`, `clientNumber`, `field`, `value`, `subClientId?`, `stateAbbrev?`, `dryRun?`, `idempotencyKey?`. Honors readOnly/dryRun/idempotencyKey. | 6 |
-| `lacerte_update_return` | Write one DBF field (TY21+ entrypoint, `UpdateTaxReturn`). Params: same as `lacerte_field_write`. Same gates as above. | 6 |
-| `lacerte_field_write_bulk` | N writes through one MCP call. Entries: `{clientNumber, field, value, subClientId?, stateAbbrev?}`. Optional `taxYear` / `readOnly` preflight + `continueOnError` flag. Per-row idempotency key is `{prefix}-{clientNumber}-{field}`. | 6 |
-| `lacerte_detail_write` | Append/replace a detail-file row with mandatory client-side validation. Required: `clientNumber`, `series`, `code`, `amount`, `description`. Optional (default empty): `prefix`, `suffix`, `stateAbbrev`, `cityAbbr`, `source`, `tsj`, `importSrc`. | 6 |
-| `lacerte_client_create` | Create a new client. Params: `clientId` (≤ 8 alphanumeric chars), `taxType`, `firstName`, `lastName`, `emailId`, `dryRun?`, `idempotencyKey?`. | 7 |
-| `lacerte_field_access_map` | Return per-field ReadOnly/ReadWrite/Hidden/NotExposed access map. Params: `module` (string, length-1), `table`, `taxYear`. | 8 |
-| `lacerte_return_codes` | Discoverable resource: all 28 TAPIStatus + 5 TPSDKStatus + 11 synthetic 9xxx codes. Each row carries both `origin` (TAPIStatus/TPSDKStatus/Synthetic) and `originGroup` (sdk/synthetic — matches the error-envelope `origin` field). | 8 |
-| `lacerte_reload_schema` | Drop the in-process FieldAccessMap caches so freshly written shards on disk take effect without restarting the server (which would invalidate the Intuit 24h auth ticket). Returns `{ modulesReloaded, overlaysReloaded, schemaRoot }`. | 13 |
+| `lacerte_client_list` | `nameFilter?`, `limit?`, `offset?` | List clients in the active context with optional case-insensitive name-substring filter. |
+| `lacerte_client_read` | `clientNumber` | Read one client by ClientNumber from DATA1. Returns `{ found, client, hint? }` — never a null envelope. |
+| `lacerte_client_find` | `name`, `limit?` | Resolve a plain-English name to ClientNumber(s); `didYouMean` Levenshtein fallback on 0 matches. |
+| `lacerte_client_query` | `fieldName`, `op`, `value?`, `table?`, `limit?`, `offset?` | Server-side filtered search over one DATA1..DATA7 table ("all clients missing an email"). Ops: `eq`/`ne`/`contains`/`startsWith`/`empty`/`notEmpty`. Only matching rows are returned; pagination applies to the filtered set. |
+| `lacerte_client_create` | `clientId`, `taxType`, `firstName`, `lastName`, `emailId`, `dryRun?`, `idempotencyKey?` | Create a new client (`clientId` ≤ 8 alphanumeric chars). |
+| `lacerte_client_create_bulk` | `entries[]`, `dryRun?`, `continueOnError?`, `idempotencyKey?` | Bulk-create N clients in one call (CSV-roster bootstrap). Capped at 100 entries by default (`LACERTE_BULK_CREATE_MAX`); per-row idempotency key is positional `{prefix}-{index}-{clientId}`. |
+| `lacerte_client_summary` | `clientNumber`, `includeDetail?` | One-call client snapshot (identity + counts + states + flags + EF status) replacing 5-7 round-trips. |
+| `lacerte_export_client` | `clientNumber` | Portable resource-style envelope keyed by `lacerte://client/{clientNumber}` with a context echo. |
+
+### Tables (7)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_table_read` | `table`, `clientNumber?`, `stateAbbrev?`, `limit?`, `offset?` | Generic DBF table reader for DATA1..DATA7 (DATA8 rejected; 6/7 read-only). |
+| `lacerte_subclient_read` | `clientNumber`, `limit?`, `offset?` | DATA2 subclient rows (dependents, partners, shareholders, beneficiaries). |
+| `lacerte_state_read` | `clientNumber`, `stateAbbrev?`, `limit?`, `offset?` | DATA3 state rows for one client. Optional state filter. |
+| `lacerte_state_subclient_read` | `clientNumber`, `stateAbbrev?`, `limit?`, `offset?` | DATA4 state-subclient rows for one client. Optional state filter. |
+| `lacerte_status_read` | `clientNumber`, `limit?`, `offset?` | DATA5 F4-status rows for one client (read-only). |
+| `lacerte_forms_read` | `clientNumber`, `limit?`, `offset?` | DATA7 form rows for one client (read-only). |
+| `lacerte_detail_read` | `clientNumber`, `limit?`, `offset?`, `series?` | Per-client detail file rows (Series/Code/Amount/Description) with optional series push-down. |
+
+### Writes (5)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_field_write` | `table`, `clientNumber`, `field`, `value`, `subClientId?`, `stateAbbrev?`, `dryRun?`, `idempotencyKey?` | Write one DBF field (the session manager year-routes pre-TY21 vs TY21+). Honors readOnly/dryRun/idempotencyKey. |
+| `lacerte_update_return` | same as `lacerte_field_write` | TY21+ `UpdateTaxReturn`-named alias; behavior identical. Prefer `lacerte_field_write`. |
+| `lacerte_field_write_bulk` | `table`, `entries[]`, `taxYear?`, `readOnly?`, `dryRun?`, `continueOnError?`, `idempotencyKey?`, `expectedCount?` | N field writes through one MCP call. Capped at 500 (`LACERTE_BULK_WRITE_MAX`). Per-row idempotency key is positional `{prefix}-{index}-{clientNumber}-{field}`. |
+| `lacerte_detail_write` | `clientNumber`, `series`, `code`, `amount`, `description`, 7 optional row-key segments, `replaceIndex?`, `dryRun?`, `idempotencyKey?` | Append (or sim-only replace) a detail-file row with mandatory client-side validation. |
+| `lacerte_detail_write_bulk` | `entries[]`, `dryRun?`, `continueOnError?`, `idempotencyKey?` | Bulk-append detail rows across one or many clients (intake W-2/1099/dependent seeding). Shares the 500 cap with `lacerte_field_write_bulk` (`LACERTE_BULK_WRITE_MAX`); per-row idempotency key is positional `{prefix}-{index}-{clientNumber}-{series}-{code}`. |
+
+### E-file (1)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_ef_status` | `sinceUtc?`, `limit?`, `offset?` | TY19+ EFilings JOIN EFStatuses for the active context; `sinceUtc` for incremental delta polls. |
+
+### Dashboards (1)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_firm_dashboard` | `yearFilter?`, `modulesFilter?`, `sinceUtc?` | Firm-wide snapshot fanning across every (taxYear, module) under `LACERTE_DATA_ROOT`. Context snapshot/restore; scan serialized against `lacerte_year_over_year` via an internal gate. |
+
+### Accelerators (4)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_diff_clients` | `client1Number`, `client2Number`, `includeSubclients?`, `includeStates?`, `includeDetail?`, `ignoreFields?` | Field-by-field diff of two clients; detail rows compared across all 11 `DetailRow` fields; keyless rows reported via `rowsWithoutKey`. |
+| `lacerte_pre_filing_check` | `clientNumber`, `severity?` | Pre-filing readiness rules for modules I/P/C/S (1040/1065/1120/1120S); not-applicable rules surface in `skippedRules`, never silently pass. F/R/T/N/B return `readiness="unsupported-module"`. |
+| `lacerte_year_over_year` | `clientNumber`, `fromYear`, `toYear`, `scope?`, `seriesIds?` | Diff one client across two tax years. Envelope carries `foundInFromYear`/`foundInToYear` so a typo'd clientNumber can't read as "no changes". |
+| `lacerte_field_history` | `clientNumber`, `field`, `sinceUtc?`, `limit?` | Audit history for one (client, field) pair from the WireLog JSONL (requires `LACERTE_DEBUG_WIRE=1`). Rows carry `succeeded`; newest rows kept on truncation; `limit` clamped to 1000. |
+
+### Observability (5)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_recent_log` | `cid?`, `limit?` | In-process WireLog ring tail (always-on, independent of `LACERTE_DEBUG_WIRE`). |
+| `lacerte_request_stats` | none | Process-lifetime aggregate counters (per-op latency percentiles, idempotency hits/misses/conflicts). |
+| `lacerte_cache_state` | none | Snapshot of the idempotency / new-APIs / edition-probe caches. |
+| `lacerte_resource_usage` | none | Process telemetry (memory, handles, threads, GC). |
+| `lacerte_active_locks` | `limit?` | Currently-held idempotency write semaphores. |
+
+### Meta (5)
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_field_access_map` | `module`, `table`, `taxYear` | Per-field ReadOnly/ReadWrite/Hidden/NotExposed access map. |
+| `lacerte_return_codes` | none | All 28 TAPIStatus + 5 TPSDKStatus + synthetic 9xxx codes with `origin`/`originGroup` discriminators. |
+| `lacerte_reload_schema` | none | Drop in-process FieldAccessMap caches so fresh shards take effect without a restart (a restart invalidates the 24h auth ticket). |
+| `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 42 tools by category, env vars, limits, first-call, prompts. |
+| `lacerte_prompts` | `name?` | List or fetch the 4 canonical workflow prompt bodies inline. |
 
 ## Prompts
 
@@ -321,10 +384,10 @@ One-time AppID mint + Intuit consent + sign-in ceremony. Mints a per-install App
 
 Must be run from an **interactive PowerShell** (not a service / scheduled task) so the consent dialog can surface.
 
-**Exit codes:**
-- `0` — fully complete (Phase 9+: AppID minted AND Intuit ceremony succeeded; today: only on non-Windows where the ceremony is intentionally skipped for cross-platform dev convenience).
-- `1` — hard failure (IO error writing the AppID store; missing required args).
-- `3` — **partial / Phase 9 incomplete:** AppID was minted (or re-used) and persisted, but the Intuit consent ceremony was not invoked. Today this is the expected outcome on Windows. Wrapping PowerShell scripts must treat exit 3 as "AppID step ready, live-mode boot blocked until Phase 9 ships" — not as a hard failure to retry.
+**Exit codes** (aligned with doctor's 0 green / 1 red / 2 partial convention; exit 3 is **retired** for register/login — wrapping scripts written against the old `[partial]` exit-3 contract must be updated):
+- `0` — `AccessGranted (201)`: the ceremony completed and the 24h sign-in ticket is live. Also exit 0 off-Windows, where the ceremony is impossible by definition — the command prints `[skipped]`, persists the AppID, and stays green for cross-platform dev smoke loops.
+- `1` — the ceremony ran but did not grant access (`ConsentDenied`, `NotSignedIn`, `RegVersionBlocked`, `LacerteTaxSetupRequired`, or an unknown status), or it threw a real error. The catalog name + remediation print on stderr.
+- `2` — **PARTIAL:** on Windows but the Lacerte SDK COM surface is unavailable (`BridgeUnavailable` — ProgID missing / COM activation failed). The AppID is persisted and intact; install the 64-bit SDK MSI, confirm `lacerte-mcp doctor` shows the "Lacerte COM ProgID" probe green, then re-run.
 
 ### `lacerte-mcp login [--app-name X] [--tax-year Y]`
 
@@ -333,7 +396,7 @@ Re-call `Register()` to refresh the 24h Intuit auth ticket. Use this when `lacer
 - `--app-name` (default `Operator Lacerte MCP`)
 - `--tax-year` (default = prior calendar year)
 
-**Exit codes:** same shape as `register`. Code `3` means the 24h ticket refresh did not actually fire (today's Phase 9 stub) — tools will return `LoginExpired (9007)` once the current ticket lapses.
+**Exit codes:** same contract as `register` — `0` AccessGranted (or off-Windows no-op), `1` failed refresh (including "no AppID minted yet — run `lacerte-mcp register` first"), `2` PARTIAL (SDK COM surface unavailable). A failed refresh exits loudly so a cron wrapper can alarm instead of silently letting the ticket lapse.
 
 ### `lacerte-mcp status [--show-app-id] [--json]`
 
@@ -348,7 +411,7 @@ Wipe the persisted AppID GUID from the active storage backend (Windows Credentia
 
 ### `lacerte-mcp tools [--json] [--filter <regex>] [--name <exact>] [--names-only]`
 
-List every MCP tool the server registers, by reflecting over the `LacertMCP.Server` assembly. Mirrors the SDK's own `WithToolsFromAssembly()` discovery — no stdio transport boot required, runs anywhere (including off-Windows). Useful for sanity-checking the tool surface before pasting into a Claude Desktop / Cursor MCP config, or for quick before/after diffs between Phase milestones.
+List every MCP tool the server registers, by reflecting over the `LacertMCP.Server` assembly. Mirrors the SDK's own `WithToolsFromAssembly()` discovery — no stdio transport boot required, runs anywhere (including off-Windows). Parameter listings mirror the MCP wire schema (`CancellationToken` parameters are excluded). Useful for sanity-checking the tool surface before pasting into a Claude Desktop / Cursor MCP config, or for quick before/after diffs between Phase milestones.
 
 - Default human-readable table: tool name, description, parameter names + types.
 - `--json` emits a machine-parseable array of `{ name, description, declaringType, parameters[] }` triples.
@@ -383,24 +446,24 @@ Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<modu
 
 Setup verification across OS/runtime, install, config, and identity probes (canonical list in `src/LacertMCP.Cli/Commands/DoctorCommand.cs` XML doc — currently 13 probes spanning Build version, Windows version, x64 process, App.config runtime shim, .NET 4.8, ODBC DSN `LacerteDSII`, Lacerte SDK install, Lacerte COM ProgID, Operating mode (sim/live with conflict warnings), `LACERTE_DATA_PATH` (env + dir-exists), `LACERTE_DATA_ROOT` (env + dir-exists), FieldAccessMap base shards, persisted AppID). Exit-code contract:
 
-- `0` — every probe green.
+- `0` — every probe green, no warnings.
 - `1` — at least one probe failed (e.g. fresh checkout with no AppID; ODBC DSN missing).
-- `2` — at least one probe was skipped (no fails) — typical off-Windows result since the Windows-only probes can't run.
+- `2` — **PARTIAL**: at least one probe warned (advisory — its remediation line is printed) or was skipped (no fails). Skips are the typical off-Windows result since the Windows-only probes can't run; warn-only runs land here too (R6-29 — a warn-only box no longer claims "all probes green" with exit 0).
 - `3` is **not used by doctor** — it is reserved across the CLI for "not implemented here" verbs (see `field-access discover`).
 
 ## Troubleshooting
 
 The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry, a 32-bit-vs-64-bit MSI trap, a mixed-mode CLR shim, and ODBC DSN configuration. The most common symptoms and their fixes:
 
-### `lacerte-mcp register` exits 3 with `[partial]` on stderr (v0.1.x expected state)
+### `lacerte-mcp register` exits 2 with `PARTIAL` on stderr
 
-- **Symptom:** The command prints the AppID, then a `[partial] AppID minted, but the Intuit consent ceremony is not yet wired into the CLI (Phase 9 task #63)` line on stderr, and exits 3.
-- **Diagnosis:** This is the documented v0.1.x state — Phase 9 task #63 has not landed. The AppID half succeeded; the Intuit consent half is a stub.
-- **Fix:** Use simulation mode (do not set `LACERTE_LIVE=1`) until Phase 9 ships. Watch `Todo.md` Phase 9 #63 (`Bridge/Registration.cs`) for the upgrade. Once it lands, re-run `lacerte-mcp register` and the consent dialog will surface.
+- **Symptom:** The command prints the AppID, then `PARTIAL: AppID is persisted, but the consent ceremony could not run — the Lacerte SDK COM surface is unavailable on this machine.` on stderr, and exits 2.
+- **Diagnosis:** The `TPRegistration` ProgID doesn't resolve / COM activation failed — the 64-bit Lacerte SDK MSI isn't installed (or the 32-bit one is). The AppID half succeeded and is persisted.
+- **Fix:** Install the 64-bit Lacerte SDK MSI, confirm `lacerte-mcp doctor` shows the "Lacerte COM ProgID" probe green, then re-run `lacerte-mcp register`. (Older docs/scripts referenced an exit-3 `[partial]` Phase-9 stub — that contract is retired; the ceremony is now wired via `Bridge/Registration.cs`.)
 
-### `lacerte-mcp register` opened no dialog after Phase 9 lands (or hangs)
+### `lacerte-mcp register` opened no dialog (or hangs)
 
-- **Symptom:** Post-Phase-9, the command exits 0 but no Intuit consent window appeared.
+- **Symptom:** The command exits without surfacing an Intuit consent window.
 - **Diagnosis:** Run from a **non-interactive** shell (SSH session, Windows service, scheduled task) — the Intuit ITPRegistration COM call needs a desktop session to surface its UI.
 - **Fix:** Open a normal interactive PowerShell on the operator's desktop session and re-run `lacerte-mcp register`. Confirm with `lacerte-mcp status` that `registered: true`.
 
@@ -408,8 +471,8 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 
 - **Symptom:** Reads + writes that worked yesterday now fail with status `LoginExpired (9007)` (proactive expiry probe) or raw SDK `NotSignedIn (203)` (if the reactive path slips past the probe). Both envelopes include the remediation `Run lacerte-mcp register (or lacerte-mcp login) to re-authenticate`.
 - **Diagnosis:** Intuit's auth ticket has a 24-hour lifetime. The session manager surfaces a clear remediation, but operators can short-circuit it.
-- **Fix:** From an interactive PowerShell, run `lacerte-mcp login --app-name "Operator Lacerte MCP" --tax-year 2024`. This re-calls `Register()` to mint a fresh 24h ticket using the existing AppID.
-  - **Until Phase 9 ships, `lacerte-mcp login` also exits 3 with `[partial]`** — there is no manual ticket refresh available in v0.1.x; the only workable mode today is simulation. The earlier draft of this section referred to `NotSignedIn (9101)` / `TicketExpired (9103)` — both incorrect: `9101` is `ReAuthRequired` (a reserved-but-not-thrown code) and `9103` is `InvalidAppId` (the bridge-boundary AppID shape check), not a 24h expiry symptom.
+- **Fix:** From an interactive PowerShell, run `lacerte-mcp login --app-name "Operator Lacerte MCP" --tax-year 2024`. This re-calls `Register()` to mint a fresh 24h ticket using the existing AppID. Exit 0 = `AccessGranted`; exit 1 = the refresh failed loudly (status name + remediation on stderr); exit 2 = SDK COM surface unavailable.
+  - The earlier draft of this section referred to `NotSignedIn (9101)` / `TicketExpired (9103)` — both incorrect: `9101` is `ReAuthRequired` (a reserved-but-not-thrown code) and `9103` is `InvalidAppId` (the bridge-boundary AppID shape check), not a 24h expiry symptom.
 
 ### `lacerte_field_write` or `lacerte_detail_write` crashes the server with an INSERT error
 
@@ -429,7 +492,7 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 - **Diagnosis:** Three independent failure modes — boot crash, broken assembly registration, or host-config mismatch — present with the same silent symptom because most MCP hosts swallow the spawned process's stderr by default.
 - **Fix (3-step diagnostic ladder):**
   1. **Confirm the server binary actually boots.** From PowerShell on the same machine the host is running on, run `& "C:\path\to\LacertMCP.Server.exe"` directly (use the absolute path you put in the host config). If it exits immediately with a CLR loader error, jump to the `BadImageFormatException` entry above (App.config missing or modified). If it hangs waiting for stdio input, that is healthy — Ctrl+C and continue to step 2.
-  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists ~22 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
+  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists 42 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
   3. **Inspect the host's stderr capture for the spawned process.** Claude Desktop writes spawned-MCP stderr to `%APPDATA%\Claude\logs\mcp*.log` (one file per server, named after the `mcpServers` key). Cursor writes to its own `~/.cursor/logs/` tree; Windsurf surfaces it in its log pane. The exit code and any uncaught exception will be there. If the log is empty, the host may not be invoking the binary at all — re-check the config path on disk.
 
 ### `lacerte_field_write` returned success but my change is not visible in Lacerte

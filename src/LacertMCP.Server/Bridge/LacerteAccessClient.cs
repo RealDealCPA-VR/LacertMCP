@@ -80,8 +80,9 @@ namespace LacertMCP.Server.Bridge
         {
             EnsureLive();
             // Live verification deferred to Windows + Lacerte box.
-            // Delegate to the static Registration helper which holds the
-            // ITPRegistration reference per agent 02 §5.
+            // Delegate to the static Registration helper, which creates the
+            // ITPRegistration RCW per-call and releases it in a finally
+            // (R6-14 / P14-004).
             // F11 — wrap with WireLog. appId redacted (not in op args).
             return WireLog.RecordSync<int>("Bridge.Register",
                 new { appName, taxYear },
@@ -110,12 +111,19 @@ namespace LacertMCP.Server.Bridge
             // XML parse — for now defer to Reader for the raw XML and let
             // callers parse, OR throw BridgeUnavailable when ODBC is the
             // intended path (it is, 99%+).
-            var table = "DATA1";
-            var xml = Reader.ReadFromDBFData(appId: string.Empty, dataPath: dataPath, dbf: table);
+            //
+            // R6-15 — build the full DATA1{module}{YY}.DBF name (e.g.
+            // DATA1I24.DBF) instead of the bare "DATA1" that
+            // BridgeInputValidation.ValidateDbfName rejects (it requires the
+            // NAME.EXT shape), which made this path throw DBNotSupported on
+            // every live call with a misleading remediation. year/module are
+            // no longer discarded.
+            var dbf = FormatDbfName(table: 1, module: module, year: year);
+            var xml = Reader.ReadFromDBFData(appId: string.Empty, dataPath: dataPath, dbf: dbf);
             // Parsing the XML payload into a row-dict shape is a Phase 11
             // hardening task — for now return an empty list with a TODO so
             // the operator surface doesn't crash but the gap is loud.
-            _ = year; _ = module; _ = xml;
+            _ = xml;
             // TODO Phase 11: parse Reader XML into row dicts here.
             return Array.Empty<IReadOnlyDictionary<string, object?>>();
         }
@@ -165,10 +173,12 @@ namespace LacertMCP.Server.Bridge
             EnsureLive();
             // Live verification deferred to Windows + Lacerte box.
             var dbf = FormatDbfName(table, module, year);
-            // F11 — wrap with WireLog.
-            return WireLog.RecordSync<int>("Bridge.WriteField",
-                new { dbf, rowNum, field, value },
-                () => Writer.WriteToDBFDatabase(appId, dataPath, dbf, rowNum, field, value));
+            // R6-34 — no outer WireLog wrapper here. Writer.WriteToDBFDatabase
+            // emits the canonical "Bridge.WriteToDBFDatabase" record AFTER its
+            // BridgeInputValidation pass; an outer wrapper double-logged every
+            // write and logged rejected args, defeating Writer's
+            // validate-before-log contract.
+            return Writer.WriteToDBFDatabase(appId, dataPath, dbf, rowNum, field, value);
         }
 
         public int UpdateTaxReturn(
@@ -179,10 +189,11 @@ namespace LacertMCP.Server.Bridge
             EnsureLive();
             // Live verification deferred to Windows + Lacerte box.
             var dbf = FormatDbfName(table, module, year);
-            // F11 — wrap with WireLog.
-            return WireLog.RecordSync<int>("Bridge.UpdateTaxReturn",
-                new { dbf, clientNumber, field, value, subClientId, stateAbbrev },
-                () => Writer.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev));
+            // R6-34 — no outer WireLog wrapper here. Writer.UpdateTaxReturn
+            // emits the canonical "Bridge.UpdateTaxReturn" record AFTER its
+            // BridgeInputValidation pass; the outer wrapper with the SAME op
+            // name double-logged every write and logged rejected args.
+            return Writer.UpdateTaxReturn(appId, dataPath, dbf, clientNumber, field, value, subClientId, stateAbbrev);
         }
 
         public int WriteDetail(
@@ -211,11 +222,11 @@ namespace LacertMCP.Server.Bridge
                         ["replaceIndex"] = replaceIndex.Value,
                     });
             }
-            // F11 — wrap with WireLog. row is logged verbatim; WireLog.Redact
-            // strips SSN/EIN/BankAccountNumber/RoutingNumber.
-            return WireLog.RecordSync<int>("Bridge.WriteDetail",
-                new { clientNumber, row },
-                () => Writer.WriteDetail(appId, dataPath, clientNumber, row));
+            // R6-34 — no outer WireLog wrapper here. Writer.WriteDetail emits
+            // the canonical "Bridge.WriteDetail" record AFTER its
+            // BridgeInputValidation pass; the outer wrapper with the SAME op
+            // name double-logged every write and logged rejected args.
+            return Writer.WriteDetail(appId, dataPath, clientNumber, row);
         }
 
         // =================================================================
@@ -256,11 +267,20 @@ namespace LacertMCP.Server.Bridge
                 // the SDK ref.
                 dynamic com = _comInstance!;
                 _ = year; _ = module;
+                // R6-14 — capture the intermediate RCWs (IClientList + IClient)
+                // in object slots so they can be released per-call, following
+                // the P14-004 pattern from Writer.cs / CanUseNewApisProbe.
+                // Without this, every CreateClient (x4 under AutoReconnect
+                // retries) leaked two RCWs for the process lifetime.
+                object? clientListObj = null;
+                object? clientObj = null;
                 try
                 {
                     dynamic clientList = com.IClientList;
+                    clientListObj = (object?)clientList;
                     clientList.SetDataPath(dataPath);
                     dynamic client = clientList.IClient(taxType, clientId, emailId, firstName, lastName);
+                    clientObj = (object?)client;
                     int status = (int)client.CreateClient();
                     string? assigned = status == 1 ? (string?)client.ClientNumber : null;
                     return new BridgeCreateClientResult(status, assigned);
@@ -278,6 +298,35 @@ namespace LacertMCP.Server.Bridge
                             ["clientId"] = clientId,
                             ["reason"] = ex.Message,
                         }, ex);
+                }
+                finally
+                {
+                    // P14-004 — release RCWs per-call to avoid COM leak.
+                    // Release in reverse acquisition order (client before its
+                    // parent list). Marshal.IsComObject guards against managed
+                    // fakes substituted by tests/harnesses.
+                    if (clientObj != null)
+                    {
+                        try
+                        {
+                            if (Marshal.IsComObject(clientObj))
+                            {
+                                Marshal.ReleaseComObject(clientObj);
+                            }
+                        }
+                        catch (Exception) { /* best-effort */ }
+                    }
+                    if (clientListObj != null)
+                    {
+                        try
+                        {
+                            if (Marshal.IsComObject(clientListObj))
+                            {
+                                Marshal.ReleaseComObject(clientListObj);
+                            }
+                        }
+                        catch (Exception) { /* best-effort */ }
+                    }
                 }
             });
         }
@@ -315,12 +364,19 @@ namespace LacertMCP.Server.Bridge
         /// <summary>
         /// Builds the DBF filename per agent 03 §3 / spec §2:
         /// <c>DATA{n}{moduleChar}{YY}.DBF</c>, e.g. <c>DATA1I24.DBF</c>.
+        /// <para>
+        /// Internal (R6-15) so the name-construction contract is unit-testable
+        /// without a COM round-trip. The module char is uppercased defensively
+        /// because <c>BridgeInputValidation.ValidateDbfName</c> only accepts
+        /// uppercase ASCII.
+        /// </para>
         /// </summary>
-        private static string FormatDbfName(int table, char module, int year)
+        internal static string FormatDbfName(int table, char module, int year)
         {
             // YY = last two digits of the tax year.
             var yy = (year % 100).ToString("D2");
-            return string.Concat("DATA", table.ToString(), module.ToString(), yy, ".DBF");
+            return string.Concat("DATA", table.ToString(),
+                char.ToUpperInvariant(module).ToString(), yy, ".DBF");
         }
 
         public void Dispose()

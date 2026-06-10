@@ -60,6 +60,10 @@ namespace LacertMCP.Tests.Tools
             var result = root.GetProperty("result");
             Assert.Equal(0, result.GetProperty("summary").GetProperty("totalClients").GetInt32());
             Assert.Equal(0, result.GetProperty("summary").GetProperty("totalEfRows").GetInt32());
+            // R6-33b — renamed key: per-tuple count, not per-module.
+            Assert.Equal(0, result.GetProperty("summary").GetProperty("totalTuplesScanned").GetInt32());
+            Assert.False(result.GetProperty("summary").TryGetProperty("totalModulesScanned", out _),
+                "Legacy `totalModulesScanned` key must be gone (R6-33b).");
             Assert.Equal(0, result.GetProperty("byContext").GetArrayLength());
             var hist = result.GetProperty("summary").GetProperty("statusHistogram");
             Assert.True(hist.TryGetProperty("Accepted", out var acc));
@@ -104,6 +108,8 @@ namespace LacertMCP.Tests.Tools
             var root = ToolTestHelpers.Parse(await tools.LacerteFirmDashboard());
             Assert.True(root.GetProperty("success").GetBoolean());
             var result = root.GetProperty("result");
+            // R6-33b — summary counts tuples scanned.
+            Assert.Equal(1, result.GetProperty("summary").GetProperty("totalTuplesScanned").GetInt32());
             var byContext = result.GetProperty("byContext");
             Assert.Equal(1, byContext.GetArrayLength());
             var tuple = byContext[0];
@@ -200,6 +206,30 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(beforeCtx.Year, afterCtx.Year);
             Assert.Equal(beforeCtx.Module, afterCtx.Module);
             Assert.Equal(beforeCtx.ReadOnly, afterCtx.ReadOnly);
+        }
+
+        // R6-09 — the context-scan gate is released after the dashboard
+        // completes (success path) AND after a failing run (the root-missing
+        // throw happens before acquisition; a per-tuple error path is
+        // covered by the success-envelope run). A leaked hold would
+        // deadlock the next dashboard/YoY call forever, so assert the gate
+        // is back to its single free slot.
+        [Fact]
+        public async Task FirmDashboard_ReleasesContextScanGate_R6_09()
+        {
+            using var scope = new DataRootScope();
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(scope.TempDir, "24Tax", "IData"));
+            var mgr = ToolTestHelpers.NewSimManager();
+            var tools = new FirmDashboardTools(mgr);
+
+            var root = ToolTestHelpers.Parse(await tools.LacerteFirmDashboard());
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
+
+            // A second run immediately after must not block (gate free).
+            var root2 = ToolTestHelpers.Parse(await tools.LacerteFirmDashboard());
+            Assert.True(root2.GetProperty("success").GetBoolean());
+            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
         }
 
         [Fact]

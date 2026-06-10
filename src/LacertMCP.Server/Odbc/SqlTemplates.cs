@@ -85,6 +85,19 @@ namespace LacertMCP.Server.Odbc
         /// <para><paramref name="nameColumn"/> is the C1_N column to filter on
         /// (typically C1_2 for individual modules, C1_1 for entity modules).
         /// It is validated as a C{t}_N identifier to prevent SQL injection.</para>
+        /// <para>R6-37 — LIKE wildcards <c>%</c> and <c>_</c> embedded in
+        /// <paramref name="namePrefix"/> are STRIPPED, not escaped. The
+        /// Lacerte ODBC dialect is FoxPro-style: VFP SQL <c>LIKE</c> supports
+        /// only <c>%</c>/<c>_</c> wildcards — no <c>[charlist]</c> bracket
+        /// classes (those are Access/SQL Server extensions) and no reliable
+        /// <c>ESCAPE</c> clause — so there is no portable way to express a
+        /// LITERAL percent/underscore in the pattern. Stripping matches the
+        /// sim's StartsWith semantics as closely as the dialect allows: the
+        /// sim treats "Smi_" as a literal 4-char prefix; live can't, so both
+        /// effectively filter on the literal characters that remain, and an
+        /// operator-supplied "%" can no longer silently widen a prefix filter
+        /// into a match-everything scan. No injection risk either way (quotes
+        /// are doubled separately) — this is a semantics fix.</para>
         /// <para>Same OFFSET caveat as <see cref="Data1Top"/>: callers needing a
         /// stable <c>total</c> must overfetch and slice in-memory.</para>
         /// </summary>
@@ -92,7 +105,7 @@ namespace LacertMCP.Server.Odbc
         {
             ValidateLimit(limit);
             ValidateColumn(nameColumn);
-            var safePrefix = EscapeSqlLiteral(namePrefix);
+            var safePrefix = EscapeSqlLiteral(StripLikeWildcards(namePrefix));
             return $"select top {limit} * from [DATA1-Client Info] where {nameColumn} like '{safePrefix}%'";
         }
 
@@ -368,6 +381,17 @@ namespace LacertMCP.Server.Odbc
         {
             if (input == null) return string.Empty;
             return input.Replace("'", "''");
+        }
+
+        // R6-37 — remove LIKE wildcard metacharacters from an operator-
+        // supplied prefix before it is inlined into a LIKE pattern. See the
+        // Data1TopWhereName doc comment for why stripping (not bracket-
+        // escaping) is the only portable option on the FoxPro-style Lacerte
+        // ODBC dialect.
+        private static string StripLikeWildcards(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return string.Empty;
+            return input.Replace("%", string.Empty).Replace("_", string.Empty);
         }
     }
 }

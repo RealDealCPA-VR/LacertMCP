@@ -535,3 +535,28 @@ Defense-in-depth: higher tool-layer gates (`DetailsTools.ValidateDetailWrite`, `
 - **Line-number drift policy**: this entry cites line ranges with a member-name anchor (`_diskRedactionKeys at line 176`) rather than a bare line range so future refactors that shift code by ±20 lines don't break the citation the way the superseded entry's bare `line 62-64` reference broke.
 
 **Source:** `audit-findings-r3.json` P16-034; `src/LacertMCP.Server/Logging/WireLog.cs:176, 222, 262, 285`; supersedes the 2026-05-30 "WireLog format + PII redaction policy" entry above; round-2 work cross-references P14-018 / P14-019 / P15-001 / P15-006 / P15-017 / P15-018 / P15-019.
+
+---
+
+## 2026-06-10 — AutoReconnect transient-retry is unsafe for append-only wire ops — retry anyway, verify after (R6-41)
+
+**Chosen:** `AutoReconnect.WithRetry` / `WithRetrySync` retry transient COM/RPC failures (the four whitelisted HRESULTs) for EVERY wrapped wire op, **including the append-only ones** — `WriteDetail` (SDK `WriteToDetailFile` only appends, spec §2), `CreateClient` (appends a DATA1 row + mints a ClientNumber), and `Register` (mints/refreshes the 24h ticket). There is no write-op carve-out from the retry policy.
+
+This entry documents the policy that three code comments have cited since P18 (`Session/LacerteSessionManager.cs` Register ~"P18 — opName threads through…", WriteDetail ~"P18 — opName=\"WriteDetail\" surfaces in the retry log…", CreateClient ~"P18 — opName surfaces in retry log records…", and `Resilience/AutoReconnect.cs` `WithRetry` XML doc). The entry did not previously exist (audit R6-41); the comments were referencing intent that was never written down. The short reference phrase those comments use — "AutoReconnect transient-retry is unsafe for append-only wire ops" — names THIS entry.
+
+**The hazard being accepted:** a transient HRESULT can surface AFTER the SDK has already committed the write (e.g. the RPC channel drops between the SDK's commit and the marshalled return). The retry then re-executes a committed op:
+- `WriteDetail` — re-append → duplicate detail row (no primary key, so the SDK happily appends twice);
+- `CreateClient` — attempt 2 hits the duplicate-ClientID rejection, which can MASK the fact that attempt 1 succeeded (the operator sees DuplicateClient and may assume the client never got created);
+- `Register` — benign (idempotent re-auth).
+
+**Why the risk is accepted (rather than excluding writes from retry):**
+1. The whitelisted HRESULTs (`RPC_S_SERVER_UNAVAILABLE`, `RPC_E_DISCONNECTED`, `RPC_E_SERVERCALL_RETRYLATER`, `0x80010001`) overwhelmingly fire at call DISPATCH (server gone, busy, filter rejection) — i.e. before the SDK ever ran — not on the post-commit return path. The double-commit window is real but narrow.
+2. Every retry is observable: P15-014/P18 emit `AutoReconnect.retry` and `AutoReconnect.exhausted` WireLog records carrying `opName`, so a forensic grep distinguishes a retried read (ignorable) from a retried append-only write (verify). `StatsRegistry` counters surface aggregate retry pressure via `lacerte_request_stats`.
+3. The alternative — never retrying writes — converts every transient COM blip into an operator-visible failure on exactly the highest-stakes ops, and the operator's natural reaction (manually re-running the tool) carries the SAME double-commit risk with less telemetry.
+4. The idempotency layer (P14-005/P17-004) absorbs the operator-level retry path: a keyed retry of an already-Succeeded write replays from cache instead of touching the wire again.
+
+**Operator guidance (the load-bearing part):** when a retry-exhausted error (`Exception.Data["AutoReconnect.Exhausted"]=true`) — or any `AutoReconnect.retry` log line — follows a `WriteDetail` or `CreateClient`, do NOT blindly re-issue the write. Verify with a read-after-write first: `lacerte_detail_read` (count + inspect the target rows) after `WriteDetail`; `lacerte_list_clients` / `lacerte_read_client` (look for the ClientID) after `CreateClient`. Re-issue only if the write demonstrably did not land; if a duplicate landed, the recovery is `replaceIndex` row correction in sim (live row correction is still gated by 9019 LiveReplaceIndexUnsupported — see the missing-tools list).
+
+**Downstream:** any NEW append-only bridge op wrapped in `AutoReconnect.WithRetry` MUST pass `opName` so its retries are greppable, and its tool docs should repeat the read-after-write guidance. If live verification (Phase 9+) shows post-commit transients are more common than assumed, revisit with a write-specific policy (e.g. retry only `RPC_E_SERVERCALL_RETRYLATER` for writes).
+
+**Source:** audit `audit-findings-r6.md` R6-41; `src/LacertMCP.Server/Resilience/AutoReconnect.cs`; `src/LacertMCP.Server/Session/LacerteSessionManager.cs` (Register / WriteDetail / CreateClient AutoReconnect call sites).

@@ -26,6 +26,11 @@ namespace LacertMCP.Tests.Tools
     /// reintroduce the casing drift or the inner-`success`/`year` /
     /// `clientID` variants the cluster removed.
     /// </summary>
+    // R6-07/R6-09 — class joined the DataRootEnvCollection because the YoY
+    // sentinel below acquires the process-wide ContextScanGate; serializing
+    // with the other gate-exercising test classes keeps their gate-free
+    // assertions deterministic.
+    [Xunit.Collection(LacertMCP.Tests.DataRootEnvCollection.Name)]
     public class NamingConventionsTests
     {
         // -----------------------------------------------------------------
@@ -507,6 +512,151 @@ namespace LacertMCP.Tests.Tools
                 offenders.Count == 0,
                 "Write-tool `idempotencyKey` descriptions must screen the retry-safety affordance to the LLM (P18-006). "
                 + "Offenders: " + string.Join(" | ", offenders));
+        }
+
+        // -----------------------------------------------------------------
+        // R6-07b — lacerte_year_over_year envelopes must never emit a `year`
+        // wire key (the canonical name is `taxYear`; `fromYear`/`toYear`
+        // are distinct, allowed keys). The error rows in this tool regressed
+        // to `year` once because no sentinel covered the file — this walker
+        // pins both the happy-path and the missing-client envelope.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task YearOverYear_Envelopes_EmitNoYearKey_R6_07()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tool = new YearOverYearTools(mgr);
+
+            var happy = ToolTestHelpers.Parse(
+                await tool.LacerteYearOverYear("1001", 2020, 2024));
+            Assert.True(happy.GetProperty("success").GetBoolean());
+            AssertNoPropertyNamed(happy, "year", "lacerte_year_over_year happy path");
+
+            var missing = ToolTestHelpers.Parse(
+                await tool.LacerteYearOverYear("424242", 2020, 2024));
+            Assert.True(missing.GetProperty("success").GetBoolean());
+            AssertNoPropertyNamed(missing, "year", "lacerte_year_over_year missing-client path");
+        }
+
+        // -----------------------------------------------------------------
+        // R6-18 — wherever a tool envelope emits a key named exactly
+        // `module`, the value is the canonical single-character DBF code
+        // ("I"/"C"/...), never a full name ("individual") or a file
+        // basename. Friendly names live under `moduleName` /
+        // `moduleFileBasename`. Pinned across the three envelopes that
+        // previously disagreed (session_status was already canonical;
+        // client_summary and export_client drifted).
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task ToolEnvelopes_ModuleKey_IsSingleCharCode_R6_18()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+
+            var sessionJson = ToolTestHelpers.Parse(
+                await new SessionTools(mgr).LacerteSessionStatus());
+            AssertModuleValuesSingleChar(sessionJson, "lacerte_session_status");
+
+            var summaryJson = ToolTestHelpers.Parse(
+                await new ClientSummaryTools(mgr).LacerteClientSummary("1001"));
+            AssertModuleValuesSingleChar(summaryJson, "lacerte_client_summary");
+
+            var exportJson = ToolTestHelpers.Parse(
+                await new ClientResourceTools(mgr).LacerteExportClient("1001"));
+            AssertModuleValuesSingleChar(exportJson, "lacerte_export_client");
+        }
+
+        // -----------------------------------------------------------------
+        // R6-19 — every paginated tool envelope emits `returnedCount` (the
+        // rows-on-this-page count) per the Pagination contract (P16-074),
+        // and the value equals rows.Length.
+        // -----------------------------------------------------------------
+
+        [Fact]
+        public async Task PaginatedEnvelopes_EmitReturnedCount_R6_19()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+
+            var envelopes = new List<(string Tool, string Json)>
+            {
+                ("lacerte_client_list", await new ClientsTools(mgr).LacerteClientList()),
+                ("lacerte_table_read", await new TablesTools(mgr).LacerteTableRead(1)),
+                ("lacerte_detail_read", await new DetailsTools(mgr).LacerteDetailRead("1001")),
+                ("lacerte_ef_status", await new EFileTools(mgr).LacerteEfStatus()),
+                ("lacerte_state_read", await new StatesTools(mgr).LacerteStateRead("1001")),
+                ("lacerte_state_subclient_read", await new StatesTools(mgr).LacerteStateSubclientRead("1001")),
+                ("lacerte_status_read", await new StatusTools(mgr).LacerteStatusRead("1001")),
+                ("lacerte_forms_read", await new FormsTools(mgr).LacerteFormsRead("1001")),
+                ("lacerte_subclient_read", await new SubclientsTools(mgr).LacerteSubclientRead("1001")),
+            };
+
+            foreach (var (toolName, json) in envelopes)
+            {
+                var root = ToolTestHelpers.Parse(json);
+                Assert.True(root.GetProperty("success").GetBoolean(),
+                    $"{toolName} envelope not successful: {json}");
+                var result = root.GetProperty("result");
+                Assert.True(result.TryGetProperty("returnedCount", out var rc),
+                    $"{toolName} paginated envelope must emit `returnedCount` (R6-19).");
+                Assert.Equal(result.GetProperty("rows").GetArrayLength(), rc.GetInt32());
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // JSON-walker helpers for the sentinels above.
+        // -----------------------------------------------------------------
+
+        private static void AssertNoPropertyNamed(
+            JsonElement element, string banned, string label)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var prop in element.EnumerateObject())
+                    {
+                        Assert.False(
+                            string.Equals(prop.Name, banned, System.StringComparison.Ordinal),
+                            $"{label}: envelope must not emit a `{banned}` wire key (canonical name is `taxYear`).");
+                        AssertNoPropertyNamed(prop.Value, banned, label);
+                    }
+                    break;
+                case JsonValueKind.Array:
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        AssertNoPropertyNamed(item, banned, label);
+                    }
+                    break;
+            }
+        }
+
+        private static void AssertModuleValuesSingleChar(JsonElement element, string label)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var prop in element.EnumerateObject())
+                    {
+                        if (string.Equals(prop.Name, "module", System.StringComparison.Ordinal)
+                            && prop.Value.ValueKind == JsonValueKind.String)
+                        {
+                            var v = prop.Value.GetString() ?? string.Empty;
+                            Assert.True(v.Length == 1,
+                                $"{label}: `module` wire key must carry the single-character DBF code, got '{v}' (R6-18).");
+                        }
+                        AssertModuleValuesSingleChar(prop.Value, label);
+                    }
+                    break;
+                case JsonValueKind.Array:
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        AssertModuleValuesSingleChar(item, label);
+                    }
+                    break;
+            }
         }
     }
 }

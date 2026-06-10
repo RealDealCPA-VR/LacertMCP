@@ -163,6 +163,141 @@ namespace LacertMCP.Tests.Startup
             Assert.Contains("defaultTaxYear=<unset>", sw.ToString());
         }
 
+        // ----- R6-30(a): LACERTE_PARITY_RECORDING is a path, not a boolean -----
+
+        [Fact]
+        public void ParityRecording_PathValue_NoBooleanTypoWarning()
+        {
+            // Pre-R6-30 the boolean check warned "'<path>' is not '1'" on every
+            // documented usage. A path value must never trigger the strict-"1"
+            // boolean warning.
+            var sw = new StringWriter();
+            var bogus = Path.Combine(Path.GetTempPath(), "lacertemcp-recording-" + System.Guid.NewGuid().ToString("N") + ".json");
+            EnvValidator.Validate(sw, Env(("LACERTE_PARITY_RECORDING", bogus)));
+            Assert.DoesNotContain("treated as disabled", sw.ToString());
+        }
+
+        [Fact]
+        public void ParityRecording_MissingFile_WarnsFileDoesNotExist()
+        {
+            var sw = new StringWriter();
+            var bogus = Path.Combine(Path.GetTempPath(), "lacertemcp-recording-" + System.Guid.NewGuid().ToString("N") + ".json");
+            EnvValidator.Validate(sw, Env(("LACERTE_PARITY_RECORDING", bogus)));
+            Assert.Contains("LACERTE_PARITY_RECORDING='" + bogus + "'", sw.ToString());
+            Assert.Contains("does not exist", sw.ToString());
+        }
+
+        [Fact]
+        public void ParityRecording_ExistingFile_NoWarning()
+        {
+            var sw = new StringWriter();
+            var path = Path.GetTempFileName();
+            try
+            {
+                EnvValidator.Validate(sw, Env(("LACERTE_PARITY_RECORDING", path)));
+                Assert.DoesNotContain("LACERTE_PARITY_RECORDING", sw.ToString());
+            }
+            finally
+            {
+                try { File.Delete(path); } catch { }
+            }
+        }
+
+        // ----- R6-30(b): LACERTE_IDEMPOTENCY_PERSIST is default-ON / disable-with-0 -----
+
+        [Fact]
+        public void IdempotencyPersist_Zero_NoWarning()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_IDEMPOTENCY_PERSIST", "0")));
+            Assert.DoesNotContain("LACERTE_IDEMPOTENCY_PERSIST", sw.ToString());
+        }
+
+        [Fact]
+        public void IdempotencyPersist_One_NoWarning()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_IDEMPOTENCY_PERSIST", "1")));
+            Assert.DoesNotContain("LACERTE_IDEMPOTENCY_PERSIST", sw.ToString());
+        }
+
+        [Fact]
+        public void IdempotencyPersist_False_WarnsDefaultOnSemantics()
+        {
+            // "false" does NOT disable a default-ON flag — only the exact
+            // string "0" does. The warning must say the value leaves the
+            // feature ENABLED (the strict-boolean "treated as disabled" text
+            // would be exactly backwards here).
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_IDEMPOTENCY_PERSIST", "false")));
+            var output = sw.ToString();
+            Assert.Contains("LACERTE_IDEMPOTENCY_PERSIST='false'", output);
+            Assert.Contains("defaults to ON", output);
+            Assert.Contains("ENABLED", output);
+            Assert.DoesNotContain("treated as disabled", output);
+        }
+
+        // ----- R6-30(b): LACERTE_DEBUG_LOG_FULL_RESULTS is a strict-"1" flag -----
+
+        [Fact]
+        public void DebugLogFullResults_True_EmitsTypoWarning()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_DEBUG_LOG_FULL_RESULTS", "true")));
+            var output = sw.ToString();
+            Assert.Contains("LACERTE_DEBUG_LOG_FULL_RESULTS='true'", output);
+            Assert.Contains("treated as disabled", output);
+        }
+
+        [Fact]
+        public void DebugLogFullResults_One_NoWarning()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_DEBUG_LOG_FULL_RESULTS", "1")));
+            Assert.DoesNotContain("LACERTE_DEBUG_LOG_FULL_RESULTS", sw.ToString());
+        }
+
+        // ----- R6-30(c): numeric env vars warn when not a non-negative integer -----
+
+        [Theory]
+        [InlineData("LACERTE_HEARTBEAT_SECONDS")]
+        [InlineData("LACERTE_BULK_WRITE_MAX")]
+        [InlineData("LACERTE_RECENT_LOG_CAPACITY")]
+        [InlineData("LACERTE_DEBUG_LOG_MAX_BYTES")]
+        [InlineData("LACERTE_DEBUG_LOG_MAX_DIR_BYTES")]
+        [InlineData("LACERTE_DEBUG_LOG_RETENTION_DAYS")]
+        [InlineData("LACERTE_DEBUG_LOG_RESULT_SAMPLE")]
+        public void NumericVar_NonNumeric_EmitsWarning(string name)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env((name, "thirty")));
+            var output = sw.ToString();
+            Assert.Contains($"{name}='thirty'", output);
+            Assert.Contains("not a non-negative integer", output);
+        }
+
+        [Theory]
+        [InlineData("LACERTE_HEARTBEAT_SECONDS")]
+        [InlineData("LACERTE_DEBUG_LOG_MAX_BYTES")]
+        public void NumericVar_Negative_EmitsWarning(string name)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env((name, "-5")));
+            Assert.Contains("not a non-negative integer", sw.ToString());
+        }
+
+        [Theory]
+        [InlineData("LACERTE_HEARTBEAT_SECONDS", "0")]
+        [InlineData("LACERTE_HEARTBEAT_SECONDS", "30")]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "500")]
+        [InlineData("LACERTE_DEBUG_LOG_MAX_BYTES", "10485760")]
+        public void NumericVar_ValidNonNegative_NoWarning(string name, string value)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env((name, value)));
+            Assert.DoesNotContain(name, warningLines(sw));
+        }
+
         private static IDictionary<string, string?> Env(params (string, string?)[] pairs)
         {
             var d = new Dictionary<string, string?>(System.StringComparer.OrdinalIgnoreCase);

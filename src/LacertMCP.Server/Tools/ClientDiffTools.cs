@@ -231,12 +231,14 @@ namespace LacertMCP.Server.Tools
 
         /// <summary>
         /// Diff two row collections matched on the supplied wire key. Rows
-        /// with a key value that exists only in A surface in <c>added</c>
-        /// (deliberately a misnomer — these existed in A but not B, but
-        /// reading the diff as "what's added to make A match B?" matches
-        /// the more common "what's missing from B?" lens). Symmetric on
-        /// the B side via <c>removed</c>. Matched-key rows that differ
+        /// with a key value that exists only in B surface in <c>added</c>
+        /// (read the diff as "what you would have to add to A to make it
+        /// match B"). Rows with a key value that exists only in A surface
+        /// symmetrically in <c>removed</c>. Matched-key rows that differ
         /// surface in <c>changed</c> as <c>{ key, fields:[{field,a,b}] }</c>.
+        /// Rows whose key value is missing/null cannot be matched and are
+        /// surfaced via the <c>rowsWithoutKey</c> counters (R6-06d) instead
+        /// of being silently dropped.
         /// </summary>
         public static object DiffRowsByKey(
             IReadOnlyList<IReadOnlyDictionary<string, object?>> a,
@@ -252,15 +254,22 @@ namespace LacertMCP.Server.Tools
 
             var aByKey = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
             var bByKey = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+            // R6-06d — rows with a missing/null key cannot participate in
+            // keyed matching; count them so the envelope surfaces their
+            // existence instead of silently dropping them from all buckets.
+            int aWithoutKey = 0;
+            int bWithoutKey = 0;
             foreach (var r in a)
             {
                 var k = KeyOf(r);
                 if (k != null) aByKey[k] = r;
+                else aWithoutKey++;
             }
             foreach (var r in b)
             {
                 var k = KeyOf(r);
                 if (k != null) bByKey[k] = r;
+                else bWithoutKey++;
             }
 
             var addedList = new List<object>();
@@ -300,6 +309,11 @@ namespace LacertMCP.Server.Tools
                 added = addedList,
                 removed = removedList,
                 changed = changedList,
+                // R6-06d — rows that could not be matched because their key
+                // value was missing/null. Always emitted (zeros on the happy
+                // path) so the LLM never has to guess whether the field
+                // exists.
+                rowsWithoutKey = new { a = aWithoutKey, b = bWithoutKey },
             };
         }
 
@@ -314,6 +328,16 @@ namespace LacertMCP.Server.Tools
         /// Description is included so two W-2 rows for different employers
         /// don't collide on the (Series, Code) prefix, at the cost of
         /// surfacing every typo-corrected description as add+remove.
+        ///
+        /// <para>
+        /// R6-06c — duplicate-key multiplicity is honored: when a key group
+        /// exists on both sides, rows are compared position-by-position
+        /// within the group (detail files are row-ordered with no primary
+        /// key, so position is the only stable tiebreaker). A count
+        /// difference surfaces the surplus rows as <c>added</c> (extra in
+        /// B) or <c>removed</c> (extra in A) — two identical W-2 rows vs
+        /// one is a real diff, not a no-op.
+        /// </para>
         /// </summary>
         public static object DiffDetailRows(
             IReadOnlyList<DetailRow> a,
@@ -341,41 +365,77 @@ namespace LacertMCP.Server.Tools
             foreach (var g in aByKey)
             {
                 if (!bByKey.Contains(g.Key)) continue;
-                var aRow = g.First();
-                var bRow = bByKey[g.Key].First();
-                // Detail rows include numeric Amount + boolean-like flags;
-                // compare via the wire shape so a 75000.00 vs 75000.0 string
-                // doesn't false-positive.
-                if (!DetailRowsEqual(aRow, bRow))
+
+                // R6-06c — compare the whole key group position-by-position
+                // instead of First()-vs-First(), so duplicate rows under the
+                // same composite key are no longer invisible.
+                var aRows = g.ToList();
+                var bRows = bByKey[g.Key].ToList();
+                int paired = Math.Min(aRows.Count, bRows.Count);
+                for (int i = 0; i < paired; i++)
                 {
-                    changed.Add(new
+                    if (!DetailRowsEqual(aRows[i], bRows[i]))
                     {
-                        key = g.Key,
-                        a = ShapeDetailRow(aRow),
-                        b = ShapeDetailRow(bRow),
-                    });
+                        changed.Add(new
+                        {
+                            key = g.Key,
+                            position = i,
+                            a = ShapeDetailRow(aRows[i]),
+                            b = ShapeDetailRow(bRows[i]),
+                        });
+                    }
+                }
+                // Surplus rows beyond the paired prefix surface as
+                // added/removed so a 2-vs-1 duplicate is a visible diff.
+                for (int i = paired; i < bRows.Count; i++)
+                {
+                    added.Add(ShapeDetailRow(bRows[i]));
+                }
+                for (int i = paired; i < aRows.Count; i++)
+                {
+                    removed.Add(ShapeDetailRow(aRows[i]));
                 }
             }
 
             return new { added, removed, changed };
         }
 
+        /// <summary>
+        /// R6-06a — full-fidelity equality across ALL 11 DetailRow fields.
+        /// Rows differing only in TSJ (taxpayer vs spouse), Source, Prefix,
+        /// Suffix, CityAbbr, or ImportSrc are real diffs.
+        /// </summary>
         private static bool DetailRowsEqual(DetailRow a, DetailRow b)
         {
             return string.Equals(a.Series ?? "", b.Series ?? "", StringComparison.Ordinal)
+                && string.Equals(a.Prefix ?? "", b.Prefix ?? "", StringComparison.Ordinal)
                 && string.Equals(a.Code ?? "", b.Code ?? "", StringComparison.Ordinal)
+                && string.Equals(a.Suffix ?? "", b.Suffix ?? "", StringComparison.Ordinal)
                 && string.Equals(a.StateAbbr ?? "", b.StateAbbr ?? "", StringComparison.Ordinal)
-                && string.Equals(a.Description ?? "", b.Description ?? "", StringComparison.Ordinal)
-                && Nullable.Equals(a.Amount, b.Amount);
+                && string.Equals(a.CityAbbr ?? "", b.CityAbbr ?? "", StringComparison.Ordinal)
+                && string.Equals(a.Source ?? "", b.Source ?? "", StringComparison.Ordinal)
+                && string.Equals(a.TSJ ?? "", b.TSJ ?? "", StringComparison.Ordinal)
+                && string.Equals(a.ImportSrc ?? "", b.ImportSrc ?? "", StringComparison.Ordinal)
+                && Nullable.Equals(a.Amount, b.Amount)
+                && string.Equals(a.Description ?? "", b.Description ?? "", StringComparison.Ordinal);
         }
 
+        // R6-06b — emit ALL 11 DetailRow fields (camelCase wire keys) so a
+        // diff caused by any field is visible in the envelope, not just
+        // detectable.
         private static object ShapeDetailRow(DetailRow r) => new
         {
             series = r.Series,
+            prefix = r.Prefix,
             code = r.Code,
+            suffix = r.Suffix,
             stateAbbrev = r.StateAbbr,
-            description = r.Description,
+            cityAbbr = r.CityAbbr,
+            source = r.Source,
+            tsj = r.TSJ,
+            importSrc = r.ImportSrc,
             amount = r.Amount,
+            description = r.Description,
         };
 
         // ===================================================================

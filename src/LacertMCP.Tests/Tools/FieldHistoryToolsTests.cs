@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Logging;
 using LacertMCP.Server.Session.Fixtures;
@@ -49,6 +50,28 @@ namespace LacertMCP.Tests.Tools
             try { WireLog.DisableForTests(); } catch { /* swallow */ }
             try { WireLog.FlushForTests(_tempDir); } catch { /* swallow */ }
             try { Directory.Delete(_tempDir, recursive: true); } catch { /* swallow */ }
+        }
+
+        // A background WireLog thread (ring-to-disk flush, rotation probe)
+        // can re-open the day file between FlushForTests and WriteAllLines,
+        // producing a transient sharing violation. Flush-then-write under a
+        // short retry loop makes the seeding deterministic.
+        private void WriteLogLinesWithRetry(string[] lines)
+        {
+            const int maxAttempts = 10;
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    WireLog.FlushForTests(_tempDir);
+                    File.WriteAllLines(_logFile, lines);
+                    return;
+                }
+                catch (IOException) when (attempt < maxAttempts)
+                {
+                    Thread.Sleep(50);
+                }
+            }
         }
 
         [Fact]
@@ -130,8 +153,7 @@ namespace LacertMCP.Tests.Tools
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
-                WireLog.FlushForTests(_tempDir);
-                File.WriteAllLines(_logFile, lines);
+                WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
                 var root = ToolTestHelpers.Parse(
@@ -162,8 +184,7 @@ namespace LacertMCP.Tests.Tools
                         dryRun: false, result: 0, durationMs: i)).ToArray();
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
-                WireLog.FlushForTests(_tempDir);
-                File.WriteAllLines(_logFile, lines);
+                WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
                 var root = ToolTestHelpers.Parse(
@@ -172,6 +193,120 @@ namespace LacertMCP.Tests.Tools
                 Assert.Equal(2, result.GetProperty("rows").GetArrayLength());
                 Assert.Equal(5, result.GetProperty("total").GetInt32());
                 Assert.True(result.GetProperty("truncated").GetBoolean());
+            }
+            finally { WireLog.DisableForTests(); }
+        }
+
+        // R6-21a — truncation keeps the NEWEST rows (the audit-relevant
+        // recent writes), displayed oldest-first. Distinct timestamps make
+        // the assertion deterministic.
+        [Fact]
+        public async Task FieldHistory_LimitTruncates_KeepsNewestRows_R6_21()
+        {
+            WireLog.EnableForTests(_tempDir);
+            try
+            {
+                var baseTime = DateTime.UtcNow.AddHours(-5);
+                var lines = Enumerable.Range(0, 5).Select(i =>
+                    BuildWriteFieldLine(
+                        baseTime.AddHours(i).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        "WriteField", "1001", "C1_3", "***",
+                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                WriteLogLinesWithRetry(lines);
+
+                var tools = new FieldHistoryTools();
+                var root = ToolTestHelpers.Parse(
+                    await tools.LacerteFieldHistory("1001", "C1_3", limit: 2));
+                var result = root.GetProperty("result");
+                var rows = result.GetProperty("rows").EnumerateArray().ToArray();
+                Assert.Equal(2, rows.Length);
+                Assert.Equal(5, result.GetProperty("total").GetInt32());
+                // The two NEWEST writes (durationMs 3 and 4) survive,
+                // oldest-first within the page.
+                Assert.Equal(3, rows[0].GetProperty("durationMs").GetInt64());
+                Assert.Equal(4, rows[1].GetProperty("durationMs").GetInt64());
+            }
+            finally { WireLog.DisableForTests(); }
+        }
+
+        // R6-21c — failed writes (WireLog error records) surface with
+        // succeeded=false + error text; success rows carry succeeded=true.
+        [Fact]
+        public async Task FieldHistory_FailedWrite_SurfacesSucceededFalse_R6_21()
+        {
+            WireLog.EnableForTests(_tempDir);
+            try
+            {
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var errorLine = JsonSerializer.Serialize(new
+                {
+                    ts = today,
+                    op = "WriteField",
+                    args = new { table = 1, clientNumber = "1001", field = "C1_3", value = "***", dryRun = false },
+                    durationMs = 9L,
+                    error = new
+                    {
+                        type = "LacertMCP.Server.Errors.LacerteSDKError",
+                        message = "***",
+                    },
+                });
+                var lines = new[]
+                {
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
+                        dryRun: false, result: 0, durationMs: 5),
+                    errorLine,
+                };
+                WriteLogLinesWithRetry(lines);
+
+                var tools = new FieldHistoryTools();
+                var root = ToolTestHelpers.Parse(
+                    await tools.LacerteFieldHistory("1001", "C1_3"));
+                Assert.True(root.GetProperty("success").GetBoolean());
+                var result = root.GetProperty("result");
+                Assert.Equal(2, result.GetProperty("total").GetInt32());
+
+                var rows = result.GetProperty("rows").EnumerateArray().ToArray();
+                var succeededFlags = rows
+                    .Select(r => r.GetProperty("succeeded").GetBoolean())
+                    .OrderBy(b => b)
+                    .ToArray();
+                Assert.Equal(new[] { false, true }, succeededFlags);
+
+                var failed = rows.Single(r => !r.GetProperty("succeeded").GetBoolean());
+                Assert.True(failed.TryGetProperty("error", out var err));
+                Assert.Contains("LacerteSDKError", err.GetString());
+                var ok = rows.Single(r => r.GetProperty("succeeded").GetBoolean());
+                Assert.Equal(System.Text.Json.JsonValueKind.Null,
+                    ok.GetProperty("error").ValueKind);
+            }
+            finally { WireLog.DisableForTests(); }
+        }
+
+        // R6-21b — limit is clamped to Pagination.MaxLimit (1000) instead of
+        // honoring an arbitrarily large request verbatim. With 3 rows on
+        // disk the call still succeeds and returns everything; the clamp is
+        // observable through the envelope being well-formed (no throw) —
+        // the numeric clamp itself is covered by the helper contract.
+        [Fact]
+        public async Task FieldHistory_OversizedLimit_ClampedAndSucceeds_R6_21()
+        {
+            WireLog.EnableForTests(_tempDir);
+            try
+            {
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var lines = Enumerable.Range(0, 3).Select(i =>
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
+                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                WriteLogLinesWithRetry(lines);
+
+                var tools = new FieldHistoryTools();
+                var root = ToolTestHelpers.Parse(
+                    await tools.LacerteFieldHistory("1001", "C1_3", limit: int.MaxValue));
+                Assert.True(root.GetProperty("success").GetBoolean());
+                var result = root.GetProperty("result");
+                Assert.Equal(3, result.GetProperty("rows").GetArrayLength());
+                Assert.Equal(3, result.GetProperty("total").GetInt32());
+                Assert.False(result.GetProperty("truncated").GetBoolean());
             }
             finally { WireLog.DisableForTests(); }
         }
@@ -188,8 +323,7 @@ namespace LacertMCP.Tests.Tools
                         dryRun: false, result: 0, durationMs: i)).ToArray();
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
-                WireLog.FlushForTests(_tempDir);
-                File.WriteAllLines(_logFile, lines);
+                WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
                 var root = ToolTestHelpers.Parse(
@@ -219,8 +353,7 @@ namespace LacertMCP.Tests.Tools
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
-                WireLog.FlushForTests(_tempDir);
-                File.WriteAllLines(_logFile, lines);
+                WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
                 var root = ToolTestHelpers.Parse(
@@ -252,8 +385,7 @@ namespace LacertMCP.Tests.Tools
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
-                WireLog.FlushForTests(_tempDir);
-                File.WriteAllLines(_logFile, lines);
+                WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
                 var root = ToolTestHelpers.Parse(

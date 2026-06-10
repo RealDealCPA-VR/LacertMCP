@@ -89,19 +89,27 @@ namespace LacertMCP.Tests.Cli
             AppIdStore.Set(id);
 
             // LoginCommand.Run writes to Console.Out directly — re-route it for the test.
+            // R6-05: inject a fake ceremony so the test never touches the real
+            // ITPRegistration COM surface (which on a Lacerte-equipped box would pop
+            // the interactive Intuit sign-in dialog mid-test-run).
             var originalOut = Console.Out;
+            var originalErr = Console.Error;
             var sw = new StringWriter();
+            var swErr = new StringWriter();
             try
             {
                 Console.SetOut(sw);
-                LoginCommand.Run("Operator Lacerte MCP", DateTime.UtcNow.Year - 1);
+                Console.SetError(swErr);
+                LoginCommand.Run("Operator Lacerte MCP", DateTime.UtcNow.Year - 1,
+                    (_, _, _) => LacertMCP.Server.Errors.StatusCodes.AccessGranted);
             }
             finally
             {
                 Console.SetOut(originalOut);
+                Console.SetError(originalErr);
             }
 
-            var output = sw.ToString();
+            var output = sw.ToString() + swErr.ToString();
             Assert.DoesNotContain(id.ToString("D"), output);
             // Sanity: the masked first-8 chars should be present so operators can still
             // disambiguate two installs.

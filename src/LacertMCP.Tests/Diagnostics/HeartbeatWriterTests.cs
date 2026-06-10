@@ -67,11 +67,45 @@ namespace LacertMCP.Tests.Diagnostics
         }
 
         [Fact]
-        public void IntervalSeconds_Unparseable_FallsBackToDefault()
+        public void IntervalSeconds_Unparseable_DisablesWriter_R6_17()
         {
-            Assert.Equal(HeartbeatWriter.DefaultIntervalSeconds, HeartbeatWriter.IntervalSeconds("abc"));
-            Assert.Equal(HeartbeatWriter.DefaultIntervalSeconds, HeartbeatWriter.IntervalSeconds("30s"));
-            Assert.Equal(HeartbeatWriter.DefaultIntervalSeconds, HeartbeatWriter.IntervalSeconds("3.5"));
+            // R6-17 — code now matches the class doc + Program.cs gating
+            // comment: an unparseable LACERTE_HEARTBEAT_SECONDS DISABLES the
+            // writer (returns 0) instead of silently enabling at the 30s
+            // default. Pre-fix these returned DefaultIntervalSeconds.
+            Assert.Equal(0, HeartbeatWriter.IntervalSeconds("abc"));
+            Assert.Equal(0, HeartbeatWriter.IntervalSeconds("30s"));
+            Assert.Equal(0, HeartbeatWriter.IntervalSeconds("3.5"));
+            // Digit strings that overflow Int32 fail TryParse → disabled too
+            // (pre-fix this enabled at default; a slightly smaller value that
+            // PARSED could crash the host — see the clamp tests below).
+            Assert.Equal(0, HeartbeatWriter.IntervalSeconds("99999999999"));
+        }
+
+        [Theory]
+        [InlineData("2147484", HeartbeatWriter.MaxIntervalSeconds)]   // > Int32.MaxValue ms — the R6-17 crash value
+        [InlineData("2147483647", HeartbeatWriter.MaxIntervalSeconds)] // int.MaxValue seconds
+        [InlineData("86401", HeartbeatWriter.MaxIntervalSeconds)]      // 1s over the ceiling
+        [InlineData("86400", HeartbeatWriter.MaxIntervalSeconds)]      // exactly the ceiling
+        public void IntervalSeconds_HugeValue_ClampedToMax_R6_17(string raw, int expected)
+        {
+            // R6-17 — Task.Delay(TimeSpan) throws ArgumentOutOfRangeException
+            // above Int32.MaxValue ms; the unclamped value crashed the whole
+            // host (only TaskCanceledException was caught and Hosting's
+            // default StopHost behavior killed the process on first loop
+            // iteration). Anything above 24h now clamps to 24h.
+            Assert.Equal(expected, HeartbeatWriter.IntervalSeconds(raw));
+        }
+
+        [Fact]
+        public void Ctor_HugeIntervalSeconds_ClampedSoTaskDelayCannotThrow_R6_17()
+        {
+            // The internal test-seam ctor bypasses the IntervalSeconds parser;
+            // the ctor must clamp independently so no path can hand
+            // Task.Delay a >Int32.MaxValue-ms TimeSpan.
+            var session = new LacerteSessionManager();
+            var writer = new HeartbeatWriter(session, intervalSeconds: int.MaxValue, path: NewTempPath());
+            Assert.Equal(HeartbeatWriter.MaxIntervalSeconds, writer.IntervalSecondsValue);
         }
 
         // ------------------------------------------------------------------
@@ -258,12 +292,11 @@ namespace LacertMCP.Tests.Diagnostics
                 Assert.True(File.Exists(path));
                 var firstMtime = File.GetLastWriteTimeUtc(path);
 
-                // Wait long enough for one tick.
+                // Wait long enough for one tick. Capture state BEFORE the
+                // stop — R6-35 deletes the file on graceful shutdown, so all
+                // liveness assertions must happen pre-cancel.
                 await Task.Delay(TimeSpan.FromMilliseconds(1500));
-                cts.Cancel();
-                try { await writer.StopAsync(CancellationToken.None); }
-                catch (OperationCanceledException) { /* expected on graceful stop */ }
-
+                Assert.True(File.Exists(path), "heartbeat file must exist while the loop runs");
                 var secondMtime = File.GetLastWriteTimeUtc(path);
                 // Either the file was rewritten (mtime advanced) or the
                 // payload changed (filesystems with low mtime resolution).
@@ -278,11 +311,97 @@ namespace LacertMCP.Tests.Diagnostics
                 {
                     Assert.True(secondMtime > firstMtime);
                 }
+
+                cts.Cancel();
+                try { await writer.StopAsync(CancellationToken.None); }
+                catch (OperationCanceledException) { /* expected on graceful stop */ }
+
+                // R6-35 — graceful shutdown deletes the per-PID file so
+                // watchers don't keep seeing a stale instance.
+                Assert.False(File.Exists(path),
+                    "heartbeat file must be deleted on graceful shutdown (R6-35)");
             }
             finally
             {
                 TryDelete(path);
             }
+        }
+
+        // ------------------------------------------------------------------
+        // R6-35 — per-PID file deletion + stale-sibling sweep
+        // ------------------------------------------------------------------
+
+        [Fact]
+        public void TryDeleteHeartbeatFile_RemovesFile_AndIsIdempotent_R6_35()
+        {
+            var path = NewTempPath();
+            try
+            {
+                var session = new LacerteSessionManager();
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: path);
+                Assert.True(writer.TryWrite());
+                Assert.True(File.Exists(path));
+
+                Assert.True(writer.TryDeleteHeartbeatFile());
+                Assert.False(File.Exists(path));
+                // Second call on a missing file is a swallowed no-op.
+                Assert.True(writer.TryDeleteHeartbeatFile());
+            }
+            finally
+            {
+                TryDelete(path);
+            }
+        }
+
+        [Fact]
+        public void CleanStaleSiblingFiles_DeletesOldSiblings_KeepsFreshAndOwn_R6_35()
+        {
+            // Dedicated subdir so the sweep can't interact with other tests'
+            // heartbeat files in the shared temp root.
+            var dir = Path.Combine(Path.GetTempPath(), "hb-sweep-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var ownPath = Path.Combine(dir, HeartbeatWriter.BuildHeartbeatFileName(11111));
+                var stalePath = Path.Combine(dir, HeartbeatWriter.BuildHeartbeatFileName(22222));
+                var freshPath = Path.Combine(dir, HeartbeatWriter.BuildHeartbeatFileName(33333));
+                var unrelatedPath = Path.Combine(dir, "unrelated.json");
+
+                File.WriteAllText(ownPath, "{}");
+                File.WriteAllText(stalePath, "{}");
+                File.WriteAllText(freshPath, "{}");
+                File.WriteAllText(unrelatedPath, "{}");
+                // Stale = older than 24h; also age our OWN file to prove the
+                // self-exclusion is path-based, not mtime-based.
+                File.SetLastWriteTimeUtc(stalePath, DateTime.UtcNow.AddHours(-25));
+                File.SetLastWriteTimeUtc(ownPath, DateTime.UtcNow.AddHours(-25));
+                File.SetLastWriteTimeUtc(unrelatedPath, DateTime.UtcNow.AddHours(-25));
+
+                var session = new LacerteSessionManager();
+                var writer = new HeartbeatWriter(session, intervalSeconds: 30, path: ownPath);
+
+                var deleted = writer.CleanStaleSiblingFiles();
+
+                Assert.Equal(1, deleted);
+                Assert.False(File.Exists(stalePath), "dead-PID sibling older than 24h must be swept");
+                Assert.True(File.Exists(freshPath), "recently-written sibling (live instance) must survive");
+                Assert.True(File.Exists(ownPath), "own file must never be swept, regardless of age");
+                Assert.True(File.Exists(unrelatedPath), "non-glob files must never be touched");
+            }
+            finally
+            {
+                try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+            }
+        }
+
+        [Fact]
+        public void CleanStaleSiblingFiles_MissingDirectory_ReturnsZeroWithoutThrowing_R6_35()
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "hb-sweep-missing-" + Guid.NewGuid().ToString("N"));
+            var session = new LacerteSessionManager();
+            var writer = new HeartbeatWriter(session, intervalSeconds: 30,
+                path: Path.Combine(dir, HeartbeatWriter.BuildHeartbeatFileName(1)));
+            Assert.Equal(0, writer.CleanStaleSiblingFiles());
         }
 
         // ------------------------------------------------------------------

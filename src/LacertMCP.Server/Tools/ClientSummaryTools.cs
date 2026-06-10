@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -112,11 +111,16 @@ namespace LacertMCP.Server.Tools
                 var moduleInfo = Modules.GetByChar(ctx.Module);
                 var moduleName = moduleInfo?.Name ?? ctx.Module.ToString();
                 var returnType = moduleInfo?.ReturnType ?? ctx.Module.ToString();
+                // R6-18 — the `module` wire key carries the canonical
+                // single-character DBF code everywhere ("I"), matching
+                // SessionTools/FirmDashboard so cross-tool joins work; the
+                // human-readable name lives under `moduleName`.
                 var contextEcho = new
                 {
                     dataPath = ctx.DataPath,
                     taxYear = ctx.Year,
-                    module = moduleName.ToLowerInvariant(),
+                    module = ctx.Module.ToString(),
+                    moduleName,
                     returnType,
                 };
 
@@ -213,7 +217,10 @@ namespace LacertMCP.Server.Tools
                 email = c1_3,
                 filingStatus = c1_4,
                 taxYear = ctx.Year,
-                module = moduleName.ToLowerInvariant(),
+                // R6-18 — canonical single-char module code; friendly name
+                // under `moduleName`.
+                module = ctx.Module.ToString(),
+                moduleName,
                 returnType,
             };
         }
@@ -300,12 +307,15 @@ namespace LacertMCP.Server.Tools
             string? latestStatus = null;
             string? latestStatusDate = null;
             DateTime? bestDate = null;
+            string? fallbackStatus = null;
+            string? fallbackStatusDate = null;
             foreach (var r in forClient)
             {
                 if (!r.TryGetValue("Status", out var st) || st is not string sStr) continue;
                 r.TryGetValue("StatusDate", out var sd);
-                if (sd is string dStr && DateTime.TryParse(dStr, CultureInfo.InvariantCulture,
-                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+                // R6-33a — shared parse helper so the dashboard watermark
+                // and this "latest" projection can never disagree.
+                if (sd is string dStr && Internal.EfStatusDates.TryParse(dStr, out var dt))
                 {
                     if (bestDate == null || dt > bestDate)
                     {
@@ -314,15 +324,33 @@ namespace LacertMCP.Server.Tools
                         latestStatusDate = dStr;
                     }
                 }
-                else if (bestDate == null && latestStatus == null)
+                else
                 {
-                    latestStatus = sStr;
-                    latestStatusDate = sd as string;
+                    // R6-32b — track the LAST undateable row (overwritten on
+                    // every hit) as the fallback: the EF join is append-
+                    // ordered, so "last appended" is the best available
+                    // proxy for "latest" when no row carries a parseable
+                    // date. (The old code froze on the FIRST undateable
+                    // row.)
+                    fallbackStatus = sStr;
+                    fallbackStatusDate = sd as string;
                 }
             }
+            if (bestDate == null && latestStatus == null)
+            {
+                latestStatus = fallbackStatus;
+                latestStatusDate = fallbackStatusDate;
+            }
 
-            var perStateRaw = forClient
+            // R6-32a — truncation is computed against the FILTERED count
+            // (rows that actually carry a string Status — the same predicate
+            // that feeds perStateBreakdown), not forClient.Count. Otherwise
+            // null-status join rows could flag truncation when nothing was
+            // dropped (or mask a real drop).
+            var withStatus = forClient
                 .Where(r => r.TryGetValue("Status", out var st) && st is string)
+                .ToList();
+            var perStateRaw = withStatus
                 .Take(PerStateBreakdownCap)
                 .Select(r => new
                 {
@@ -338,7 +366,7 @@ namespace LacertMCP.Server.Tools
                 latestStatus,
                 latestStatusDate,
                 perStateBreakdown = perStateRaw,
-                perStateBreakdownTruncated = forClient.Count > PerStateBreakdownCap,
+                perStateBreakdownTruncated = withStatus.Count > PerStateBreakdownCap,
             };
         }
     }
