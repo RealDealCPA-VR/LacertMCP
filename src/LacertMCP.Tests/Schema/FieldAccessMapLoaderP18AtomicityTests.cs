@@ -178,6 +178,15 @@ namespace LacertMCP.Tests.Schema
             var stopReader = 0;
             const int readerIterations = 10_000;
 
+            // Start-ordering handshake: the reloader must not begin (and
+            // therefore must not be able to set stopReader) until the reader
+            // has recorded at least one observation. Without this, a busy
+            // thread pool (full parallel suite run) could finish all 200
+            // reloads before the reader task was ever scheduled — the reader
+            // then exited at iteration 0 with ZERO observations and the
+            // NotEmpty/Contains assertions failed as a pure scheduling flake.
+            using var readerStarted = new ManualResetEventSlim(initialState: false);
+
             // Reader thread: many concurrent GetFieldAccess calls, runs a
             // fixed iteration count to guarantee observations regardless of
             // reloader timing.
@@ -189,19 +198,25 @@ namespace LacertMCP.Tests.Schema
                     {
                         var v = FieldAccessMapLoader.GetFieldAccess('I', 1, "C1_ATOMIC", 2098);
                         lock (observedLock) observedValues.Add(v);
+                        readerStarted.Set();
                     }
                     catch (Exception ex)
                     {
                         lock (observedLock) readerExceptions.Add(ex);
+                        readerStarted.Set();
                         break;
                     }
                 }
+                // Defensive: never strand the reloader if the loop somehow
+                // exits before the first Set (e.g. stopReader raced to 1).
+                readerStarted.Set();
             });
 
             // Reloader thread: fire ReloadCaches in a tight loop, interleaved
             // with the reader.
             var reloaderTask = Task.Run(() =>
             {
+                readerStarted.Wait(TimeSpan.FromSeconds(10));
                 for (int i = 0; i < 200; i++)
                 {
                     FieldAccessMapLoader.ReloadCaches();

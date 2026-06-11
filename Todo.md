@@ -156,7 +156,7 @@ These should be addressed during the relevant phase, not stand-alone tasks:
 - **F2.** Decide on `VersionBlocked` collision strategy (TAPIStatus 11 vs TPSDKStatus 202). Both paths fire only on the live bridge.
 - **F4.** Confirm Lacerte SDK 4.6 `<exe>.config` shim is honored by net48 host. If the Phase-0 spike fails on the Windows box, fall back to the hybrid design from agent 01 risk #3.
 - **F7.** When the first operator finishes a real `lacerte-mcp register` on the Windows box, capture the actual integer for `AccessGranted` and `NotSignedIn` and lock the table.
-- **F9.** Bump `ModelContextProtocol` dependency to 1.x when it ships on NuGet (currently `0.3.0-preview.4` is the latest published — out of our control). See DECISIONS.md 2026-05-30 "MCP SDK version pinning".
+- [x] **F9.** ~~Bump `ModelContextProtocol` dependency to 1.x when it ships on NuGet~~ — **DONE 2026-06-11 (Phase 20)**: bumped to `1.4.0` (+ `System.Text.Json` 10.0.7 floor). One SDK API rename in the test harness (`IMcpClient`/`McpClientFactory` → `McpClient`), one behavior fix in `HeartbeatWriter` (Hosting.Abstractions 10.x no longer runs `ExecuteAsync` synchronously inside `StartAsync` — immediate-write moved to a `StartAsync` override). See DECISIONS.md 2026-06-11 "MCP SDK 1.4.0 bump". (This item was never actually Windows-gated — it was blocked on NuGet publication.)
 
 ### Closed in 2026-05-30 wave-4 workflow
 
@@ -1441,7 +1441,7 @@ Fresh 5-lens sweep (tools layer, session/simulation, bridge/ODBC, tool-coverage 
 - [x] **R6-06** diff_clients false negatives — all 11 DetailRow fields compared, duplicate-key multiplicity surfaced, rowsWithoutKey counters
 - [x] **R6-07** year_over_year silent "no changes" for missing client — foundInFromYear/foundInToYear + hint; `year`->`taxYear` wire keys; OrdinalIgnoreCase scope
 - [x] **R6-08** lacerte_help omitted 9 tools — catalog complete (42), parity test now bidirectional
-- [x] **R6-09** firm_dashboard/year_over_year global-context mutation race — serialized via ContextScanGate (real fix = session *At overloads, future)
+- [x] **R6-09** firm_dashboard/year_over_year global-context mutation race — serialized via ContextScanGate (interim; superseded by the R6-D2 *At overloads in Phase 20, gate deleted)
 - [x] **R6-10** sim detail_write auto-vivified nonexistent clients — DetailCreationError parity with store contract
 - [x] **R6-11** multi-instance idempotency persistence clobber — per-PID tmp + merge-on-write + safe orphan cleanup
 - [x] **R6-12** PII in disk logs (raw SQL name literals, C-code dict rows) — sql/nameFilter disk-redacted; all non-C{t}_0 column codes scrubbed at disk scope
@@ -1463,4 +1463,15 @@ Fresh 5-lens sweep (tools layer, session/simulation, bridge/ODBC, tool-coverage 
 
 ### Deferred (unchanged rationale)
 - [ ] **R6-D1** Live detail-row correction (9019 LiveReplaceIndexUnsupported) — needs Windows+Lacerte verification of SDK append-only contract before any design; lacerte_detail_delete remains future
-- [ ] **R6-D2** Session-manager *At read overloads to retire ContextScanGate serialization
+- [x] **R6-D2** Session-manager *At read overloads to retire ContextScanGate serialization — **DONE 2026-06-11 (Phase 20)**
+
+## Phase 20 — Deferred-item closure: R6-D2 + F9 (2026-06-11)
+
+Session goal: assess completeness, close everything still open and doable off the Windows+Lacerte box. Net: **1492 → 1506 tests, 0 warnings, 0 failures** (verified across 3 consecutive full-suite runs).
+
+- [x] **P20-001 (R6-D2)** Explicit-context read overloads on `LacerteSessionManager`: `ListClientsAt` / `ReadClientAt` / `ReadDetailAt` / `ReadEFStatusAt` take `(dataPath, taxYear, module)` per call, resolve a read-only per-call `SessionContext`, and NEVER touch the global `Context`. Tuple validation extracted from `SetContext` into shared `ValidateContextTuple` so error parity is exact (9013/9003/TaxYearTooNew/InValidClientName/ContextNotSet-on-blank-path); auth-expiry + NotSignedIn gates fire identically. Each overload has its own WireLog op name (`*At`) carrying the tuple in args; `lastNameFilter` keeps its canonical key so the R6-12 disk scrub applies unchanged.
+- [x] **P20-002 (R6-D2)** `lacerte_firm_dashboard` + `lacerte_year_over_year` switched to the *At overloads; snapshot/set/restore shims and `Tools/Internal/ContextScanGate.cs` **deleted**. The R6-09 residual limitation (concurrent non-scan tools observing a scan-flipped read-only tuple → spurious 9001) is structurally gone. Dashboard no longer requires (or touches) any active context; YoY still reads the active context to derive per-year paths but never mutates it. 13 new `SessionManagerAtOverloadsTests` + reference-equality (`Assert.Same`) context-isolation pins on both tools.
+- [x] **P20-003 (F9)** `ModelContextProtocol` 0.3.0-preview.4 → **1.4.0** (netstandard2.0 TFM, net48-compatible); `System.Text.Json` 8.0.6 → 10.0.7 in Server + FieldAccessDumper (NU1605 floor from MCP.Core). Test-harness API rename: `IMcpClient`→`McpClient`, `McpClientFactory.CreateAsync`→`McpClient.CreateAsync`, `ListPromptsAsync` named-ct. Server boots + EOF-exits cleanly; CLI lists 42 tools; discovery roundtrip suite green.
+- [x] **P20-004** `HeartbeatWriter` immediate-write contract restored under Hosting.Abstractions 10.x (pulled in by F9): the 10.x line schedules `BackgroundService.ExecuteAsync` asynchronously instead of running it synchronously to the first await inside `StartAsync`, which silently broke "file on disk by the time host startup returns". Startup sweep + first `TryWrite` moved into a `StartAsync` override.
+- [x] **P20-005** Fixed pre-existing scheduling flake in `FieldAccessMapLoaderP18AtomicityTests.ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader`: under full-suite thread-pool pressure the reloader could finish all 200 reloads and set `stopReader` before the reader task ever ran → zero observations → NotEmpty/Contains assertion failures. Reloader now waits on a `ManualResetEventSlim` the reader sets after its first observation.
+- [x] **P20-006** Doc sync: README dashboard row, SKILL.md (`totalTuplesScanned` drift fix + pure-read wording + SDK 1.4.0 + 1506 count), INSTRUCTION_MANUAL (7b/7d pure-read wording, glossary SDK version), ARCHITECTURE stack line, DECISIONS.md 2026-06-11 entries, fresh HANDOFF.md.

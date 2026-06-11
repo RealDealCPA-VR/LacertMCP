@@ -187,8 +187,14 @@ namespace LacertMCP.Tests.Tools
                 root.GetProperty("context").GetProperty("argument").GetString());
         }
 
+        // R6-D2 — the dashboard reads through the explicit-context *At
+        // overloads and must never touch the active context. Assert.Same
+        // pins that: SessionContext is an immutable record the manager only
+        // replaces wholesale via SetContext, so reference equality proves
+        // no SetContext call happened during the scan (strictly stronger
+        // than the old snapshot/restore value-equality check).
         [Fact]
-        public async Task FirmDashboard_RestoresPriorContext()
+        public async Task FirmDashboard_NeverTouchesActiveContext_R6_D2()
         {
             using var scope = new DataRootScope();
             // No LACERTE_DATA_ROOT env mutation means PathValidation
@@ -202,20 +208,17 @@ namespace LacertMCP.Tests.Tools
             _ = await tools.LacerteFirmDashboard();
 
             var afterCtx = mgr.SessionStatus().Context!;
-            Assert.Equal(beforeCtx.DataPath, afterCtx.DataPath);
-            Assert.Equal(beforeCtx.Year, afterCtx.Year);
-            Assert.Equal(beforeCtx.Module, afterCtx.Module);
-            Assert.Equal(beforeCtx.ReadOnly, afterCtx.ReadOnly);
+            Assert.Same(beforeCtx, afterCtx);
+            Assert.False(afterCtx.ReadOnly);
         }
 
-        // R6-09 — the context-scan gate is released after the dashboard
-        // completes (success path) AND after a failing run (the root-missing
-        // throw happens before acquisition; a per-tuple error path is
-        // covered by the success-envelope run). A leaked hold would
-        // deadlock the next dashboard/YoY call forever, so assert the gate
-        // is back to its single free slot.
+        // R6-D2 — with no active context at all, the dashboard still runs:
+        // the *At reads carry their own (dataPath, taxYear, module) and the
+        // old snapshot/restore shim (which tolerated a null snapshot) is
+        // gone. Back-to-back runs also pin that no serialization gate is
+        // left to leak a hold.
         [Fact]
-        public async Task FirmDashboard_ReleasesContextScanGate_R6_09()
+        public async Task FirmDashboard_RunsWithoutActiveContext_R6_D2()
         {
             using var scope = new DataRootScope();
             System.IO.Directory.CreateDirectory(System.IO.Path.Combine(scope.TempDir, "24Tax", "IData"));
@@ -224,12 +227,12 @@ namespace LacertMCP.Tests.Tools
 
             var root = ToolTestHelpers.Parse(await tools.LacerteFirmDashboard());
             Assert.True(root.GetProperty("success").GetBoolean());
-            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
+            Assert.Null(mgr.SessionStatus().Context);
 
-            // A second run immediately after must not block (gate free).
+            // A second run immediately after must also succeed.
             var root2 = ToolTestHelpers.Parse(await tools.LacerteFirmDashboard());
             Assert.True(root2.GetProperty("success").GetBoolean());
-            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
+            Assert.Null(mgr.SessionStatus().Context);
         }
 
         [Fact]

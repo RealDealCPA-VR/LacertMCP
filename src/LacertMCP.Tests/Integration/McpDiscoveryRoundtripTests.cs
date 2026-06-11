@@ -49,10 +49,11 @@ namespace LacertMCP.Tests.Integration
         /// <summary>
         /// Builds + starts an in-process MCP server bound to two anonymous
         /// pipe streams (server-in / server-out), creates a matching
-        /// <see cref="IMcpClient"/> on the crossed ends, and returns a tuple
-        /// the test body uses + disposes.
+        /// <see cref="McpClient"/> on the crossed ends, and returns a tuple
+        /// the test body uses + disposes. (F9 — <c>IMcpClient</c> was folded
+        /// into the concrete <c>McpClient</c> in the SDK's 1.0 release.)
         /// </summary>
-        private static async Task<(IMcpClient client, IHost host)> StartServerAndConnectClientAsync(CancellationToken ct)
+        private static async Task<(McpClient client, IHost host)> StartServerAndConnectClientAsync(CancellationToken ct)
         {
             // Two anonymous pipes give us a duplex byte channel without
             // exposing a real file or network handle. Server reads from
@@ -106,7 +107,7 @@ namespace LacertMCP.Tests.Integration
                 serverInput: clientToServer,
                 loggerFactory: NullLoggerFactory.Instance);
 
-            var client = await McpClientFactory.CreateAsync(
+            var client = await McpClient.CreateAsync(
                 transport,
                 new McpClientOptions
                 {
@@ -129,7 +130,7 @@ namespace LacertMCP.Tests.Integration
             var (client, host) = await StartServerAndConnectClientAsync(cts.Token);
             try
             {
-                var prompts = await client.ListPromptsAsync(cts.Token);
+                var prompts = await client.ListPromptsAsync(cancellationToken: cts.Token);
                 var names = prompts.Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
 
                 // Catches: dropped [McpServerPromptType], renamed assembly,

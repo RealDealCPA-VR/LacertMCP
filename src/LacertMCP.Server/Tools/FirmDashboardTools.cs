@@ -23,27 +23,14 @@ namespace LacertMCP.Server.Tools
     /// 9 module switches and 30+ MCP calls.
     ///
     /// <para>
-    /// Refined-design implementation note: the canonical refinedDesign
-    /// proposed adding parameterized <c>ListClientsAt</c> / <c>ReadEFStatusAt</c>
-    /// overloads to <see cref="LacerteSessionManager"/> so the dashboard
-    /// could be pure-read with zero side effects on the operator's current
-    /// <c>set_context</c>. Those *At overloads still do not exist (the
-    /// session manager is owned by another cluster), so we use the
-    /// snapshot+restore-Context pattern here. Restore runs in a finally
-    /// block so a thrown read can't strand the operator's context.
-    /// </para>
-    ///
-    /// <para>
-    /// R6-09 — because the fan-out mutates the GLOBAL session context
-    /// across awaits, the whole save-set-restore span is serialized through
-    /// <see cref="Internal.ContextScanGate"/> with
-    /// <c>lacerte_year_over_year</c> (the other context-flipping scan
-    /// tool), so the two scans cannot interleave each other's context
-    /// flips. Limitation: tools OUTSIDE the gate (e.g. a concurrent
-    /// <c>lacerte_field_write</c>) can still observe the temporarily set
-    /// read-only tuple — see the gate's class doc. The real fix remains
-    /// the session-manager *At overloads; when they land, drop the
-    /// snapshot/restore shim and this gate with no wire-shape change.
+    /// R6-D2 — the per-tuple reads go through the session manager's
+    /// explicit-context <c>ListClientsAt</c> / <c>ReadEFStatusAt</c>
+    /// overloads, which resolve (dataPath, taxYear, module) per call and
+    /// never touch the active <c>set_context</c>. The dashboard is a true
+    /// pure read: no snapshot/restore, no serialization gate, and a
+    /// concurrent tool call (e.g. <c>lacerte_field_write</c>) can never
+    /// observe a scan-flipped tuple. (This retires the R6-09
+    /// ContextScanGate shim and its documented limitation.)
     /// </para>
     /// </summary>
     [McpServerToolType]
@@ -75,7 +62,7 @@ namespace LacertMCP.Server.Tools
         internal static Func<string?>? RootOverrideForTests { get; set; }
 
         [McpServerTool]
-        [Description("One-call Monday-morning firm snapshot — fans out across every (taxYear, module) under LACERTE_DATA_ROOT (fallback C:\\Lacerte) and returns per-tuple client counts + EF-status histogram + latest StatusDate watermark, plus a firm-level rollup. Replaces the ~30 round-trips required to gather the same picture via lacerte_list_datapaths -> N x lacerte_set_context -> N x lacerte_client_list -> N x lacerte_ef_status. Optional filters: yearFilter narrows to one tax year; modulesFilter narrows to a subset of module characters (default 'ICPSFRTNB' admits all 9); sinceUtc threads through to the EF read for the incremental-delta workflow. Per-tuple errors are surfaced on that row's `error` field — one bad datapath does not poison the aggregate. Pure-read: the operator's current set_context is snapshotted and restored even on exception.")]
+        [Description("One-call Monday-morning firm snapshot — fans out across every (taxYear, module) under LACERTE_DATA_ROOT (fallback C:\\Lacerte) and returns per-tuple client counts + EF-status histogram + latest StatusDate watermark, plus a firm-level rollup. Replaces the ~30 round-trips required to gather the same picture via lacerte_list_datapaths -> N x lacerte_set_context -> N x lacerte_client_list -> N x lacerte_ef_status. Optional filters: yearFilter narrows to one tax year; modulesFilter narrows to a subset of module characters (default 'ICPSFRTNB' admits all 9); sinceUtc threads through to the EF read for the incremental-delta workflow. Per-tuple errors are surfaced on that row's `error` field — one bad datapath does not poison the aggregate. Pure-read: the active set_context is never read or modified — each tuple is read through an explicit per-call context.")]
         public Task<string> LacerteFirmDashboard(
             [Description("Optional integer tax year filter (e.g. 2024). When set, only tuples with this exact tax year are included; when omitted, every discovered year is scanned.")] int? yearFilter = null,
             [Description("Uppercase concatenation of module characters to include (e.g. 'IC' for Individual + Corporate). Default 'ICPSFRTNB' admits all 9 modules. Unknown characters are silently ignored.")] string? modulesFilter = null,
@@ -136,206 +123,159 @@ namespace LacertMCP.Server.Tools
                 foreach (var b in CanonicalStatusBuckets) firmHistogram[b] = 0;
                 firmHistogram["other"] = 0;
 
-                // R6-09 — serialize the whole snapshot-set-restore span
-                // against lacerte_year_over_year via the shared scan gate so
-                // the two context-flipping scans can't interleave. Acquired
-                // BEFORE the snapshot so the saved context can't be a
-                // mid-flight tuple from the other scan.
-                await Internal.ContextScanGate.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                SessionContext? savedContext;
-                try
+                // R6-D2 — each tuple is read through the explicit-context
+                // *At overloads; the active session context is never read,
+                // set, or restored, so no serialization gate is needed and
+                // concurrent tool calls are unaffected by an in-flight scan.
+                foreach (var t in tuples)
                 {
-                    // ---- Snapshot active context for restore-in-finally ----
-                    var status = _session.SessionStatus();
-                    savedContext = status.Context;
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    Dictionary<string, object?>? errorBlock = null;
+                    int clientCount = 0;
+                    int efRowCount = 0;
+                    var perTupleHistogram = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var b in CanonicalStatusBuckets) perTupleHistogram[b] = 0;
+                    perTupleHistogram["other"] = 0;
+                    string? latestStatusDate = null;
+                    DateTime? latestParsedDate = null;
+                    string? undateableFallback = null;
 
                     try
                     {
-                    foreach (var t in tuples)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
+                        // Pull every client row (int.MaxValue overfetch
+                        // is fine — sim is in-memory; live is one ODBC
+                        // round-trip per tuple). The *At read resolves a
+                        // read-only per-call context, so this scan can
+                        // never write.
+                        var clients = await _session.ListClientsAt(
+                            t.DataPath, t.TaxYear, t.Module,
+                            lastNameFilter: null,
+                            limit: int.MaxValue,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        clientCount = clients.Count;
 
-                        Dictionary<string, object?>? errorBlock = null;
-                        int clientCount = 0;
-                        int efRowCount = 0;
-                        var perTupleHistogram = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                        foreach (var b in CanonicalStatusBuckets) perTupleHistogram[b] = 0;
-                        perTupleHistogram["other"] = 0;
-                        string? latestStatusDate = null;
-                        DateTime? latestParsedDate = null;
-                        string? undateableFallback = null;
+                        // EF status join with optional sinceUtc push-down.
+                        var efRows = await _session.ReadEFStatusAt(
+                            t.DataPath, t.TaxYear, t.Module, since, cancellationToken)
+                            .ConfigureAwait(false);
+                        efRowCount = efRows.Count;
 
-                        try
+                        foreach (var r in efRows)
                         {
-                            // Set the tuple's context as read-only so this scan
-                            // can never write. Restored in the outer finally.
-                            _session.SetContext(t.DataPath, t.TaxYear, t.Module, readOnly: true);
-
-                            // Pull every client row (int.MaxValue overfetch
-                            // is fine — sim is in-memory; live is one ODBC
-                            // round-trip per tuple).
-                            var clients = await _session.ListClients(
-                                lastNameFilter: null,
-                                limit: int.MaxValue,
-                                cancellationToken: cancellationToken).ConfigureAwait(false);
-                            clientCount = clients.Count;
-
-                            // EF status join with optional sinceUtc push-down.
-                            var efRows = await _session.ReadEFStatus(since, cancellationToken)
-                                .ConfigureAwait(false);
-                            efRowCount = efRows.Count;
-
-                            foreach (var r in efRows)
+                            if (r.TryGetValue("Status", out var statusObj)
+                                && statusObj is string s
+                                && !string.IsNullOrEmpty(s))
                             {
-                                if (r.TryGetValue("Status", out var statusObj)
-                                    && statusObj is string s
-                                    && !string.IsNullOrEmpty(s))
+                                BumpHistogram(perTupleHistogram, s);
+                            }
+                            else
+                            {
+                                // null-status rows from the LEFT OUTER
+                                // surface as "other" so the histogram
+                                // total matches efRowCount exactly.
+                                perTupleHistogram["other"]++;
+                            }
+
+                            if (r.TryGetValue("StatusDate", out var sdObj)
+                                && sdObj is string sd
+                                && !string.IsNullOrEmpty(sd))
+                            {
+                                // R6-33a — chronological comparison via
+                                // the shared EfStatusDates parse so this
+                                // watermark agrees with ClientSummary's
+                                // ProjectEfStatus "latest" for the same
+                                // rows (CompareOrdinal mis-ordered
+                                // non-ISO date shapes). Unparseable
+                                // strings only win when NO row parses
+                                // (last-seen, matching the R6-32 fallback
+                                // posture).
+                                if (Internal.EfStatusDates.TryParse(sd, out var sdParsed))
                                 {
-                                    BumpHistogram(perTupleHistogram, s);
+                                    if (latestParsedDate == null || sdParsed > latestParsedDate)
+                                    {
+                                        latestParsedDate = sdParsed;
+                                        latestStatusDate = sd;
+                                    }
                                 }
                                 else
                                 {
-                                    // null-status rows from the LEFT OUTER
-                                    // surface as "other" so the histogram
-                                    // total matches efRowCount exactly.
-                                    perTupleHistogram["other"]++;
-                                }
-
-                                if (r.TryGetValue("StatusDate", out var sdObj)
-                                    && sdObj is string sd
-                                    && !string.IsNullOrEmpty(sd))
-                                {
-                                    // R6-33a — chronological comparison via
-                                    // the shared EfStatusDates parse so this
-                                    // watermark agrees with ClientSummary's
-                                    // ProjectEfStatus "latest" for the same
-                                    // rows (CompareOrdinal mis-ordered
-                                    // non-ISO date shapes). Unparseable
-                                    // strings only win when NO row parses
-                                    // (last-seen, matching the R6-32 fallback
-                                    // posture).
-                                    if (Internal.EfStatusDates.TryParse(sd, out var sdParsed))
-                                    {
-                                        if (latestParsedDate == null || sdParsed > latestParsedDate)
-                                        {
-                                            latestParsedDate = sdParsed;
-                                            latestStatusDate = sd;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        undateableFallback = sd;
-                                    }
+                                    undateableFallback = sd;
                                 }
                             }
-                            if (latestStatusDate == null)
-                            {
-                                latestStatusDate = undateableFallback;
-                            }
                         }
-                        catch (LacerteSDKError sdkErr)
+                        if (latestStatusDate == null)
                         {
-                            // Per-tuple isolation: a poisoned datapath
-                            // surfaces on its row only, the aggregate still
-                            // computes across the rest. Carry the structured
-                            // error onto the row so the LLM can render the
-                            // exact remediation per tuple.
-                            errorBlock = new Dictionary<string, object?>
-                            {
-                                ["statusCode"] = sdkErr.StatusCode,
-                                ["statusName"] = sdkErr.StatusName,
-                                ["reason"] = sdkErr.UserMessage,
-                            };
-                            clientCount = 0;
-                            efRowCount = 0;
-                            // Reset the per-tuple histogram (a partially
-                            // populated one would skew the firm rollup).
-                            foreach (var k in perTupleHistogram.Keys.ToList())
-                            {
-                                perTupleHistogram[k] = 0;
-                            }
+                            latestStatusDate = undateableFallback;
                         }
-                        catch (Exception ex) when (!(ex is OperationCanceledException))
-                        {
-                            // Defensive: a non-LacerteSDKError shouldn't
-                            // poison the dashboard either. Wrap as a 9203-ish
-                            // shape on the row so the operator sees the
-                            // exception type without us throwing.
-                            errorBlock = new Dictionary<string, object?>
-                            {
-                                ["statusCode"] = SyntheticStatusCodes.InternalServerError,
-                                ["statusName"] = "InternalServerError",
-                                ["reason"] = ex.Message,
-                            };
-                            clientCount = 0;
-                            efRowCount = 0;
-                            foreach (var k in perTupleHistogram.Keys.ToList())
-                            {
-                                perTupleHistogram[k] = 0;
-                            }
-                        }
-
-                        totalClients += clientCount;
-                        totalEfRows += efRowCount;
-                        foreach (var kv in perTupleHistogram)
-                        {
-                            firmHistogram[kv.Key] = firmHistogram.TryGetValue(kv.Key, out var prev)
-                                ? prev + kv.Value
-                                : kv.Value;
-                        }
-
-                        // Row shape — camelCase keys, taxYear + module
-                        // canonical. statusHistogram surfaces only the
-                        // canonical buckets to keep wire shape compact.
-                        var row = new Dictionary<string, object?>
-                        {
-                            ["taxYear"] = t.TaxYear,
-                            ["module"] = t.Module.ToString(),
-                            ["moduleName"] = t.ModuleName,
-                            ["dataPath"] = t.DataPath,
-                            ["clientCount"] = clientCount,
-                            ["efRowCount"] = efRowCount,
-                            ["statusHistogram"] = perTupleHistogram,
-                            ["latestStatusDate"] = latestStatusDate,
-                        };
-                        if (errorBlock != null) row["error"] = errorBlock;
-                        byContext.Add(row);
                     }
-                }
-                finally
-                {
-                    // Restore the operator's prior context (or leave it null
-                    // if there was none). We cannot ClearContext through the
-                    // public surface, but a null prior means no operator
-                    // workflow can rely on context-being-set across this
-                    // call — so the worst case is a leftover read-only
-                    // context the operator must overwrite, identical to
-                    // their starting state if they call set_context next.
-                    if (savedContext != null)
+                    catch (LacerteSDKError sdkErr)
                     {
-                        try
+                        // Per-tuple isolation: a poisoned datapath
+                        // surfaces on its row only, the aggregate still
+                        // computes across the rest. Carry the structured
+                        // error onto the row so the LLM can render the
+                        // exact remediation per tuple.
+                        errorBlock = new Dictionary<string, object?>
                         {
-                            _session.SetContext(
-                                savedContext.DataPath,
-                                savedContext.Year,
-                                savedContext.Module,
-                                savedContext.ReadOnly);
-                        }
-                        catch
+                            ["statusCode"] = sdkErr.StatusCode,
+                            ["statusName"] = sdkErr.StatusName,
+                            ["reason"] = sdkErr.UserMessage,
+                        };
+                        clientCount = 0;
+                        efRowCount = 0;
+                        // Reset the per-tuple histogram (a partially
+                        // populated one would skew the firm rollup).
+                        foreach (var k in perTupleHistogram.Keys.ToList())
                         {
-                            // Defensive — restore must never throw onto the
-                            // operator path. A failed restore is reported
-                            // through the SetContext error envelope on the
-                            // operator's next call.
+                            perTupleHistogram[k] = 0;
                         }
                     }
-                }
-                }
-                finally
-                {
-                    // R6-09 — release AFTER the restore so the other scan
-                    // tool can never observe a mid-flight tuple.
-                    Internal.ContextScanGate.Gate.Release();
+                    catch (Exception ex) when (!(ex is OperationCanceledException))
+                    {
+                        // Defensive: a non-LacerteSDKError shouldn't
+                        // poison the dashboard either. Wrap as a 9203-ish
+                        // shape on the row so the operator sees the
+                        // exception type without us throwing.
+                        errorBlock = new Dictionary<string, object?>
+                        {
+                            ["statusCode"] = SyntheticStatusCodes.InternalServerError,
+                            ["statusName"] = "InternalServerError",
+                            ["reason"] = ex.Message,
+                        };
+                        clientCount = 0;
+                        efRowCount = 0;
+                        foreach (var k in perTupleHistogram.Keys.ToList())
+                        {
+                            perTupleHistogram[k] = 0;
+                        }
+                    }
+
+                    totalClients += clientCount;
+                    totalEfRows += efRowCount;
+                    foreach (var kv in perTupleHistogram)
+                    {
+                        firmHistogram[kv.Key] = firmHistogram.TryGetValue(kv.Key, out var prev)
+                            ? prev + kv.Value
+                            : kv.Value;
+                    }
+
+                    // Row shape — camelCase keys, taxYear + module
+                    // canonical. statusHistogram surfaces only the
+                    // canonical buckets to keep wire shape compact.
+                    var row = new Dictionary<string, object?>
+                    {
+                        ["taxYear"] = t.TaxYear,
+                        ["module"] = t.Module.ToString(),
+                        ["moduleName"] = t.ModuleName,
+                        ["dataPath"] = t.DataPath,
+                        ["clientCount"] = clientCount,
+                        ["efRowCount"] = efRowCount,
+                        ["statusHistogram"] = perTupleHistogram,
+                        ["latestStatusDate"] = latestStatusDate,
+                    };
+                    if (errorBlock != null) row["error"] = errorBlock;
+                    byContext.Add(row);
                 }
 
                 return new

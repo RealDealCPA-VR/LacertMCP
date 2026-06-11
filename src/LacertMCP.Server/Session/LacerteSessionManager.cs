@@ -703,6 +703,19 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public void SetContext(string dataPath, int taxYear, char module, bool readOnly = false)
         {
+            ValidateContextTuple(dataPath, taxYear, module);
+            Context = new SessionContext(dataPath, taxYear, module, readOnly);
+        }
+
+        /// <summary>
+        /// R6-D2 — shared (dataPath, taxYear, module) tuple validation for
+        /// <see cref="SetContext"/> and the explicit-context <c>*At</c> read
+        /// overloads, so an invalid tuple surfaces the identical structured
+        /// error regardless of whether it arrives via <c>lacerte_set_context</c>
+        /// or a per-call context parameter.
+        /// </summary>
+        private void ValidateContextTuple(string dataPath, int taxYear, char module)
+        {
             if (string.IsNullOrWhiteSpace(dataPath))
             {
                 var ctx = new Dictionary<string, object?> { ["reason"] = "dataPath is required." };
@@ -758,8 +771,22 @@ namespace LacertMCP.Server.Session
                 // context so the tool layer can render a precise message.
                 throw new LacerteSDKError(StatusCodes.InValidClientName, ctx);
             }
+        }
 
-            Context = new SessionContext(dataPath, taxYear, module, readOnly);
+        /// <summary>
+        /// R6-D2 — resolve an explicit per-call read context WITHOUT touching
+        /// the global <see cref="Context"/>. Validation is identical to
+        /// <see cref="SetContext"/> (path / year-bounds / module checks) and
+        /// the 24h auth-expiry probe mirrors <see cref="RequireContext"/>.
+        /// Always read-only: the <c>*At</c> surface is reads-only by design —
+        /// writes must go through the active context so the read-only session
+        /// flag and idempotency fingerprints stay anchored to one tuple.
+        /// </summary>
+        private SessionContext ResolveExplicitContext(string dataPath, int taxYear, char module)
+        {
+            ValidateContextTuple(dataPath, taxYear, module);
+            ThrowIfAuthExpired();
+            return new SessionContext(dataPath, taxYear, module, ReadOnly: true);
         }
 
         // ===================================================================
@@ -821,26 +848,59 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
-                RequireRegistered();
-                ThrowIfLiveUnwired();
-                var module = RequireSimModule(ctx);
-                IEnumerable<DbfRow> rows = module.Clients.Values;
-
-                if (!string.IsNullOrEmpty(lastNameFilter))
-                {
-                    var f = lastNameFilter!;
-                    var nameKey = ctx.Module == 'I' ? "C1_2" : "C1_1";
-                    rows = rows.Where(r =>
-                        r.Fields.TryGetValue(nameKey, out var v) && v is string s &&
-                        s.StartsWith(f, StringComparison.OrdinalIgnoreCase));
-                }
-
-                var result = rows
-                    .Take(Math.Max(0, limit))
-                    .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
-                    .ToList();
-                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
+                return ListClientsCore(ctx, lastNameFilter, limit);
             });
+        }
+
+        /// <summary>
+        /// R6-D2 — explicit-context variant of <see cref="ListClients"/>:
+        /// reads from <paramref name="dataPath"/>/<paramref name="taxYear"/>/
+        /// <paramref name="module"/> per call and NEVER touches the active
+        /// <see cref="Context"/>, so multi-tuple scan tools
+        /// (<c>lacerte_firm_dashboard</c>, <c>lacerte_year_over_year</c>) are
+        /// pure reads with zero side effects on concurrent tool calls.
+        /// Tuple validation matches <see cref="SetContext"/> exactly.
+        /// </summary>
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListClientsAt(
+            string dataPath, int taxYear, char module,
+            string? lastNameFilter = null, int limit = 100,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // lastNameFilter keeps its canonical arg name so the WireLog disk
+            // scope's existing key-based scrub (R6-12) applies unchanged.
+            return WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
+                "ListClientsAt",
+                new { dataPath, taxYear, module = module.ToString(), lastNameFilter, limit }, () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var ctx = ResolveExplicitContext(dataPath, taxYear, module);
+                return ListClientsCore(ctx, lastNameFilter, limit);
+            });
+        }
+
+        private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ListClientsCore(
+            SessionContext ctx, string? lastNameFilter, int limit)
+        {
+            RequireRegistered();
+            ThrowIfLiveUnwired();
+            var module = RequireSimModule(ctx);
+            IEnumerable<DbfRow> rows = module.Clients.Values;
+
+            if (!string.IsNullOrEmpty(lastNameFilter))
+            {
+                var f = lastNameFilter!;
+                var nameKey = ctx.Module == 'I' ? "C1_2" : "C1_1";
+                rows = rows.Where(r =>
+                    r.Fields.TryGetValue(nameKey, out var v) && v is string s &&
+                    s.StartsWith(f, StringComparison.OrdinalIgnoreCase));
+            }
+
+            var result = rows
+                .Take(Math.Max(0, limit))
+                .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
+                .ToList();
+            return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
         }
 
         /// <summary>Reads one client by ClientNumber from DATA1. Returns null if absent.</summary>
@@ -854,16 +914,43 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
-                RequireRegistered();
-                ThrowIfLiveUnwired();
-                var module = RequireSimModule(ctx);
-                IReadOnlyDictionary<string, object?>? result = null;
-                if (module.Clients.TryGetValue(clientNumber, out var row))
-                {
-                    result = CloneRow(row);
-                }
-                return Task.FromResult(result);
+                return ReadClientCore(ctx, clientNumber);
             });
+        }
+
+        /// <summary>
+        /// R6-D2 — explicit-context variant of <see cref="ReadClient"/>; see
+        /// <see cref="ListClientsAt"/> for the contract (per-call tuple,
+        /// active <see cref="Context"/> never touched, SetContext-identical
+        /// validation).
+        /// </summary>
+        public Task<IReadOnlyDictionary<string, object?>?> ReadClientAt(
+            string dataPath, int taxYear, char module,
+            string clientNumber, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return WireLog.Record<IReadOnlyDictionary<string, object?>?>(
+                "ReadClientAt",
+                new { dataPath, taxYear, module = module.ToString(), clientNumber }, () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var ctx = ResolveExplicitContext(dataPath, taxYear, module);
+                return ReadClientCore(ctx, clientNumber);
+            });
+        }
+
+        private Task<IReadOnlyDictionary<string, object?>?> ReadClientCore(
+            SessionContext ctx, string clientNumber)
+        {
+            RequireRegistered();
+            ThrowIfLiveUnwired();
+            var module = RequireSimModule(ctx);
+            IReadOnlyDictionary<string, object?>? result = null;
+            if (module.Clients.TryGetValue(clientNumber, out var row))
+            {
+                result = CloneRow(row);
+            }
+            return Task.FromResult(result);
         }
 
         /// <summary>
@@ -1012,28 +1099,56 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
-                RequireRegistered();
-                ThrowIfLiveUnwired();
-                var module = RequireSimModule(ctx);
-                if (!module.Details.TryGetValue(clientNumber, out var list))
-                {
-                    return Task.FromResult<IReadOnlyList<DetailRow>>(Array.Empty<DetailRow>());
-                }
-                IEnumerable<DetailRow> rows = list;
-                if (seriesFilter.HasValue)
-                {
-                    int wanted = seriesFilter.Value;
-                    // Safe int.Parse per the numeric-string invariant enforced
-                    // by DetailsTools.ValidateDetailWrite (P14-055). A row whose
-                    // Series somehow violates the invariant (e.g. seeded by a
-                    // test that bypassed the validator) is excluded rather than
-                    // throwing — the filter is a "rows that match" semantic.
-                    rows = rows.Where(r => int.TryParse(r.Series, NumberStyles.Integer,
-                        CultureInfo.InvariantCulture, out var s) && s == wanted);
-                }
-                IReadOnlyList<DetailRow> result = rows.ToList();
-                return Task.FromResult(result);
+                return ReadDetailCore(ctx, clientNumber, seriesFilter);
             });
+        }
+
+        /// <summary>
+        /// R6-D2 — explicit-context variant of <see cref="ReadDetail(string, int?, CancellationToken)"/>;
+        /// see <see cref="ListClientsAt"/> for the contract (per-call tuple,
+        /// active <see cref="Context"/> never touched, SetContext-identical
+        /// validation).
+        /// </summary>
+        public Task<IReadOnlyList<DetailRow>> ReadDetailAt(
+            string dataPath, int taxYear, char module,
+            string clientNumber, int? seriesFilter = null,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return WireLog.Record<IReadOnlyList<DetailRow>>(
+                "ReadDetailAt",
+                new { dataPath, taxYear, module = module.ToString(), clientNumber, seriesFilter }, () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var ctx = ResolveExplicitContext(dataPath, taxYear, module);
+                return ReadDetailCore(ctx, clientNumber, seriesFilter);
+            });
+        }
+
+        private Task<IReadOnlyList<DetailRow>> ReadDetailCore(
+            SessionContext ctx, string clientNumber, int? seriesFilter)
+        {
+            RequireRegistered();
+            ThrowIfLiveUnwired();
+            var module = RequireSimModule(ctx);
+            if (!module.Details.TryGetValue(clientNumber, out var list))
+            {
+                return Task.FromResult<IReadOnlyList<DetailRow>>(Array.Empty<DetailRow>());
+            }
+            IEnumerable<DetailRow> rows = list;
+            if (seriesFilter.HasValue)
+            {
+                int wanted = seriesFilter.Value;
+                // Safe int.Parse per the numeric-string invariant enforced
+                // by DetailsTools.ValidateDetailWrite (P14-055). A row whose
+                // Series somehow violates the invariant (e.g. seeded by a
+                // test that bypassed the validator) is excluded rather than
+                // throwing — the filter is a "rows that match" semantic.
+                rows = rows.Where(r => int.TryParse(r.Series, NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out var s) && s == wanted);
+            }
+            IReadOnlyList<DetailRow> result = rows.ToList();
+            return Task.FromResult(result);
         }
 
         /// <summary>
@@ -1084,52 +1199,87 @@ namespace LacertMCP.Server.Session
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var ctx = RequireContext();
-                RequireRegistered();
-                ThrowIfLiveUnwired();
-                var module = RequireSimModule(ctx);
-
-                // LEFT OUTER from Clients so clients without EFilings still
-                // appear (with null EFiling/Status columns); LEFT OUTER from
-                // EFilings so an EFiling with no EFStatus row also appears
-                // (with null Status/StatusDate). Mirrors SqlTemplates.EfStatusJoin.
-                var joined = from c in module.Clients.Values
-                             from f in module.EFilings
-                                 .Where(x => string.Equals(x.ClientId, c.ClientNumber, StringComparison.OrdinalIgnoreCase))
-                                 .DefaultIfEmpty()
-                             from s in module.EFStatuses
-                                 .Where(x => f != null && x.EFilingId == f.Id)
-                                 .DefaultIfEmpty()
-                             select new
-                             {
-                                 Row = (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
-                                 {
-                                     ["ClientId"] = c.Fields.TryGetValue("C1_0", out var c10) ? c10 : c.ClientNumber,
-                                     ["EFilingId"] = f?.Id,
-                                     ["EFId"] = f?.EFId,
-                                     ["InstanceId"] = f?.InstanceId,
-                                     ["Status"] = s?.Status,
-                                     ["StatusDate"] = s?.StatusDate,
-                                 },
-                                 StatusDate = s?.StatusDate,
-                             };
-                IEnumerable<IReadOnlyDictionary<string, object?>> result;
-                if (sinceUtc.HasValue)
-                {
-                    var since = sinceUtc.Value.Date;
-                    result = joined
-                        .Where(x => x.StatusDate != null
-                                    && DateTime.TryParse(x.StatusDate, CultureInfo.InvariantCulture,
-                                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                                        out var dt)
-                                    && dt.Date >= since)
-                        .Select(x => x.Row);
-                }
-                else
-                {
-                    result = joined.Select(x => x.Row);
-                }
-                return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result.ToList());
+                return ReadEFStatusCore(ctx, sinceUtc);
             });
+        }
+
+        /// <summary>
+        /// R6-D2 — explicit-context variant of <see cref="ReadEFStatus(DateTime?, CancellationToken)"/>;
+        /// see <see cref="ListClientsAt"/> for the contract (per-call tuple,
+        /// active <see cref="Context"/> never touched, SetContext-identical
+        /// validation).
+        /// </summary>
+        public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatusAt(
+            string dataPath, int taxYear, char module,
+            DateTime? sinceUtc = null,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
+                "ReadEFStatusAt",
+                new
+                {
+                    dataPath,
+                    taxYear,
+                    module = module.ToString(),
+                    sinceUtc = sinceUtc?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                },
+                () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var ctx = ResolveExplicitContext(dataPath, taxYear, module);
+                return ReadEFStatusCore(ctx, sinceUtc);
+            });
+        }
+
+        private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatusCore(
+            SessionContext ctx, DateTime? sinceUtc)
+        {
+            RequireRegistered();
+            ThrowIfLiveUnwired();
+            var module = RequireSimModule(ctx);
+
+            // LEFT OUTER from Clients so clients without EFilings still
+            // appear (with null EFiling/Status columns); LEFT OUTER from
+            // EFilings so an EFiling with no EFStatus row also appears
+            // (with null Status/StatusDate). Mirrors SqlTemplates.EfStatusJoin.
+            var joined = from c in module.Clients.Values
+                         from f in module.EFilings
+                             .Where(x => string.Equals(x.ClientId, c.ClientNumber, StringComparison.OrdinalIgnoreCase))
+                             .DefaultIfEmpty()
+                         from s in module.EFStatuses
+                             .Where(x => f != null && x.EFilingId == f.Id)
+                             .DefaultIfEmpty()
+                         select new
+                         {
+                             Row = (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+                             {
+                                 ["ClientId"] = c.Fields.TryGetValue("C1_0", out var c10) ? c10 : c.ClientNumber,
+                                 ["EFilingId"] = f?.Id,
+                                 ["EFId"] = f?.EFId,
+                                 ["InstanceId"] = f?.InstanceId,
+                                 ["Status"] = s?.Status,
+                                 ["StatusDate"] = s?.StatusDate,
+                             },
+                             StatusDate = s?.StatusDate,
+                         };
+            IEnumerable<IReadOnlyDictionary<string, object?>> result;
+            if (sinceUtc.HasValue)
+            {
+                var since = sinceUtc.Value.Date;
+                result = joined
+                    .Where(x => x.StatusDate != null
+                                && DateTime.TryParse(x.StatusDate, CultureInfo.InvariantCulture,
+                                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                                    out var dt)
+                                && dt.Date >= since)
+                    .Select(x => x.Row);
+            }
+            else
+            {
+                result = joined.Select(x => x.Row);
+            }
+            return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result.ToList());
         }
 
         // ===================================================================

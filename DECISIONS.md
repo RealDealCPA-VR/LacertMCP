@@ -560,3 +560,25 @@ This entry documents the policy that three code comments have cited since P18 (`
 **Downstream:** any NEW append-only bridge op wrapped in `AutoReconnect.WithRetry` MUST pass `opName` so its retries are greppable, and its tool docs should repeat the read-after-write guidance. If live verification (Phase 9+) shows post-commit transients are more common than assumed, revisit with a write-specific policy (e.g. retry only `RPC_E_SERVERCALL_RETRYLATER` for writes).
 
 **Source:** audit `audit-findings-r6.md` R6-41; `src/LacertMCP.Server/Resilience/AutoReconnect.cs`; `src/LacertMCP.Server/Session/LacerteSessionManager.cs` (Register / WriteDetail / CreateClient AutoReconnect call sites).
+
+## 2026-06-11 — Explicit-context `*At` read overloads; ContextScanGate retired (R6-D2)
+
+**Chosen:** `LacerteSessionManager` gains four explicit-context read overloads — `ListClientsAt` / `ReadClientAt` / `ReadDetailAt` / `ReadEFStatusAt` — each taking `(dataPath, taxYear, module)` per call and resolving a **read-only per-call `SessionContext`** that never touches the global `Context`. Tuple validation is the shared `ValidateContextTuple` extracted from `SetContext`, so an invalid tuple produces the identical structured error on either surface. The two multi-tuple scan tools (`lacerte_firm_dashboard`, `lacerte_year_over_year`) now read exclusively through these overloads; the snapshot/set/restore shims and the `Tools/Internal/ContextScanGate` semaphore are deleted.
+
+**Why:** The gate only serialized the two tools that opted in. A concurrent NON-scan call (e.g. `lacerte_field_write`) could still observe a scan-flipped read-only tuple mid-fan-out and fail 9001 FieldIsReadOnly — or worse, read the wrong year/module. Per-call contexts make the scans true pure reads; there is no longer any window in which the operator's context is not their own.
+
+**Shape decisions:** (1) The `*At` surface is **reads-only by design** — writes must continue through the active context so the read-only session flag and idempotency fingerprints stay anchored to one tuple; do not add `WriteFieldAt`. (2) Each overload records under its own WireLog op name (`ListClientsAt` etc.) with the tuple in args; `lastNameFilter` keeps its canonical key so the R6-12 disk-scope scrub applies unchanged. (3) Live mode: the overloads sit behind the same `ThrowIfLiveUnwired` gate as the active-context reads; when Phase 9 wires ODBC, both surfaces wire up together (the `*At` form maps naturally onto a per-query connection string).
+
+**Test contract:** reference-equality (`Assert.Same`) on `SessionStatus().Context` before/after a scan — `SessionContext` is an immutable record the manager only replaces wholesale, so same-reference proves no `SetContext` happened. `SessionManagerAtOverloadsTests` pins parity, isolation, validation, and the NotSignedIn gate.
+
+**Source:** audit-findings-r6.md R6-09/R6-D2; Todo.md Phase 20 P20-001/P20-002.
+
+## 2026-06-11 — MCP SDK 1.4.0 bump (F9) + System.Text.Json 10.0.7 floor
+
+**Chosen:** `ModelContextProtocol` 0.3.0-preview.4 → **1.4.0** (first-party stable line; netstandard2.0 TFM works on net48). `System.Text.Json` 8.0.6 → **10.0.7** in Server + FieldAccessDumper — NU1605 floor imposed by `ModelContextProtocol.Core` 1.4.0 (STJ 10.x still targets net462+/netstandard2.0). `Microsoft.Extensions.Hosting` stays 8.0.1; NuGet unifies the abstractions packages (Hosting.Abstractions / Logging.Abstractions / DI.Abstractions / Options / Primitives) up to 10.0.7 transitively — mixed 8.x runtime + 10.x abstractions verified by the full suite, server boot, and the discovery-roundtrip harness.
+
+**Server-code API impact: zero.** `WithStdioServerTransport()` / `[McpServerTool]` / `WithToolsFromAssembly()` / `WithPromptsFromAssembly()` all unchanged. Test-harness client API renames only: `IMcpClient` → concrete `McpClient`, `McpClientFactory.CreateAsync` → static `McpClient.CreateAsync`, list/get calls take an optional `RequestOptions` before the token (pass `cancellationToken:` named).
+
+**Behavioral trap worth remembering:** Hosting.Abstractions 10.x **schedules `BackgroundService.ExecuteAsync` asynchronously** instead of running it synchronously up to the first await inside `StartAsync`. `HeartbeatWriter` relied on the old behavior for its "file on disk by the time startup returns" contract — the startup sweep + immediate `TryWrite` now live in a `StartAsync` override (the only correct place once the 8.x quirk is gone). Audit any future `BackgroundService` for the same assumption.
+
+**Source:** Todo.md Phase 20 P20-003/P20-004; NuGet flatcontainer metadata for ModelContextProtocol[.Core] 1.4.0 + System.Text.Json 10.0.7.

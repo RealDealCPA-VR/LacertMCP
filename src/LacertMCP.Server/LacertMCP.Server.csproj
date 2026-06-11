@@ -18,13 +18,14 @@
 
   <ItemGroup>
     <!-- MCP server SDK (Microsoft + Anthropic official). Use the latest stable 1.x. -->
-    <PackageReference Include="ModelContextProtocol" Version="0.3.0-preview.4" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
     <!-- Hosting + DI + logging. 8.0.x is the last line that supports net48 cleanly. -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
-    <!-- System.Text.Json is in BCL on net48 starting with 8.0.5 via NuGet; pull explicitly. -->
-    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <!-- System.Text.Json on net48 ships via NuGet; 10.0.7 matches the floor
+         ModelContextProtocol.Core 1.4.0 requires (still targets net462+). -->
+    <PackageReference Include="System.Text.Json" Version="10.0.7" />
   </ItemGroup>
 
   <ItemGroup>

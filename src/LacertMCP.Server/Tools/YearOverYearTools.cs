@@ -20,17 +20,14 @@ namespace LacertMCP.Server.Tools
     /// then reads the demographics + per-series detail totals from both
     /// and surfaces only changed/delta rows.
     ///
-    /// <para>The original active context is restored in a finally block —
-    /// a thrown read on the toYear leg cannot leave the operator stranded
-    /// on the rewritten fromYear/toYear path.</para>
-    ///
-    /// <para>R6-09 — because the per-year reads mutate the GLOBAL session
-    /// context across awaits, the whole save-set-restore span is serialized
-    /// through <see cref="Internal.ContextScanGate"/> with
-    /// <c>lacerte_firm_dashboard</c> (the other context-flipping scan tool).
-    /// Limitation: tools OUTSIDE the gate (e.g. a concurrent
-    /// <c>lacerte_field_write</c>) can still observe the temporarily
-    /// rewritten read-only context — see the gate's class doc.</para>
+    /// <para>R6-D2 — the per-year reads go through the session manager's
+    /// explicit-context <c>ReadClientAt</c> / <c>ReadDetailAt</c> overloads,
+    /// which resolve (dataPath, taxYear, module) per call and never touch
+    /// the active context. The active context is only READ (to derive the
+    /// per-year paths and module) and never set or restored, so a thrown
+    /// read cannot strand the operator and a concurrent tool call can never
+    /// observe a scan-flipped tuple. (This retires the R6-09
+    /// ContextScanGate shim and its documented limitation.)</para>
     /// </summary>
     [McpServerToolType]
     public sealed class YearOverYearTools
@@ -62,7 +59,7 @@ namespace LacertMCP.Server.Tools
         public YearOverYearTools(LacerteSessionManager session) => _session = session;
 
         [McpServerTool]
-        [Description("Diff ONE client across two tax years. Uses the active context's dataPath/module to derive the per-year paths by rewriting the {YY}Tax segment (e.g. 24Tax -> 23Tax). Returns only changed/delta rows so the LLM doesn't have to filter a full two-year dump. scope='demographics' (DATA1 row diff only), 'detailTotals' (per-series Amount totals diff only), or 'all' (both). seriesIds defaults to [11, 12, 13, 20] (Wages, Interest, Dividends, Income). The active context is snapshotted and restored even on exception. Restrictions: fromYear must be < toYear, both >= 2018, (toYear - fromYear) <= 5. The active context's dataPath must follow the canonical {root}\\{YY}Tax\\{Module}Data layout — flat-share alternate layouts surface an actionable error.")]
+        [Description("Diff ONE client across two tax years. Uses the active context's dataPath/module to derive the per-year paths by rewriting the {YY}Tax segment (e.g. 24Tax -> 23Tax). Returns only changed/delta rows so the LLM doesn't have to filter a full two-year dump. scope='demographics' (DATA1 row diff only), 'detailTotals' (per-series Amount totals diff only), or 'all' (both). seriesIds defaults to [11, 12, 13, 20] (Wages, Interest, Dividends, Income). The active context is only read (for dataPath/module), never modified — per-year reads use explicit per-call contexts. Restrictions: fromYear must be < toYear, both >= 2018, (toYear - fromYear) <= 5. The active context's dataPath must follow the canonical {root}\\{YY}Tax\\{Module}Data layout — flat-share alternate layouts surface an actionable error.")]
         public Task<string> LacerteYearOverYear(
             [Description("ClientNumber (SDK-minted monotonic ID, e.g. '1001') to diff. Must exist in BOTH the fromYear and toYear data folders for full diff; missing in fromYear produces an 'all values are new' diff against toYear.")] string clientNumber,
             [Description("Earlier tax year (>= 2018; must be strictly less than toYear).")] int fromYear,
@@ -192,103 +189,56 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
-                // ---- Read both years, with try/finally context restore -----
-                // R6-09 — the per-year reads mutate the GLOBAL session
-                // context via SetContext. The ContextScanGate semaphore
-                // serializes this save-set-restore span against the other
-                // context-mutating scan tool (lacerte_firm_dashboard) so the
-                // two cannot interleave each other's context flips. See
-                // Internal.ContextScanGate for the residual limitation
-                // (non-scan tools are NOT serialized by this gate).
+                // ---- Read both years --------------------------------------
+                // R6-D2 — per-year reads use the explicit-context *At
+                // overloads, so the active context is never mutated and no
+                // restore / serialization gate is needed.
                 var errors = new List<object>();
-                YearResult? fromResult = null;
-                YearResult? toResult = null;
-                Exception? primary = null;
+                YearResult? fromResult;
+                YearResult? toResult;
 
-                await Internal.ContextScanGate.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    try
-                    {
-                        try
-                        {
-                            fromResult = await ReadYear(
-                                fromPath, fromYear, snapshotCtx.Module,
-                                clientNumber, normScope, effectiveSeries, errors, cancellationToken)
-                                .ConfigureAwait(false);
-                        }
-                        catch (LacerteSDKError sdkErr)
-                        {
-                            // Capture into errors[] but keep going to toYear so
-                            // we can still surface a partial diff.
-                            // R6-07b/c — canonical `taxYear` wire key + the
-                            // {statusCode, statusName, reason} error-row shape
-                            // shared with lacerte_firm_dashboard.
-                            errors.Add(new
-                            {
-                                taxYear = (int?)fromYear,
-                                statusCode = sdkErr.StatusCode,
-                                statusName = sdkErr.StatusName,
-                                reason = sdkErr.UserMessage,
-                            });
-                            fromResult = new YearResult();
-                        }
-
-                        try
-                        {
-                            toResult = await ReadYear(
-                                toPath, toYear, snapshotCtx.Module,
-                                clientNumber, normScope, effectiveSeries, errors, cancellationToken)
-                                .ConfigureAwait(false);
-                        }
-                        catch (LacerteSDKError sdkErr)
-                        {
-                            errors.Add(new
-                            {
-                                taxYear = (int?)toYear,
-                                statusCode = sdkErr.StatusCode,
-                                statusName = sdkErr.StatusName,
-                                reason = sdkErr.UserMessage,
-                            });
-                            toResult = new YearResult();
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        primary = ex;
-                    }
-                    finally
-                    {
-                        // Restore the original context. Wrap in its own try
-                        // so a restore failure can't mask the primary
-                        // exception (if any).
-                        try
-                        {
-                            _session.SetContext(
-                                snapshotCtx.DataPath,
-                                snapshotCtx.Year,
-                                snapshotCtx.Module,
-                                snapshotCtx.ReadOnly);
-                        }
-                        catch (Exception restoreEx)
-                        {
-                            errors.Add(new
-                            {
-                                taxYear = (int?)null,
-                                statusCode = SyntheticStatusCodes.InternalServerError,
-                                statusName = "InternalServerError",
-                                reason = "Failed to restore the original session context after YoY diff: " + restoreEx.Message
-                                    + ". Re-call lacerte_set_context with the original (dataPath, taxYear, module).",
-                            });
-                        }
-                    }
+                    fromResult = await ReadYear(
+                        fromPath, fromYear, snapshotCtx.Module,
+                        clientNumber, normScope, effectiveSeries, errors, cancellationToken)
+                        .ConfigureAwait(false);
                 }
-                finally
+                catch (LacerteSDKError sdkErr)
                 {
-                    Internal.ContextScanGate.Gate.Release();
+                    // Capture into errors[] but keep going to toYear so
+                    // we can still surface a partial diff.
+                    // R6-07b/c — canonical `taxYear` wire key + the
+                    // {statusCode, statusName, reason} error-row shape
+                    // shared with lacerte_firm_dashboard.
+                    errors.Add(new
+                    {
+                        taxYear = (int?)fromYear,
+                        statusCode = sdkErr.StatusCode,
+                        statusName = sdkErr.StatusName,
+                        reason = sdkErr.UserMessage,
+                    });
+                    fromResult = new YearResult();
                 }
 
-                if (primary != null) throw primary;
+                try
+                {
+                    toResult = await ReadYear(
+                        toPath, toYear, snapshotCtx.Module,
+                        clientNumber, normScope, effectiveSeries, errors, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (LacerteSDKError sdkErr)
+                {
+                    errors.Add(new
+                    {
+                        taxYear = (int?)toYear,
+                        statusCode = sdkErr.StatusCode,
+                        statusName = sdkErr.StatusName,
+                        reason = sdkErr.UserMessage,
+                    });
+                    toResult = new YearResult();
+                }
 
                 // ---- Build the diff ----------------------------------------
                 List<object> demographicsDiff = new List<object>();
@@ -380,14 +330,14 @@ namespace LacertMCP.Server.Tools
             string scope, int[] seriesIds, List<object> errors,
             CancellationToken cancellationToken)
         {
-            // Always read-only for YoY — we never mutate during a diff.
-            _session.SetContext(dataPath, year, module, readOnly: true);
-
+            // R6-D2 — explicit per-call contexts; always read-only by the
+            // *At contract, and the active context is never touched.
             var result = new YearResult();
 
             try
             {
-                result.Client = await _session.ReadClient(clientNumber, cancellationToken)
+                result.Client = await _session.ReadClientAt(
+                        dataPath, year, module, clientNumber, cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (LacerteSDKError sdkErr)
@@ -407,7 +357,9 @@ namespace LacertMCP.Server.Tools
             {
                 try
                 {
-                    var detail = await _session.ReadDetail(clientNumber, cancellationToken)
+                    var detail = await _session.ReadDetailAt(
+                            dataPath, year, module, clientNumber,
+                            seriesFilter: null, cancellationToken)
                         .ConfigureAwait(false);
                     // Group by Series, sum Amount; keep only the seriesIds
                     // the caller asked for so the response shape stays tight.

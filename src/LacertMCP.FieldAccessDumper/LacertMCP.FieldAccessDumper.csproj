@@ -16,8 +16,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- System.Text.Json on net48 ships via this PackageReference. -->
-    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <!-- System.Text.Json on net48 ships via this PackageReference.
+         10.0.7 matches the Server's transitive floor (MCP SDK 1.4.0). -->
+    <PackageReference Include="System.Text.Json" Version="10.0.7" />
   </ItemGroup>
 
 </Project>

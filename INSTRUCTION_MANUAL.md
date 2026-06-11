@@ -705,11 +705,11 @@ Exports one client as a portable, self-documenting envelope keyed by the `lacert
 
 #### `lacerte_firm_dashboard`
 
-One-call Monday-morning firm snapshot. Fans out across every `(taxYear, module)` tuple under `LACERTE_DATA_ROOT` and returns per-tuple client counts + EF-status histogram + latest StatusDate watermark, plus a firm-level rollup. Replaces ~30 round-trips. Pure-read: the operator's current `set_context` is snapshotted and restored even on exception.
+One-call Monday-morning firm snapshot. Fans out across every `(taxYear, module)` tuple under `LACERTE_DATA_ROOT` and returns per-tuple client counts + EF-status histogram + latest StatusDate watermark, plus a firm-level rollup. Replaces ~30 round-trips. Pure-read: each tuple is read through an explicit per-call context (R6-D2) — the active `set_context` is never read or modified, and the scan is safe to run concurrently with any other tool (including writes).
 
 - Optional: `yearFilter: int?`, `modulesFilter: string?` (default `"ICPSFRTNB"`), `sinceUtc: string?`.
 
-Per-tuple errors are surfaced on that row's `error` field — one bad datapath does not poison the aggregate. The whole snapshot-set-restore span is serialized against `lacerte_year_over_year` via a shared internal gate (the two fan-out tools can't interleave context mutations across awaits).
+Per-tuple errors are surfaced on that row's `error` field — one bad datapath does not poison the aggregate.
 
 #### `lacerte_pre_filing_check`
 
@@ -734,7 +734,7 @@ Diffs one client across two tax years. Uses the active context's `dataPath/modul
 - Optional: `scope: string = "all"` (one of `"demographics"`, `"detailTotals"`, `"all"`), `seriesIds: int[]?` (default `[11, 12, 13, 20]` = Wages/Interest/Dividends/Income; ignored when `scope == "demographics"`).
 - Response: `{ clientNumber, fromYear, toYear, scope, seriesIds, fromDataPath, toDataPath, foundInFromYear, foundInToYear, demographicsDiff, detailTotalsDiff, errors }`. **Always check `foundInFromYear` / `foundInToYear`** — a typo'd clientNumber returns both `false` instead of masquerading as "no changes between years". Error rows use the canonical `taxYear` key.
 
-The active context's dataPath must follow the canonical `{root}\{YY}Tax\{Module}Data` layout — flat-share alternate layouts surface an actionable error. Active context is snapshotted and restored even on exception, and the scan span is serialized against `lacerte_firm_dashboard` via a shared internal gate so the two fan-out tools can't interleave context mutations.
+The active context's dataPath must follow the canonical `{root}\{YY}Tax\{Module}Data` layout — flat-share alternate layouts surface an actionable error. The active context is only read (to derive the per-year paths and module), never modified — per-year reads use explicit per-call contexts (R6-D2), so the diff is safe to run concurrently with any other tool.
 
 #### `lacerte_field_history`
 
@@ -1462,7 +1462,7 @@ Boundary invariants live in `ARCHITECTURE.md` "Boundary Invariants". The two-mod
 
 ## 20. Glossary
 
-- **MCP** — Model Context Protocol. Anthropic + Microsoft's open spec for connecting LLMs to tools / resources / prompts over a transport (stdio in our case). The C# SDK is `ModelContextProtocol` 0.3.0-preview.4 on NuGet (1.x not yet released).
+- **MCP** — Model Context Protocol. Anthropic + Microsoft's open spec for connecting LLMs to tools / resources / prompts over a transport (stdio in our case). The C# SDK is `ModelContextProtocol` 1.4.0 on NuGet (bumped from 0.3.0-preview.4 on 2026-06-11, F9).
 - **Lacerte** — Intuit's professional tax-prep desktop application. Multi-module: Individual (1040), Corporate (1120), Partnership (1065), S-Corp (1120S), Fiduciary (1041), Exempt (990), Estate (706), Gift (709), Benefit (5500).
 - **Lacerte SDK** — Intuit's developer SDK for Lacerte. Two surfaces: `LacerteSDK_Access` (a mixed-mode .NET/COM assembly for writes + registration) and the `LacerteDSII` ODBC driver (for reads, FoxPro-style).
 - **TAPIStatus** — the Lacerte SDK return code enum for general SDK calls. Range 0..28. See Section 12.

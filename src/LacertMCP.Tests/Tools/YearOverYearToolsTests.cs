@@ -101,8 +101,14 @@ namespace LacertMCP.Tests.Tools
             Assert.Contains("24Tax", toPath.GetString());
         }
 
+        // R6-D2 — YoY reads through the explicit-context *At overloads and
+        // must never touch the active context. Assert.Same pins that:
+        // SessionContext is an immutable record the manager only replaces
+        // wholesale via SetContext, so reference equality proves no
+        // SetContext call happened during the diff (strictly stronger than
+        // the old snapshot/restore value-equality check).
         [Fact]
-        public async Task YearOverYear_RestoresContextOnSuccess()
+        public async Task YearOverYear_NeverTouchesActiveContext_R6_D2()
         {
             var mgr = ToolTestHelpers.NewSimManager();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I', readOnly: true);
@@ -111,14 +117,7 @@ namespace LacertMCP.Tests.Tools
             _ = await tools.LacerteYearOverYear(SeedData.BROW.ClientNumber, 2020, 2024);
 
             var afterCtx = mgr.SessionStatus().Context!;
-            Assert.Equal(beforeCtx.DataPath, afterCtx.DataPath);
-            Assert.Equal(beforeCtx.Year, afterCtx.Year);
-            Assert.Equal(beforeCtx.Module, afterCtx.Module);
-            Assert.Equal(beforeCtx.ReadOnly, afterCtx.ReadOnly);
-
-            // R6-09 — the context-scan gate must be back to its single free
-            // slot after the save-set-restore span completes.
-            Assert.Equal(1, LacertMCP.Server.Tools.Internal.ContextScanGate.Gate.CurrentCount);
+            Assert.Same(beforeCtx, afterCtx);
         }
 
         [Fact]

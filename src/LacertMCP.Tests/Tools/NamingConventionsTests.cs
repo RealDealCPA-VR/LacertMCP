@@ -26,10 +26,12 @@ namespace LacertMCP.Tests.Tools
     /// reintroduce the casing drift or the inner-`success`/`year` /
     /// `clientID` variants the cluster removed.
     /// </summary>
-    // R6-07/R6-09 — class joined the DataRootEnvCollection because the YoY
-    // sentinel below acquires the process-wide ContextScanGate; serializing
-    // with the other gate-exercising test classes keeps their gate-free
-    // assertions deterministic.
+    // R6-07 — class joined the DataRootEnvCollection because the YoY
+    // sentinel below calls SetContext with canonical SeedData paths, whose
+    // PathValidation reads LACERTE_DATA_ROOT at call time; serializing with
+    // the env-mutating test classes keeps that validation deterministic.
+    // (The R6-09 ContextScanGate rationale is retired — R6-D2 removed the
+    // gate; scan tools now use the explicit-context *At read overloads.)
     [Xunit.Collection(LacertMCP.Tests.DataRootEnvCollection.Name)]
     public class NamingConventionsTests
     {

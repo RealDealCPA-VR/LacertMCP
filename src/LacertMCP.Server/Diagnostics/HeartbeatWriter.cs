@@ -177,7 +177,17 @@ namespace LacertMCP.Server.Diagnostics
             return 0;
         }
 
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        /// <summary>
+        /// F9 — the startup sweep + immediate first write live in
+        /// <see cref="StartAsync"/> (not at the top of
+        /// <see cref="ExecuteAsync"/>) so they are guaranteed complete by the
+        /// time host startup returns. Hosting.Abstractions 8.x happened to run
+        /// ExecuteAsync synchronously up to its first await inside StartAsync;
+        /// the 10.x line (pulled in by the MCP SDK 1.4.0 bump) schedules
+        /// ExecuteAsync asynchronously, which silently broke the "a watcher
+        /// polling on startup doesn't wait a full interval" contract.
+        /// </summary>
+        public override Task StartAsync(CancellationToken cancellationToken)
         {
             // R6-35 — opportunistic startup hygiene: sweep sibling heartbeat
             // files (lacerte-mcp-heartbeat-*.json) older than 24h. Dead PIDs
@@ -190,6 +200,11 @@ namespace LacertMCP.Server.Diagnostics
             // wait a full interval before seeing the file.
             TryWrite();
 
+            return base.StartAsync(cancellationToken);
+        }
+
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
             try
             {
                 while (!stoppingToken.IsCancellationRequested)

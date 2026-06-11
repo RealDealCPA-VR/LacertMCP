@@ -7,7 +7,7 @@ Locked from research synthesis on 2026-05-30. Update only when a structural rule
 ## Stack
 
 * **Language / runtime:** C# / **.NET Framework 4.8** (net48), x64.
-* **MCP SDK:** `ModelContextProtocol` 0.3.0-preview.4 (Microsoft + Anthropic official preview; 1.x not yet on NuGet), stdio transport. See `DECISIONS.md` "MCP SDK version pinning" 2026-05-30.
+* **MCP SDK:** `ModelContextProtocol` 1.4.0 (Microsoft + Anthropic official stable), stdio transport. Bumped from 0.3.0-preview.4 on 2026-06-11 (F9) — see `DECISIONS.md` "MCP SDK 1.4.0 bump" 2026-06-11; original pinning rationale in the 2026-05-30 entry.
 * **COM interop:** Direct references to `LacerteSDK_Access.dll` / `LacerteSDK_Interfaces.dll` / `LacerteSDK_SharedInterfaces.dll`.
 * **ODBC:** `System.Data.Odbc` built-in, against `LacerteDSIIDriver` (DSN `LacerteDSII` or DSN-less).
 * **Tests:** xUnit.

@@ -270,7 +270,7 @@ The server registers **42 MCP tools**, grouped below by the same categories `lac
 
 | Tool | Params | What it does |
 | --- | --- | --- |
-| `lacerte_firm_dashboard` | `yearFilter?`, `modulesFilter?`, `sinceUtc?` | Firm-wide snapshot fanning across every (taxYear, module) under `LACERTE_DATA_ROOT`. Context snapshot/restore; scan serialized against `lacerte_year_over_year` via an internal gate. |
+| `lacerte_firm_dashboard` | `yearFilter?`, `modulesFilter?`, `sinceUtc?` | Firm-wide snapshot fanning across every (taxYear, module) under `LACERTE_DATA_ROOT`. Pure read via explicit per-call contexts — never touches the active `set_context` (R6-D2). |
 
 ### Accelerators (4)
 
