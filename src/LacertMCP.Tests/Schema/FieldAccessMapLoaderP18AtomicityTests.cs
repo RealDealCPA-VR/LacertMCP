@@ -300,9 +300,17 @@ namespace LacertMCP.Tests.Schema
             {
                 tasks[i] = Task.Run(() => FieldAccessMapLoader.ReloadCaches());
             }
-            await Task.WhenAny(
-                Task.WhenAll(tasks),
-                Task.Delay(TimeSpan.FromSeconds(5)));
+            // Must observe the snapshot only AFTER every reload has quiesced —
+            // reading mid-reload (the old WhenAny/Delay-then-assert pattern) sees
+            // a not-yet-swapped snapshot still holding the lazily-populated 'I'/'C'
+            // buckets, which is a torn read, not a real convergence failure.
+            // Keep a generous hang-guard that FAILS on deadlock rather than
+            // silently asserting on torn state.
+            var all = Task.WhenAll(tasks);
+            var finished = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(30)));
+            Assert.True(finished == all,
+                "32 concurrent ReloadCaches did not complete within 30s — possible deadlock.");
+            await all; // surface any exception thrown inside the reloads (none expected)
 
             var (modules, overlays) = GetSnapshotDicts();
             Assert.NotNull(modules);
