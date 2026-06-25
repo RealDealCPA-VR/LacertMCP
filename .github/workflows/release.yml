@@ -1,0 +1,27 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build distributable zip (server + CLI + schema tree)
+        shell: pwsh
+        run: ./scripts/release.ps1 -Version "${{ github.ref_name }}".TrimStart('v') -Force
+      - name: Locate artifact
+        id: art
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Recurse -Filter 'LacertMCP-*.zip' | Select-Object -First 1
+          "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.art.outputs.path }}
+          generate_release_notes: true
