@@ -45,6 +45,14 @@
     </Content>
     <!-- P14-041: keep the coverlet runsettings visible in the project tree. -->
     <None Include="coverlet.runsettings" />
+    <!-- Serialize test collections: the suite shares process-global static state
+         (WireLogRing, StatsRegistry, FieldAccessMapLoader._snapshot) that each
+         class resets in setup. Parallel collections race those resets, causing
+         intermittent count / empty-cache failures. Must land in the test bin for
+         the xUnit runner to honor it. -->
+    <None Update="xunit.runner.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
