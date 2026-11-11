@@ -66,7 +66,7 @@ namespace LacertMCP.Tests.Tools
             var keys = new HashSet<string>();
             foreach (var prop in result.EnumerateObject()) keys.Add(prop.Name);
             Assert.Equal(
-                new HashSet<string> { "statusCode", "statusName", "table", "clientNumber", "field", "dryRun" },
+                new HashSet<string> { "statusCode", "statusName", "table", "clientNumber", "field", "dryRun", "verified", "verificationNote" },
                 keys);
         }
 

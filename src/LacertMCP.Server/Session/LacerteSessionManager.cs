@@ -47,7 +47,7 @@ namespace LacertMCP.Server.Session
     /// wire call).
     /// </para>
     /// </summary>
-    public sealed class LacerteSessionManager : IDisposable
+    public sealed partial class LacerteSessionManager : IDisposable
     {
         // ----- Mode + dependencies -----------------------------------------
 
@@ -883,7 +883,8 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, string? lastNameFilter, int limit)
         {
             RequireRegistered();
-            ThrowIfLiveUnwired();
+            if (Mode == SessionMode.Live)
+                return Task.FromResult(LiveListClients(ctx, lastNameFilter, limit));
             var module = RequireSimModule(ctx);
             IEnumerable<DbfRow> rows = module.Clients.Values;
 
@@ -943,7 +944,8 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, string clientNumber)
         {
             RequireRegistered();
-            ThrowIfLiveUnwired();
+            if (Mode == SessionMode.Live)
+                return Task.FromResult(LiveReadClient(ctx, clientNumber));
             var module = RequireSimModule(ctx);
             IReadOnlyDictionary<string, object?>? result = null;
             if (module.Clients.TryGetValue(clientNumber, out var row))
@@ -978,7 +980,11 @@ namespace LacertMCP.Server.Session
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
             RequireRegistered();
-            ThrowIfLiveUnwired();
+            if (Mode == SessionMode.Live)
+            {
+                if (!string.IsNullOrEmpty(stateAbbrev)) ValidateReadStateFilter(stateAbbrev!);
+                return Task.FromResult(LiveReadTable(ctx, table, clientNumber, stateAbbrev));
+            }
             var module = RequireSimModule(ctx);
 
             IEnumerable<DbfRow> rows;
@@ -1015,18 +1021,7 @@ namespace LacertMCP.Server.Session
             // the Errors cluster).
             if (!string.IsNullOrEmpty(stateAbbrev))
             {
-                var trimmed = stateAbbrev!.Trim();
-                if (trimmed.Length == 0 || !_rxStateAbbr.IsMatch(trimmed.ToUpperInvariant()))
-                {
-                    throw new LacerteSDKError(
-                        SyntheticStatusCodes.DetailWriteInvalid,
-                        new Dictionary<string, object?>
-                        {
-                            ["field"] = "stateAbbrev",
-                            ["value"] = stateAbbrev,
-                            ["reason"] = "stateAbbrev must be a 2-letter US/territory postal code (e.g. CA, NY). For a full state name use the postal abbreviation: 'California' -> 'CA'.",
-                        });
-                }
+                var trimmed = ValidateReadStateFilter(stateAbbrev!);
                 rows = rows.Where(r => string.Equals(r.StateAbbrev, trimmed, StringComparison.OrdinalIgnoreCase));
             }
 
@@ -1034,6 +1029,24 @@ namespace LacertMCP.Server.Session
                 .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
                 .ToList();
             return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
+        }
+
+        /// <summary>P16-039 read-filter check shared by the sim and live table reads; returns the trimmed value.</summary>
+        private static string ValidateReadStateFilter(string stateAbbrev)
+        {
+            var trimmed = stateAbbrev!.Trim();
+            if (trimmed.Length == 0 || !_rxStateAbbr.IsMatch(trimmed.ToUpperInvariant()))
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["field"] = "stateAbbrev",
+                        ["value"] = stateAbbrev,
+                        ["reason"] = "stateAbbrev must be a 2-letter US/territory postal code (e.g. CA, NY). For a full state name use the postal abbreviation: 'California' -> 'CA'.",
+                    });
+            }
+            return trimmed;
         }
 
         /// <summary>DATA2 subclient rows for a given client.</summary>
@@ -1129,7 +1142,8 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, string clientNumber, int? seriesFilter)
         {
             RequireRegistered();
-            ThrowIfLiveUnwired();
+            if (Mode == SessionMode.Live)
+                return Task.FromResult(LiveReadDetail(ctx, clientNumber, seriesFilter));
             var module = RequireSimModule(ctx);
             if (!module.Details.TryGetValue(clientNumber, out var list))
             {
@@ -1236,7 +1250,8 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, DateTime? sinceUtc)
         {
             RequireRegistered();
-            ThrowIfLiveUnwired();
+            if (Mode == SessionMode.Live)
+                return Task.FromResult(LiveReadEFStatus(ctx, sinceUtc));
             var module = RequireSimModule(ctx);
 
             // LEFT OUTER from Clients so clients without EFilings still
@@ -1541,6 +1556,21 @@ namespace LacertMCP.Server.Session
                 {
                     StoreIdempotent(idempotencyKey, payload, result);
                 }
+                else
+                {
+                    // Accuracy: a non-Success status from the live bridge (e.g.
+                    // DBFNotAccessable when the return is open in Lacerte) is a
+                    // FAILED write. Returning it as a value let callers (notably
+                    // the bulk tools) count it as success. Sim throws on failure,
+                    // so throwing here also restores two-mode parity.
+                    throw new LacerteSDKError(result, new Dictionary<string, object?>
+                    {
+                        ["op"] = "WriteField",
+                        ["table"] = table,
+                        ["clientNumber"] = clientNumber,
+                        ["field"] = field,
+                    });
+                }
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1693,6 +1723,19 @@ namespace LacertMCP.Server.Session
                 if (result == StatusCodes.Success)
                 {
                     StoreIdempotent(idempotencyKey, payload, result);
+                }
+                else
+                {
+                    // Accuracy: a non-Success status from the live bridge (e.g.
+                    // DBFNotAccessable when the return is open in Lacerte) is a
+                    // FAILED write. Returning it as a value let callers (notably
+                    // the bulk tools) count it as success. Sim throws on failure,
+                    // so throwing here also restores two-mode parity.
+                    throw new LacerteSDKError(result, new Dictionary<string, object?>
+                    {
+                        ["op"] = "WriteDetail",
+                        ["clientNumber"] = clientNumber,
+                    });
                 }
                 return result;
             }).ConfigureAwait(false);
@@ -1864,6 +1907,18 @@ namespace LacertMCP.Server.Session
                 {
                     StoreIdempotent(idempotencyKey, payload, result);
                 }
+                else
+                {
+                    // Accuracy: a non-Success status from the live bridge (e.g.
+                    // DBFNotAccessable when the return is open in Lacerte) is a
+                    // FAILED write. Returning it as a value let callers (notably
+                    // the bulk tools) count it as success. Sim throws on failure,
+                    // so throwing here also restores two-mode parity.
+                    throw new LacerteSDKError(result.Status, new Dictionary<string, object?>
+                    {
+                        ["op"] = "CreateClient",
+                    });
+                }
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1976,14 +2031,6 @@ namespace LacertMCP.Server.Session
         /// the bridge layer with OPPOSITE semantics (throws when COM is not
         /// available). The rename here resolves the name collision.</para>
         /// </summary>
-        private void ThrowIfLiveUnwired()
-        {
-            if (Mode == SessionMode.Live)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable);
-            }
-        }
-
         // ===================================================================
         // Internals — sim adapters
         //
@@ -3395,6 +3442,7 @@ namespace LacertMCP.Server.Session
             // P14-060 — _odbc is typed LacerteDsnReader? now; direct dispose
             // is cleaner than the as-IDisposable cast that hid the type.
             _odbc?.Dispose();
+            DisposeLiveReaders();
             // Dispose all idempotency-lock semaphores.
             foreach (var sem in _idempotencyLocks.Values) sem.Dispose();
         }

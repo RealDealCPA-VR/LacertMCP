@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Session;
+using LacertMCP.Server.Tools.Internal;
 using ModelContextProtocol.Server;
 
 namespace LacertMCP.Server.Tools
@@ -359,6 +360,12 @@ namespace LacertMCP.Server.Tools
                             rowKey,
                             cancellationToken).ConfigureAwait(false);
 
+                        var verification = dryRun
+                            ? null
+                            : await FieldWriteCore.VerifyOrThrow(_session, "WriteFieldBulk", table,
+                                entry.ClientNumber, entry.Field, entry.Value, entry.SubClientId, entry.StateAbbrev,
+                                cancellationToken).ConfigureAwait(false);
+
                         var info = StatusCodes.GetStatusInfo(status);
                         successCount++;
                         perItem.Add(new
@@ -369,6 +376,8 @@ namespace LacertMCP.Server.Tools
                             success = true,
                             statusCode = status,
                             statusName = info.Name,
+                            verified = verification?.Verified,
+                            verificationNote = verification?.Note,
                         });
                     }
                     catch (LacerteSDKError sdkErr)

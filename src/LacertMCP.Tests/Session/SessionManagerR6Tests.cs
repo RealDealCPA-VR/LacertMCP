@@ -262,8 +262,12 @@ namespace LacertMCP.Tests.Session
             var row = NewRow(50.0, "r6-04-wd");
             // Attempt 1: the live bridge RETURNS the failure int (return is
             // open in the Lacerte UI). It must NOT be cached under the key.
-            var r1 = await mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd");
-            Assert.Equal(StatusCodes.DBFNotAccessable, r1);
+            // A non-Success live status is a failed write and now surfaces as a
+            // structured error (sim parity) instead of a return value callers
+            // could mistake for success.
+            var e1 = await Assert.ThrowsAsync<LacerteSDKError>(() =>
+                mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
+            Assert.Equal(StatusCodes.DBFNotAccessable, e1.StatusCode);
             Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
                 "R6-04: a non-Success result must not be cached — pre-fix the failure was sticky for 24h");
 
@@ -288,8 +292,9 @@ namespace LacertMCP.Tests.Session
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
             var args = new CreateClientArgs("R604CC", "Individual", "F", "L", null);
-            var r1 = await mgr.CreateClient(args, idempotencyKey: "r6-04-cc");
-            Assert.Equal(StatusCodes.DBFNotAccessable, r1.Status);
+            var e1 = await Assert.ThrowsAsync<LacerteSDKError>(() =>
+                mgr.CreateClient(args, idempotencyKey: "r6-04-cc"));
+            Assert.Equal(StatusCodes.DBFNotAccessable, e1.StatusCode);
             Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-cc", out _));
 
             var r2 = await mgr.CreateClient(args, idempotencyKey: "r6-04-cc");

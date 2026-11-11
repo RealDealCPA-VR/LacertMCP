@@ -38,7 +38,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Write a single field value to a DATA1..DATA5 row for the active context (DATA6/DATA7 are read-only per spec). Pre-TY21 contexts use WriteToDBFDatabase; TY21+ contexts route to UpdateTaxReturn — both transparently, no caller branching needed. This is the primary write entrypoint for all years; lacerte_update_return is a thin alias retained for SDK-docs parity. Returns the TAPIStatus integer (1=Success).")]
+        [Description("Write a single field value to a DATA1..DATA5 row for the active context (DATA6/DATA7 are read-only per spec). Live mode writes TY21+ returns via UpdateTaxReturn; live pre-TY21 writes are refused with 9202 SimulationOnly (not yet supported). After every real (non-dry-run) write the field is read back from Lacerte: verified=true means the stored value matches; a mismatch returns 9022 WriteNotVerified with the value actually on the return — never report a write as done unless verified is true (verified=null means the row could not be identified for read-back; check it with lacerte_table_read). This is the primary write entrypoint; lacerte_update_return is a thin alias retained for SDK-docs parity.")]
         public Task<string> LacerteFieldWrite(
             [Description("DBF table number. 1=Client, 2=SubClient, 3=State, 4=StateSubClient, 5=Status are writable; 6=Display and 7=Forms are read-only per spec §2 and will be rejected with ExposedForRead.")] int table,
             [Description("Lacerte ClientNumber (the C{t}_0 identifier, not the operator-chosen ClientId).")] string clientNumber,

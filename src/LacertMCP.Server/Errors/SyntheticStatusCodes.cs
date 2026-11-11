@@ -145,6 +145,14 @@ namespace LacertMCP.Server.Errors
         // afterwards. P17-008. Context carries {expected, actual, table}.
         public const int BulkBatchCountMismatch = 9021;
 
+        // 9022 — the write reported Success but reading the field straight
+        // back from Lacerte (fresh ODBC connection in live mode) returned a
+        // different value, or the row could not be found. The write may have
+        // landed partially, been transformed by Lacerte, or gone to the wrong
+        // row. Context carries {op, table, clientNumber, field, written,
+        // readBack, reason}.
+        public const int WriteNotVerified = 9022;
+
         // ---- 9100–9199: auth lifecycle ----
         // 9101 reserved for the architecture-doc cross-reference (re-auth surfacing path).
         // 9102 idempotency-conflict per session manager design in Todo.md task #31.
@@ -289,6 +297,12 @@ namespace LacertMCP.Server.Errors
                 Severity.Error,
                 "lacerte_field_write_bulk caller-supplied expectedCount does not match entries.Length. The expectedCount cross-check exists to catch LLM-vs-operator intent drift BEFORE any row runs.",
                 "Inspect context.expected and context.actual to see which side drifted. If the operator's intended target count is correct, fix the entries[] payload to match; if the entries[] payload is correct, drop or update the expectedCount assertion. Do NOT just re-call with expectedCount = entries.Length — that defeats the cross-check."),
+
+            [WriteNotVerified] = new StatusInfo(
+                "WriteNotVerified",
+                Severity.Error,
+                "Lacerte accepted the write, but reading the field back returned a different value (or no row). The value on the return is NOT what was requested. See context.written, context.readBack and context.reason.",
+                "Do NOT retry blindly and do NOT report the write as done. Read the client with lacerte_client_read / lacerte_table_read to see the current value, then tell the operator exactly what is on the return. Common causes: the return is open in the Lacerte UI, the field expects a different format (date / number / code), or the subClientId / stateAbbrev targets a different row."),
 
             [ReAuthRequired] = new StatusInfo(
                 "ReAuthRequired",

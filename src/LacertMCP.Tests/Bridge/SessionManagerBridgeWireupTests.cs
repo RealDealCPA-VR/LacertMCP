@@ -228,19 +228,24 @@ namespace LacertMCP.Tests.Bridge
         }
 
         // -----------------------------------------------------------------
-        // Bridge wire-up: read chokepoints still throw BridgeUnavailable in
-        // live mode (ODBC path not yet wired — Phase 4 task #39).
+        // Bridge wire-up: live reads now route to ODBC (LacerteSessionManager.Live.cs);
+        // shape coverage lives in Session/LiveReadPathTests.cs.
         // -----------------------------------------------------------------
 
         [Fact]
-        public async Task Live_ListClients_StillThrowsBridgeUnavailable()
+        public async Task Live_ListClients_RoutesToOdbc_NotBridgeUnavailable()
         {
             var fake = new RecordingBridge();
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
+            string? seenConnectionString = null;
+            mgr.LiveReaderFactory = cs => { seenConnectionString = cs; throw new LacerteSDKError(StatusCodes.DBFNotAccessable); };
 
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.ListClients());
-            Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(StatusCodes.DBFNotAccessable, ex.StatusCode);
+            Assert.Contains("Driver={LacerteDSIIDriver}", seenConnectionString);
+            Assert.Contains("ReturnType=Individual", seenConnectionString);
+            Assert.Contains("TaxYear=24", seenConnectionString);
         }
 
         // -----------------------------------------------------------------
