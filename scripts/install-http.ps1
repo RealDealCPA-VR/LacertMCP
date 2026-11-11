@@ -82,10 +82,24 @@ Start-Sleep -Seconds 1
 
 Write-Host "==> Copying to $installDir"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-foreach ($part in 'server', 'cli') {
+# Keep a writable-field map already built by the dumper (the release ships empty shards).
+$mapDir = Join-Path $installDir 'server\Schema\FieldAccessMap\base'
+$mapKeep = $null
+if ((Test-Path $mapDir) -and (Get-ChildItem $mapDir -Filter *.json | Where-Object { $_.Length -gt 2 })) {
+    $mapKeep = Join-Path $env:TEMP ("LacertMCP-fieldmap-" + [guid]::NewGuid().ToString('N'))
+    Copy-Item -Path $mapDir -Destination $mapKeep -Recurse -Force
+}
+foreach ($part in 'server', 'cli', 'dumper') {
+    if (-not (Test-Path (Join-Path $here $part))) { continue }
     $dest = Join-Path $installDir $part
     if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
     Copy-Item -Path (Join-Path $here $part) -Destination $dest -Recurse -Force
+}
+
+if ($mapKeep) {
+    Write-Host '==> Restoring your existing writable-field map'
+    Get-ChildItem $mapKeep -Filter *.json | Where-Object { $_.Length -gt 2 } | Copy-Item -Destination $mapDir -Force
+    Remove-Item $mapKeep -Recurse -Force
 }
 
 Write-Host "==> URL reservation http://+:$Port/ for $account"
@@ -142,6 +156,11 @@ foreach ($c in $checks) {
     if ($c.status -ne 'ok' -and $c.fix) { Write-Host ("         -> {0}" -f $c.fix) }
 }
 $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1)
+$dumper = Join-Path $installDir 'dumper\LacertMCP.FieldAccessDumper.exe'
+Write-Host ''
+Write-Host 'To allow field writes, build the writable-field map once per tax year you use (then restart by signing out/in, or re-run this installer):'
+Write-Host "  & '$dumper' --live --year 2024 --out '$mapDir'"
+Write-Host '  (re-running this installer keeps a map you have already built)'
 Write-Host ''
 Write-Host "Control page:  http://localhost:$Port/   (from other tailnet devices: http://$ip`:$Port/)" -ForegroundColor Green
 Write-Host "Agents connect to: http://$ip`:$Port/mcp   (give each device access on the Access tab first)" -ForegroundColor Green

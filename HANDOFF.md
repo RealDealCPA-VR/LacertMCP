@@ -28,7 +28,7 @@ Branch `feat/live-reads-verified-writes` (not merged). Built and tested on the L
 
 1. Install: release zip → `install-http.ps1`. `doctor` should be green for SDK/ODBC/AppID.
 2. `lacerte-mcp register` (first time) — record the real AccessGranted/NotSignedIn integers (F1/F7).
-3. `LacertMCP.FieldAccessDumper.exe --year <yyyy>` for each year in use; restart; control page "Writable fields" goes green.
+3. `dumper\LacertMCP.FieldAccessDumper.exe --live --year <yyyy> --out %LOCALAPPDATA%\LacertMCP\server\Schema\FieldAccessMap\base` for each year in use (without `--out` it writes next to itself and the server never sees it); restart; control page "Writable fields" goes green. Re-running install-http.ps1 keeps a built map.
 4. Control page → Data folders → **Test read** on each folder. Confirms connection string, ReturnType, DATA1 columns, client-number format.
 5. Read a known client with `lacerte_client_read`, `lacerte_table_read` 2/3/5/7, `lacerte_detail_read`, `lacerte_ef_status`; compare against the Lacerte UI. **Check:** DATA2/DATA4 subclient id column name (code looks for `SubClientID`/`SubClientNumber`), TY21+ per-client table names (`[CLIENT-SubClientInfo]` etc.).
 6. On a TEST client only: `lacerte_field_write` a harmless field with Lacerte closed → expect `verified:true`; with the return open in Lacerte → expect a DBFNotAccessable error, not success. Confirm the fresh-connection read-back sees the COM write.

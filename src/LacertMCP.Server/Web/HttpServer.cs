@@ -748,7 +748,7 @@ namespace LacertMCP.Server.Web
             return entries > 0
                 ? new HealthCheck("Writable fields", "ok", entries + " field rules loaded; writes to any other field are refused.", null)
                 : new HealthCheck("Writable fields", "warn", "The field access map is empty, so every field write is refused (reads work).",
-                    "On this PC run LacertMCP.FieldAccessDumper.exe --year <year> for each tax year you use, then restart the server.");
+                    "On this PC run dumper\\LacertMCP.FieldAccessDumper.exe --live --year <year> --out \"" + Path.Combine(Schema.FieldAccessMapLoader.GetSchemaRoot(), "base") + "\" for each tax year you use, then restart the server.");
         }
 
         private static int CountLeaves(JsonElement e)
