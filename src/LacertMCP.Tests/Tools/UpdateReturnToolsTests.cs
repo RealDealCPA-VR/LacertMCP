@@ -57,6 +57,8 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal("1001", result.GetProperty("clientNumber").GetString());
             Assert.Equal(AccessMapTestFixture.WritableField, result.GetProperty("field").GetString());
             Assert.False(result.GetProperty("dryRun").GetBoolean());
+            // The value was read back from the store and matched.
+            Assert.True(result.GetProperty("verified").GetBoolean());
 
             // P14-026: the response MUST NOT carry an `api` field — the live
             // wire choice belongs to the session manager (Boundary Invariant

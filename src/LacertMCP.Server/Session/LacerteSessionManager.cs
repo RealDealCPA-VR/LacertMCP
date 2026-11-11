@@ -133,7 +133,23 @@ namespace LacertMCP.Server.Session
 
         // ----- Context + per-(year,module) caches --------------------------
 
-        public SessionContext? Context { get; private set; }
+        private SessionContext? _globalContext;
+
+        /// <summary>
+        /// The active (dataPath, taxYear, module) tuple. Under the stdio
+        /// transport there is one per process. Under the HTTP transport every
+        /// MCP connection runs inside its own <see cref="SessionScope"/>, so
+        /// agent A's lacerte_set_context can never redirect agent B's writes.
+        /// </summary>
+        public SessionContext? Context
+        {
+            get => SessionScope.Current is { } scope ? scope.Context : _globalContext;
+            private set
+            {
+                if (SessionScope.Current is { } scope) scope.Context = value;
+                else _globalContext = value;
+            }
+        }
 
         // Cached CanUseNewApis answers keyed by (year, module). Mirrors the
         // QB MCP host-info-cache pattern (lazy + per-process).
@@ -704,6 +720,9 @@ namespace LacertMCP.Server.Session
         public void SetContext(string dataPath, int taxYear, char module, bool readOnly = false)
         {
             ValidateContextTuple(dataPath, taxYear, module);
+            // A device granted read-only access on the control page can never
+            // open a writable context, whatever the agent asks for.
+            if (SessionScope.Current?.ReadOnlyAccess == true) readOnly = true;
             Context = new SessionContext(dataPath, taxYear, module, readOnly);
         }
 
@@ -1999,7 +2018,7 @@ namespace LacertMCP.Server.Session
         private void RejectIfReadOnly(string operation, int? table = null, string? fieldName = null)
         {
             var ctx = RequireContext();
-            if (!ctx.ReadOnly) return;
+            if (!ctx.ReadOnly && SessionScope.Current?.ReadOnlyAccess != true) return;
 
             var reason = fieldName == null
                 ? $"Read-only session: {operation} rejected."
@@ -2018,19 +2037,6 @@ namespace LacertMCP.Server.Session
             throw new LacerteSDKError(SyntheticStatusCodes.FieldIsReadOnly, data);
         }
 
-        /// <summary>
-        /// P14-003/P14-052/P14-059 — Read paths are sim-only until Phase 9
-        /// wires the bridge + ODBC. Sim falls through; live throws
-        /// BridgeUnavailable. Name is intentionally inverted-as-explicit so
-        /// the call sites read truthfully ("throw if we're in live mode and
-        /// the wire isn't there yet"). When Phase 4 task #39 lands and ODBC
-        /// reads are wired, this helper plus its five call sites can be
-        /// deleted in one sweep.
-        ///
-        /// <para>NOTE: <see cref="LacerteAccessClient.EnsureLive"/> exists in
-        /// the bridge layer with OPPOSITE semantics (throws when COM is not
-        /// available). The rename here resolves the name collision.</para>
-        /// </summary>
         // ===================================================================
         // Internals — sim adapters
         //

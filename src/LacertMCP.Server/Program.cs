@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using LacertMCP.Server.Diagnostics;
 using LacertMCP.Server.Session;
 using LacertMCP.Server.Startup;
+using LacertMCP.Server.Web;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -88,7 +89,13 @@ namespace LacertMCP.Server
             // version stamp. The SDK 0.3.0-preview.4 does not expose a fluent
             // .WithServerInfo(...) extension; ServerInfo is set inside the
             // AddMcpServer configureOptions lambda via McpServerOptions.
-            builder.Services
+            // Sign in to Lacerte once at startup (Boundary Invariant 8). Without
+            // this nothing outside the tests ever called Register(), so every
+            // data tool failed with 203 NotSignedIn in both modes.
+            builder.Services.AddHostedService<StartupRegistration>();
+
+            var httpMode = HttpServer.IsHttpMode(args);
+            var mcp = builder.Services
                 .AddMcpServer(opts =>
                 {
                     opts.ServerInfo = new ModelContextProtocol.Protocol.Implementation
@@ -98,9 +105,37 @@ namespace LacertMCP.Server
                         Version = BuildInfo.Version,
                     };
                 })
-                .WithStdioServerTransport()
                 .WithToolsFromAssembly()
                 .WithPromptsFromAssembly();
+
+            if (httpMode)
+            {
+                // HTTP mode: MCP over Streamable HTTP + the control page, on
+                // loopback and this PC's tailnet address only (Web/HttpServer.cs).
+                builder.Services.AddSingleton<Tailscale>();
+                builder.Services.AddSingleton<DeviceAccess>(_ => new DeviceAccess());
+                builder.Services.AddSingleton<ActivityLog>(_ => new ActivityLog());
+                builder.Services.AddSingleton<McpHttpSessions>();
+                builder.Services.AddHostedService<HttpServer>();
+                mcp.WithRequestFilters(f => f.AddCallToolFilter(next => async (ctx, ct) =>
+                {
+                    var result = await next(ctx, ct).ConfigureAwait(false);
+                    try
+                    {
+                        var activity = ctx.Services?.GetService<ActivityLog>();
+                        if (activity != null) ToolActivity.Record(activity, ctx.Params, result);
+                    }
+                    catch
+                    {
+                        // Activity is best-effort; never fail a tool call over it.
+                    }
+                    return result;
+                }));
+            }
+            else
+            {
+                mcp.WithStdioServerTransport();
+            }
 
             // P15-046 — capture the host so `using` guarantees disposal on
             // graceful shutdown. Host.CreateApplicationBuilder already wires
