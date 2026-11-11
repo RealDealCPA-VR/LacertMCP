@@ -582,3 +582,19 @@ This entry documents the policy that three code comments have cited since P18 (`
 **Behavioral trap worth remembering:** Hosting.Abstractions 10.x **schedules `BackgroundService.ExecuteAsync` asynchronously** instead of running it synchronously up to the first await inside `StartAsync`. `HeartbeatWriter` relied on the old behavior for its "file on disk by the time startup returns" contract — the startup sweep + immediate `TryWrite` now live in a `StartAsync` override (the only correct place once the 8.x quirk is gone). Audit any future `BackgroundService` for the same assumption.
 
 **Source:** Todo.md Phase 20 P20-003/P20-004; NuGet flatcontainer metadata for ModelContextProtocol[.Core] 1.4.0 + System.Text.Json 10.0.7.
+
+## 2026-11-11 — Live reads wired; writes verified by read-back; live failures throw
+
+**Found:** every live read threw 9201 (the ODBC layer was never connected), the server never called `Register()` (every data tool returned 203 NotSignedIn in both modes when run as a real MCP server), and a non-Success status from the live bridge was *returned* — `lacerte_field_write_bulk` counted e.g. DBFNotAccessable as a success.
+
+**Decision:**
+- `LacerteSessionManager.Live.cs` answers every read from ODBC. Rows are normalized to the sim shape (right-trimmed DBF strings, ISO dates, `clientNumber`/`stateAbbrev`/`subClientId` meta). Filters sim applies case-insensitively in memory are applied in memory in live too (the driver's LIKE is case-sensitive). One cached reader per (dataPath, year, module), locked per reader.
+- Field writes (single + bulk) re-read the cell over a **fresh** ODBC connection and fail with **9022 WriteNotVerified** on mismatch. Leading zeros are significant; case-only, numeric-format and date-format differences count as matches with a note. `verified:null` when the target row can't be identified (no claim made).
+- A non-Success live status throws `LacerteSDKError` (sim parity), in WriteField / WriteDetail / CreateClient.
+- `StartupRegistration` hosted service calls `Register()` once at startup (Boundary Invariant 8 as written).
+
+**Live-verify:** real column names for DATA2/4 subclient id, TY21+ per-client table names, client-number format (`^[A-Z0-9]{1,8}$`), and whether the driver needs a fresh connection to see COM writes.
+
+## 2026-11-11 — HTTP transport + control page on the Lacerte PC
+
+The SDK is local-only, so the shared office deployment is the server itself on the Lacerte PC (`--http`), not a hub. HttpListener + the SDK's `StreamableHttpServerTransport` (netstandard2.0; ModelContextProtocol.AspNetCore needs net8). Bound to loopback + the PC's Tailscale IPv4 (re-resolved every 30s); callers identified by `tailscale whois`; a whois failure is a 503 that names the cause and is never cached (lesson from the QuickBooks hub outage of 2026-11-11). Per-device access pinned to StableID. Per-connection context via `SessionScope` (AsyncLocal, flowed by `FlowExecutionContextFromRequests`) — stdio behaviour unchanged. Runs as a Startup-folder launcher in the user's session (not a service) because the SDK and Intuit sign-in need the desktop.

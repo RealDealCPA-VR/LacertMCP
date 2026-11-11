@@ -205,6 +205,9 @@ Copy-Item -Path (Join-Path $cliBin '*') -Destination $cliStage -Recurse -Force
 
 # Copy README + LICENSE if present at repo root so the operator gets a
 # self-contained drop.
+# install-http.ps1 sets the server up as an always-on tailnet service + control page.
+Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'scripts/install-http.ps1') -Destination $stageRoot -Force
+
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
     $src = Join-Path $script:RepoRoot $f
     if (Test-Path -LiteralPath $src) {
@@ -217,7 +220,7 @@ $zipPath = Join-Path $stageRoot "LacertMCP-v$Version.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 
 # Compress server/ + cli/ + any docs into one zip.
-$toZip = @($serverStage, $cliStage)
+$toZip = @($serverStage, $cliStage, (Join-Path $stageRoot 'install-http.ps1'))
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
     $p = Join-Path $stageRoot $f
     if (Test-Path -LiteralPath $p) { $toZip += $p }

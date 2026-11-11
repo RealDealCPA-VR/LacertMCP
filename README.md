@@ -2,7 +2,7 @@
 
 A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as tools an LLM can call. Wraps the Lacerte SDK (`LacerteSDK_Access` COM/.NET + `LacerteDSII` ODBC) over JSON-RPC/stdio.
 
-**Status:** v0.1.0 scaffolding — all suites passing, 0 failures, 0 warnings (current pass/skip totals tracked in `HANDOFF.md` "Verify Before Continuing"; the skips are all live-only / fixture-gated). Read/Write/Create tools, simulation store, ODBC layer, COM bridge scaffolding, CLI, prompts, observability (correlation IDs, heartbeat writer, wire-log redaction split), bulk-write tool, schema-reload tool, doctor probe expansion, and idempotency cache all land. Live verification requires a Windows + Lacerte + SDK box (see `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" section).
+**Status:** v0.1.0 — simulation fully tested; **live mode is wired end-to-end but not yet verified on a real Lacerte install** (see HANDOFF.md). Live reads go through the Lacerte ODBC driver; every field write is read back and reported `verified` only when the stored value matches (else 9022 WriteNotVerified).
 
 ## What this is
 
@@ -72,6 +72,23 @@ Or invoke the SDK directly:
 ```
 
 The MCP server binary is `src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe`. It runs in simulation mode by default off-Windows or when `LACERTE_SIMULATION=1`.
+
+## Network mode + control page (recommended for the office)
+
+The Lacerte SDK only works on the PC that has Lacerte, so in the office the MCP runs **on that PC** as an always-on tailnet service and every agent connects to it over Tailscale:
+
+```powershell
+# On the Lacerte PC, in the unzipped release folder, PowerShell as Administrator:
+powershell -ExecutionPolicy Bypass -File .\install-http.ps1            # live mode
+powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -DataRoot \\fileserver\Lacerte   # data on a share
+powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -Uninstall
+```
+
+* Runs `LacertMCP.Server.exe --http` (live) at logon, restarts it if it stops, listens on `http://<Tailscale IP>:8767` and `http://localhost:8767` only, firewall open to `100.64.0.0/10` only.
+* **Control page** at `http://<Tailscale IP>:8767/`: health (live/sim, 24h sign-in countdown, ODBC driver, SDK, writable-field map, data folders, Tailscale), *Sign in to Lacerte* / *Reconnect*, **Access** (per tailnet device: No access / Read only / Read & write), connected agents with the client file each is working in, data-folder test reads, activity timeline, storage.
+* Agents: `claude mcp add --transport http lacerte http://<Tailscale IP>:8767/mcp` (give the device access on the Access tab first).
+* Each connection has its own active context, so two agents can't redirect each other's writes. Read-only devices can never write.
+* `GET /healthz` (loopback only) returns 200/503 with the same checks, for watchdogs.
 
 ## Install paths (per MCP client)
 
