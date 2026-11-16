@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using LacertMCP.Server.Session;
@@ -66,13 +67,22 @@ namespace LacertMCP.Server.Startup
         private static readonly string[] NonNegativeIntVars = new[]
         {
             "LACERTE_HEARTBEAT_SECONDS",
-            "LACERTE_BULK_WRITE_MAX",
-            "LACERTE_BULK_CREATE_MAX",
             "LACERTE_RECENT_LOG_CAPACITY",
             "LACERTE_DEBUG_LOG_MAX_BYTES",
             "LACERTE_DEBUG_LOG_MAX_DIR_BYTES",
             "LACERTE_DEBUG_LOG_RETENTION_DAYS",
             "LACERTE_DEBUG_LOG_RESULT_SAMPLE",
+        };
+
+        // Bulk-batch caps. The consumers (FieldWriteBulkTools.ResolveMaxBulkEntries /
+        // ClientCreateBulkTools.ResolveMaxBulkCreateEntries) honor only an
+        // Int32-parseable value > 0 (invariant culture) and silently fall back to
+        // the built-in default otherwise — so 0 and > Int32.MaxValue are
+        // "ignored", not "unlimited"/"honored". Name → default cap.
+        private static readonly KeyValuePair<string, int>[] PositiveInt32Vars = new[]
+        {
+            new KeyValuePair<string, int>("LACERTE_BULK_WRITE_MAX", 500),
+            new KeyValuePair<string, int>("LACERTE_BULK_CREATE_MAX", 100),
         };
 
         /// <summary>
@@ -100,8 +110,13 @@ namespace LacertMCP.Server.Startup
             {
                 CheckNonNegativeInt(stderr, resolved, name);
             }
+            foreach (var kv in PositiveInt32Vars)
+            {
+                CheckPositiveInt32(stderr, resolved, kv.Key, kv.Value);
+            }
 
             CheckDefaultTaxYear(stderr, resolved);
+            CheckLogLevel(stderr, resolved);
             CheckDataRoot(stderr, resolved);
             CheckDebugLogPath(stderr, resolved);
             CheckParityRecording(stderr, resolved);
@@ -148,11 +163,49 @@ namespace LacertMCP.Server.Startup
         {
             var raw = Get(env, name);
             if (string.IsNullOrEmpty(raw)) return;
-            if (!long.TryParse(raw, out var value) || value < 0)
+            if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) || value < 0)
             {
                 stderr.WriteLine(
                     $"[startup] {name}='{raw}' is not a non-negative integer — the value will not be honored as written (the reading code falls back to its built-in default or disables the feature).");
             }
+        }
+
+        /// <summary>
+        /// Bulk-cap check mirroring the consumers exactly: honored only when
+        /// <c>int.TryParse(raw, Integer, Invariant)</c> succeeds AND the value is
+        /// &gt; 0. Anything else (non-numeric, 0, negative, &gt; Int32.MaxValue)
+        /// is ignored and the default cap applies.
+        /// </summary>
+        private static void CheckPositiveInt32(TextWriter stderr, IDictionary<string, string?> env, string name, int defaultCap)
+        {
+            var raw = Get(env, name);
+            if (string.IsNullOrEmpty(raw)) return;
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) && value > 0)
+            {
+                return;
+            }
+            stderr.WriteLine(
+                $"[startup] {name}='{raw}' is not a positive integer in [1, {int.MaxValue}] — ignored; the default cap of {defaultCap} applies.");
+        }
+
+        /// <summary>
+        /// <c>LACERTE_LOG_LEVEL</c> — <see cref="LogLevelEnv.Parse"/> silently falls
+        /// back to <see cref="LogLevelEnv.Default"/> for anything it doesn't
+        /// recognize, and the value is NOT echoed in the startup banner, so warn
+        /// here. Accepted: Trace | Debug | Information | Warning | Error |
+        /// Critical | None (case-insensitive; numeric values rejected).
+        /// </summary>
+        private static void CheckLogLevel(TextWriter stderr, IDictionary<string, string?> env)
+        {
+            var raw = Get(env, LogLevelEnv.EnvName);
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            var parsed = LogLevelEnv.Parse(raw);
+            // Parse returns Default for unrecognized input; distinguish that from
+            // an explicit "Information".
+            if (parsed != LogLevelEnv.Default) return;
+            if (string.Equals(raw!.Trim(), LogLevelEnv.Default.ToString(), StringComparison.OrdinalIgnoreCase)) return;
+            stderr.WriteLine(
+                $"[startup] {LogLevelEnv.EnvName}='{raw}' is not a recognized log level — ignored; using {LogLevelEnv.Default}. Accepted: Trace, Debug, Information, Warning, Error, Critical, None.");
         }
 
         /// <summary>
@@ -184,7 +237,7 @@ namespace LacertMCP.Server.Startup
         {
             var raw = Get(env, "LACERTE_DEFAULT_TAX_YEAR");
             if (string.IsNullOrEmpty(raw)) return;
-            if (!int.TryParse(raw, out var year))
+            if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var year))
             {
                 stderr.WriteLine($"[startup] LACERTE_DEFAULT_TAX_YEAR='{raw}' is not an integer — ignored.");
                 return;

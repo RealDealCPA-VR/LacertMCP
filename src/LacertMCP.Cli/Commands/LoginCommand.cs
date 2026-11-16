@@ -32,8 +32,9 @@ namespace LacertMCP.Cli.Commands
                 "Refresh the 24-hour Intuit sign-in for the existing AppID. " +
                 "Exit 0 on AccessGranted, 1 on a failed refresh (or no AppID), 2 when the Lacerte SDK is unavailable.");
 
-            var appNameOpt = new Option<string>("--app-name", () => "Operator Lacerte MCP",
-                "Friendly name to pass to Register (must match the one used at first register).");
+            var appNameOpt = new Option<string>("--app-name", () => RegisterCommand.DefaultAppName(),
+                "Friendly name to pass to Register (must match the one used at first register). " +
+                "Default: LACERTE_APP_NAME when set, else \"" + RegisterCommand.FallbackAppName + "\".");
             var taxYearOpt = new Option<int>("--tax-year", () => DateTime.UtcNow.Year - 1,
                 "Tax year scope for the login.");
 

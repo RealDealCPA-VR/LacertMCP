@@ -54,15 +54,41 @@ namespace LacertMCP.Cli.Commands
 
         public static int Run(bool confirm, TextWriter stdout, TextWriter stderr)
         {
-            var existing = AppIdStore.Get();
+            // Use the tri-state diagnostic (same accessor doctor uses), NOT AppIdStore.Get():
+            // Get() collapses "stored but not a valid GUID" into null, which made
+            // `unregister --confirm` report "nothing to unregister" and leave the corrupt
+            // entry in place — contradicting doctor's ParseFailed remediation
+            // ("run unregister --confirm, then register").
+            var diag = AppIdStore.GetDiagnostic(out var existing, out var raw);
             var backend = AppIdStore.UsesCredentialManager
                 ? "Windows Credential Manager (" + AppIdStore.CredentialTarget + ")"
                 : "file (" + AppIdStore.FallbackConfigPath + ")";
 
-            if (!existing.HasValue)
+            if (diag == AppIdStore.AppIdDiagnostic.Absent)
             {
                 stdout.WriteLine("No AppID persisted — nothing to unregister.");
                 stdout.WriteLine($"  Storage backend probed: {backend}");
+                return 0;
+            }
+
+            if (diag == AppIdStore.AppIdDiagnostic.ParseFailed)
+            {
+                // Never echo the raw value — it may be a partially-corrupted GUID.
+                var described = $"a corrupt AppID entry (stored value is not a valid GUID; length={raw?.Length ?? 0})";
+                if (!confirm)
+                {
+                    stderr.WriteLine("Refusing to wipe the persisted AppID without --confirm.");
+                    stdout.WriteLine($"  Would delete {described} from {backend}.");
+                    stdout.WriteLine("  Re-run with --confirm to proceed, then `lacerte-mcp register` to mint a fresh GUID.");
+                    return 1;
+                }
+
+                AppIdStore.Reset();
+                stdout.WriteLine($"Unregistered {described}.");
+                stdout.WriteLine($"  Storage backend wiped: {backend}");
+                stdout.WriteLine();
+                stdout.WriteLine("Re-run `lacerte-mcp register` to mint a fresh GUID and re-do the");
+                stdout.WriteLine("Intuit consent ceremony when you're ready.");
                 return 0;
             }
 
@@ -75,7 +101,7 @@ namespace LacertMCP.Cli.Commands
                 // (`lacerte-mcp unregister > preview.txt`), pipeable (`| clip`), and
                 // doesn't look like a fault to a non-shell-expert tax-pro operator.
                 stderr.WriteLine("Refusing to wipe the persisted AppID without --confirm.");
-                stdout.WriteLine($"  Would delete AppID {AppIdStore.Mask(existing.Value)} from {backend}.");
+                stdout.WriteLine($"  Would delete AppID {AppIdStore.Mask(existing)} from {backend}.");
                 stdout.WriteLine("  Re-run with --confirm to proceed. After unregister you'll need");
                 stdout.WriteLine("  `lacerte-mcp register` to mint a fresh GUID (forces a new Intuit");
                 stdout.WriteLine("  consent ceremony on Windows + live SDK).");
@@ -85,7 +111,7 @@ namespace LacertMCP.Cli.Commands
             // Snapshot the masked form before we wipe so the confirmation log shows
             // *which* install was decommissioned (no full-GUID leak — Mask gives the
             // first 8 chars which is enough to disambiguate).
-            var maskedBefore = AppIdStore.Mask(existing.Value);
+            var maskedBefore = AppIdStore.Mask(existing);
             AppIdStore.Reset();
 
             stdout.WriteLine($"Unregistered AppID {maskedBefore}.");
