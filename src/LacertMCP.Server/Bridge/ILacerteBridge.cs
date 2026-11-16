@@ -113,7 +113,7 @@ namespace LacertMCP.Server.Bridge
         /// <para>
         /// P17-001 — <paramref name="replaceIndex"/> mirrors the sim path's
         /// replace-vs-append semantics. The underlying SDK
-        /// <c>WriteToDetailFile</c> COM method only appends per spec §2; live
+        /// SDK documents no COM detail-write method (detail files are written via its ODBC driver — R7-SRC); live
         /// implementations are expected to fail-closed with
         /// <see cref="SyntheticStatusCodes.LiveReplaceIndexUnsupported"/> when
         /// <paramref name="replaceIndex"/> is non-null until a real
@@ -132,7 +132,7 @@ namespace LacertMCP.Server.Bridge
         // =================================================================
 
         /// <summary>
-        /// Wraps the <c>IClientList.SetDataPath → IClient(...) → CreateClient</c>
+        /// Wraps the documented <c>ILacerteAccess.CreateClient() / CreateClientList() → IClientList.SetDataPath(appId, path, year) → set IClient properties → IClientList.CreateClient(client)</c> flow (R7-SRC)
         /// sequence. Returns the TAPIStatus integer (1 = Success) plus the
         /// newly-assigned ClientNumber (null on failure).
         /// </summary>

@@ -78,7 +78,7 @@ namespace LacertMCP.Tests.Session
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "test");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "test");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>
                 mgr.WriteDetail("JOHNS", row, replaceIndex: 2));
 
@@ -97,7 +97,7 @@ namespace LacertMCP.Tests.Session
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "test");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "test");
             var status = await mgr.WriteDetail("JOHNS", row);
 
             Assert.Equal(StatusCodes.Success, status);
@@ -115,7 +115,7 @@ namespace LacertMCP.Tests.Session
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "test");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "test");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>
                 mgr.WriteDetail("JOHNS", row, replaceIndex: 0, dryRun: true));
 
@@ -131,8 +131,8 @@ namespace LacertMCP.Tests.Session
             await mgr.Register();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
 
-            var r1 = new DetailRow("S", "", "1", "", "", "", "", "", "", 100.0, "first");
-            var r2 = new DetailRow("S", "", "1", "", "", "", "", "", "", 200.0, "second");
+            var r1 = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "first");
+            var r2 = new DetailRow("1", "", "1", "", "", "", "", "", "", 200.0, "second");
             await mgr.WriteDetail("1001", r1);
             var beforeCount = (await mgr.ReadDetail("1001")).Count;
 
@@ -283,7 +283,7 @@ namespace LacertMCP.Tests.Session
                 {
                     await mgr1.Register();
                     mgr1.SetContext(SeedData.DataPathIData2024, 2024, 'I');
-                    var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 100.0, "persist-test");
+                    var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "persist-test");
                     var status = await mgr1.WriteDetail("1001", row, idempotencyKey: "p17-004-roundtrip");
                     Assert.Equal(StatusCodes.Success, status);
                     Assert.True(File.Exists(tmpPath), "cache file must be written on Store");
@@ -320,7 +320,7 @@ namespace LacertMCP.Tests.Session
                         "loaded cache must contain at least the prior process's entry");
                     // Replay with same payload returns cached result, no new append.
                     var beforeRows = (await mgr2.ReadDetail("1001")).Count;
-                    var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 100.0, "persist-test");
+                    var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "persist-test");
                     var replay = await mgr2.WriteDetail("1001", row, idempotencyKey: "p17-004-roundtrip");
                     Assert.Equal(StatusCodes.Success, replay);
                     var afterRows = (await mgr2.ReadDetail("1001")).Count;
@@ -373,8 +373,8 @@ namespace LacertMCP.Tests.Session
             await mgr.Register();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
 
-            var r1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
-            var r2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second");
+            var r1 = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "first");
+            var r2 = new DetailRow("12", "", "1", "", "", "", "Source", "T", "", 250.0, "second");
             await mgr.WriteDetail("1001", r1, idempotencyKey: "p17-007-leak");
 
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() =>

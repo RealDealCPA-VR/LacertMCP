@@ -1,1 +1,32 @@
-{}
+{
+  "F|2|C2_1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Subclient Number",
+    "addedAt": "2026-11-15"
+  },
+  "F|2|C2_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented ReadOnly)",
+    "addedAt": "2026-11-15"
+  },
+  "F|3|C3_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "State Abbreviation",
+    "addedAt": "2026-11-15"
+  },
+  "F|4|C4_1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Subclient Number",
+    "addedAt": "2026-11-15"
+  },
+  "F|4|C4_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "State Abbreviation",
+    "addedAt": "2026-11-15"
+  }
+}

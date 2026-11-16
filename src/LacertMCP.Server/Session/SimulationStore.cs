@@ -555,7 +555,7 @@ namespace LacertMCP.Server.Session
         // -------------------------------------------------------------------
 
         /// <summary>
-        /// Sim implementation of <c>IClientList.SetDataPath → IClient(...) → CreateClient</c>.
+        /// Sim implementation of the SDK create flow (<c>IClientList.SetDataPath</c> → set <c>IClient</c> properties → <c>IClientList.CreateClient(client)</c>, R7-SRC).
         /// Per agent 06 §6: check order is NotSignedIn → InValidTaxYear →
         /// LengthExceeded (ClientID > 8) → InValidClientName (regex) →
         /// TaxModuleMismatch → DuplicateClient → assign next ClientNumber.

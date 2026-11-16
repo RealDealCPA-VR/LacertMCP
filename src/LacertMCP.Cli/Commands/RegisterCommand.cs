@@ -172,7 +172,7 @@ namespace LacertMCP.Cli.Commands
             catch (LacerteSDKError ex) when (ex.StatusCode == SyntheticStatusCodes.BridgeUnavailable)
             {
                 // SDK-unavailable detection mirrors the bridge: Registration.Register throws
-                // BridgeUnavailable when the TPRegistration ProgID doesn't resolve / COM
+                // BridgeUnavailable when the LacerteAccess ProgID doesn't resolve / COM
                 // activation fails. PARTIAL outcome (exit 2) — same bucket doctor uses for
                 // advisory/inapplicable probes: the AppID is persisted and intact, only the
                 // ceremony couldn't run on this box.

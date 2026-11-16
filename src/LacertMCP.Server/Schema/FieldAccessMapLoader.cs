@@ -435,9 +435,45 @@ namespace LacertMCP.Server.Schema
         {
             // Schema/FieldAccessMap lives next to the running assembly. The
             // csproj copies the JSON tree to the build output.
-            var asmPath = typeof(FieldAccessMapLoader).Assembly.Location;
-            var asmDir = Path.GetDirectoryName(asmPath) ?? Directory.GetCurrentDirectory();
-            return Path.Combine(asmDir, "Schema", "FieldAccessMap");
+            //
+            // R7-36 — under a shadow-copying host (the net48 xUnit runner;
+            // any AppDomain with ShadowCopyFiles) Assembly.Location is a temp
+            // cache folder WITHOUT the content tree, so the loader silently saw
+            // an empty map — every lookup Unknown — which hid the shipped shards
+            // from the test suite. Probe, in order: the assembly's folder, the
+            // AppDomain base directory, and the assembly's original (CodeBase)
+            // folder; use the first that actually contains the tree.
+            // Order: the ORIGINAL assembly folder (CodeBase — the real
+            // install / bin folder even under shadow copy) first, then the
+            // AppDomain base directory, then Assembly.Location (the shadow
+            // cache, if any). A shadow cache must never win: test fixtures or
+            // tools may create a partial tree there.
+            var asm = typeof(FieldAccessMapLoader).Assembly;
+            var candidates = new List<string>();
+            try
+            {
+#pragma warning disable SYSLIB0012 // CodeBase is the pre-shadow-copy location on net48
+                var codeBase = asm.CodeBase;
+#pragma warning restore SYSLIB0012
+                if (!string.IsNullOrEmpty(codeBase) && Uri.TryCreate(codeBase, UriKind.Absolute, out var uri) && uri.IsFile)
+                {
+                    var cbDir = Path.GetDirectoryName(uri.LocalPath);
+                    if (!string.IsNullOrEmpty(cbDir)) candidates.Add(cbDir!);
+                }
+            }
+            catch (Exception) { /* CodeBase can throw for dynamic assemblies */ }
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (!string.IsNullOrEmpty(baseDir)) candidates.Add(baseDir);
+            var asmDir = Path.GetDirectoryName(asm.Location);
+            if (!string.IsNullOrEmpty(asmDir)) candidates.Add(asmDir!);
+
+            foreach (var dir in candidates)
+            {
+                var root = Path.Combine(dir, "Schema", "FieldAccessMap");
+                if (Directory.Exists(root)) return root;
+            }
+            return Path.Combine(candidates.Count > 0 ? candidates[0] : Directory.GetCurrentDirectory(),
+                "Schema", "FieldAccessMap");
         }
 
         /// <summary>

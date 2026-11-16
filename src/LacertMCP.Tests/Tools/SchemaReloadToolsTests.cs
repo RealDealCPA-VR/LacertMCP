@@ -102,7 +102,8 @@ namespace LacertMCP.Tests.Tools
             // (4) call the MCP tool -> reload happens
             // (5) lookup now reflects the on-disk shard.
 
-            var asmDir = Path.GetDirectoryName(typeof(FieldAccessMapLoader).Assembly.Location)
+            // R7-36 — mutate the SAME tree the loader reads (shadow-copy safe).
+            var asmDir = Path.GetDirectoryName(Path.GetDirectoryName(FieldAccessMapLoader.GetSchemaRoot()))
                          ?? Directory.GetCurrentDirectory();
             var shardPath = Path.Combine(asmDir, "Schema", "FieldAccessMap", "base", "individual.json");
 

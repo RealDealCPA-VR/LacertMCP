@@ -57,7 +57,7 @@ namespace LacertMCP.Tests.Session
         }
 
         private static DetailRow NewRow(double amount, string description)
-            => new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", amount, description);
+            => new DetailRow("11", "", "1", "", "", "", "Source", "T", "", amount, description);
 
         // -----------------------------------------------------------------
         // R7-01 — live non-Success statuses raise (sim/live parity)

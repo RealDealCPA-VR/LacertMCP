@@ -1843,6 +1843,15 @@ namespace LacertMCP.Server.Session
             // R7-12 — bridge row-content rules (length caps, control chars,
             // numeric Code, finite Amount) in BOTH modes.
             if (row is null) throw new ArgumentNullException(nameof(row));
+            // R7-SRC — normalize to the SDK detail-file vocabulary before the
+            // content check, the fingerprint and the dispatch (both modes):
+            // TSJ T/S/J → Taxpayer/Spouse/Joint; Source case → Source/Nonsource.
+            // Invalid values pass through unchanged so the validator rejects them.
+            row = row with
+            {
+                TSJ = BridgeInputValidation.NormalizeTsj(row.TSJ) ?? row.TSJ,
+                Source = BridgeInputValidation.NormalizeDetailSource(row.Source) ?? row.Source,
+            };
             BridgeInputValidation.ValidateDetailRowContent(row, "WriteDetail");
 
             return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
@@ -1879,7 +1888,7 @@ namespace LacertMCP.Server.Session
                         }
                         // P17-001 — fail-CLOSED at the session chokepoint when
                         // replaceIndex is supplied in live mode. The SDK's
-                        // WriteToDetailFile only appends (spec §2); the prior
+                        // SDK documents no COM detail write / update-by-index (R7-SRC); the prior
                         // behavior silently dropped replaceIndex (two
                         // `_ = replaceIndex;` discards) so an operator-requested
                         // row REPLACE became a live APPEND while the tool
@@ -1905,10 +1914,13 @@ namespace LacertMCP.Server.Session
                         {
                             // Detail-file writes have no SDK-level snapshot path;
                             // honor dryRun by short-circuiting before the wire call.
-                            // R7-13 — but apply the commit's identifier check
-                            // first so the preview fails where the commit would.
+                            // R7-13 / R7-SRC — the preview must fail exactly
+                            // where the commit would. The commit always fails
+                            // closed (the SDK writes detail files only via its
+                            // ODBC driver, which is not wired live), so the
+                            // preview refuses with the same 9202.
                             BridgeInputValidation.ValidateClientNumber(clientNumber, "WriteDetail");
-                            inner = StatusCodes.Success;
+                            throw Bridge.Writer.LiveDetailWriteRefusal(clientNumber);
                         }
                         else
                         {
@@ -1921,7 +1933,7 @@ namespace LacertMCP.Server.Session
                             // log so an operator can grep for append-only
                             // writes that retried (DECISIONS.md flags those
                             // as REQUIRING post-call verification because the
-                            // SDK's WriteToDetailFile is append-only and a
+                            // SDK's detail-file write path is append-only and a
                             // post-commit transient retry produces duplicate
                             // rows).
                             inner = await AutoReconnect.WithRetry<int>(() =>
@@ -2073,7 +2085,7 @@ namespace LacertMCP.Server.Session
                 // before constructing CreateClientArgs, but a direct caller of
                 // _session.CreateClient that bypassed the tool would otherwise
                 // re-introduce sim/live divergence. The live SDK's
-                // IClient(TaxType, ...) ctor rejects form-number variants with
+                // IClient.TaxType (TaxModule) ctor rejects form-number variants with
                 // TaxModuleMismatch (14); sim accepts them via AcceptsTaxType.
                 // Canonicalize here so the value that flows into both
                 // ApplySimCreateClient and _bridge.CreateClient is always the
@@ -3986,7 +3998,7 @@ namespace LacertMCP.Server.Session
 
     /// <summary>
     /// Args for <see cref="LacerteSessionManager.CreateClient"/>. Matches the
-    /// SDK's <c>IClient(TaxType, ClientId, EmailId, FirstName, LastName)</c>
+    /// SDK's <c>IClient</c> properties (TaxType, ClientID, EmailID, FirstName, LastName — set on a blank client from ILacerteAccess.CreateClient(), R7-SRC)
     /// constructor signature.
     /// <para>
     /// P16-054/P16-080 — record fields renamed from ClientID/EmailID to

@@ -27,8 +27,9 @@ namespace LacertMCP.Server.Session
         //
         //   TY21+ form (DATA2/3/4 became per-client tables prefixed by client number):
         //     select * from [{client}-SubClientInfo]
-        //     select * from [{client}-StateClientInfo]
-        //     select * from [{client}-StateSubClientInfo]
+        //     select * from [{client}-Detail-ClientStateInfo] [where C3_G1 = '{state}']
+        //     select * from [{client}-Detail-SubClientStateInfo] [where C4_G1 = '{state}' [and C4_1 = n]]
+        //   (R7-SRC — table names per the SDK Developer Instructions.)
         //   (DATA1/5/6/7 unchanged in the spec — keep legacy form for those.)
         //
         // We compile two regex sets and try the new form first when
@@ -68,10 +69,10 @@ namespace LacertMCP.Server.Session
             @"^\s*select\s+\*\s+from\s+\[(?<client>[^\]\-]+)-SubClientInfo\]\s*;?\s*$", _rxOpts);
 
         private static readonly Regex _rxData3New = new Regex(
-            @"^\s*select\s+\*\s+from\s+\[(?<client>[^\]\-]+)-StateClientInfo\]\s*;?\s*$", _rxOpts);
+            @"^\s*select\s+\*\s+from\s+\[(?<client>[^\]\-]+)-Detail-ClientStateInfo\](?:\s+where\s+C3_G1\s*=\s*'(?<state>[^']+)')?\s*;?\s*$", _rxOpts);
 
         private static readonly Regex _rxData4New = new Regex(
-            @"^\s*select\s+\*\s+from\s+\[(?<client>[^\]\-]+)-StateSubClientInfo\]\s*;?\s*$", _rxOpts);
+            @"^\s*select\s+\*\s+from\s+\[(?<client>[^\]\-]+)-Detail-SubClientStateInfo\](?:\s+where\s+C4_G1\s*=\s*'(?<state>[^']+)'(?:\s+and\s+C4_1\s*=\s*(?<sub>[0-9]+))?)?\s*;?\s*$", _rxOpts);
 
         /// <summary>
         /// Pattern-match a documented SQL template and dispatch to the
@@ -121,7 +122,8 @@ namespace LacertMCP.Server.Session
             // DATA3
             if (ctx.Year >= 2021 && (m = _rxData3New.Match(sql)).Success)
             {
-                return StatesFor(store, m.Groups["client"].Value, stateFilter: null);
+                return StatesFor(store, m.Groups["client"].Value,
+                    m.Groups["state"].Success ? m.Groups["state"].Value : null);
             }
             if ((m = _rxData3Old.Match(sql)).Success)
             {
@@ -133,7 +135,11 @@ namespace LacertMCP.Server.Session
             // DATA4
             if (ctx.Year >= 2021 && (m = _rxData4New.Match(sql)).Success)
             {
-                return StateSubsFor(store, m.Groups["client"].Value, stateFilter: null);
+                int? sub = m.Groups["sub"].Success
+                    ? int.Parse(m.Groups["sub"].Value, System.Globalization.CultureInfo.InvariantCulture)
+                    : (int?)null;
+                return StateSubsFor(store, m.Groups["client"].Value,
+                    m.Groups["state"].Success ? m.Groups["state"].Value : null, sub);
             }
             if ((m = _rxData4Old.Match(sql)).Success)
             {
@@ -196,13 +202,14 @@ namespace LacertMCP.Server.Session
             return rows;
         }
 
-        private static IReadOnlyList<DbfRow> StateSubsFor(ModuleStore store, string client, string? stateFilter)
+        private static IReadOnlyList<DbfRow> StateSubsFor(ModuleStore store, string client, string? stateFilter, int? subClientId = null)
         {
             var rows = new List<DbfRow>();
             foreach (var kv in store.StateSubs)
             {
                 if (!string.Equals(kv.Key.Client, client, StringComparison.OrdinalIgnoreCase)) continue;
                 if (stateFilter != null && !string.Equals(kv.Key.State, stateFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                if (subClientId.HasValue && kv.Key.SubId != subClientId.Value) continue;
                 rows.Add(kv.Value);
             }
             return rows;

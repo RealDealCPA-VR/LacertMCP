@@ -131,27 +131,25 @@ from a checkout, else `Schema/FieldAccessMap/base` next to the exe. Today
 `--live` is a stub (throws BridgeUnavailable) and sim mode has no fields to
 enumerate, so the dumper writes nothing yet.
 
-## v1 coverage status — TODO
+## Coverage status (R7, 2026-11-15)
 
-**The shipped base files (`individual.json`, `partnership.json`, all
-others) are intentionally empty `{}`.**
+The source SDK PDF (Intuit *Lacerte SDK Developer Instructions*, https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf) was re-mined. Its literal rows now ship with `source: "sdk-pdf"`:
 
-`Lacerte_MCP_Structure_Spec.md` §2 mentions that the source SDK PDF
-contains a "Database Field Access" table for Individual/Partnership table
-1 & 5 globals plus a "Not Supported Fields in TY21" list — but the
-extracted spec checked into this repo does **not** include the actual
-field names with stated access, only the description that such tables
-exist in the upstream PDF.
+- **`individual.json` / `partnership.json`.** The documented DATA1 global fields:
+  - `C1_G4`, `C1_G12`, `C1_G13` and `C1_G38` are ReadWrite.
+  - The other listed `C1_G*` fields are ReadOnly.
+  - The listed DATA5 globals (`C5_G5`, `C5_G48`, `C5_G49`, `C5_G52`–`C5_G54`, `C5_G56`–`C5_G61`) are Hidden.
+- **All nine modules.** The structural DATA2–DATA4 rows: `C2_1` and `C4_1` (subclient number), `C3_G1` and `C4_G1` (state abbreviation), and `C2_G1`, all ReadOnly.
+- **`overlays/ty21-not-supported.json`.** The PDF's "Not Supported Fields in TY21" lists for Individual and Partnership. These include `C5_1`–`C5_67`, expanded to literal keys. Per DECISIONS 2026-05-30, an overlay applies to its **exact** year only.
 
-Until the source SDK PDF is re-mined for the literal field rows (or the
-introspection dumper is run against a live install — see agent 04 §4 v2),
-the v1 base files ship empty. **The fail-closed write path** in
-`FieldAccessMapLoader.AssertWritable(...)` plus the universal
-`C{table}_0 → ReadOnly` rule keeps the system safe: any uncatalogued
-field returns `Unknown` and write tools refuse without `force: true`.
+The PDF also states **range rules**, which are *not* encoded as literal keys:
 
-`overlays/ty21-not-supported.json` similarly ships with `overrides: {}` —
-populate it once the spec's TY21 list is extracted.
+- `C{1,3}_1+` and `C{2,4}_2+` ("remaining non-global fields") are ReadWrite.
+- `C5_1+`, `C6_1+` and `C7_1+` are ReadOnly.
+- Unlisted `C1_G+` / `C2_G2+` / `C3_G2+` / `C4_G2+` / `C6_G+` / `C7_G+` are Hidden.
+- Unlisted `C5_G+` are ReadWrite.
+
+Per the 2026-05-30 design decision, any field without a literal entry stays **fail-closed**: `Unknown` gives 9012, and writing it needs `force: true` or a `field-access set`. The SDK itself still enforces the range rules server-side, returning 7 NotExposed or 8 ExposedForRead. The universal `C{table}_0 → ReadOnly` rule is unchanged.
 
 Cross-references for the introspection workflow: agent 04 §5 and Todo
 follow-up F5 ("decide whether to ship `scripts/dump-field-access.csx` for

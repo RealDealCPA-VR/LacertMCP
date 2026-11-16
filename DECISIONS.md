@@ -636,3 +636,17 @@ This entry documents the policy that three code comments have cited since P18 (`
 **Why:** sim dry-run is "apply, then undo". The per-client lock serialized dry-runs against writers, but readers never took it, so a concurrent read could return a dry-run value, a phantom detail row, or a phantom client. Live has no such window. A shared/exclusive gate makes every read see either before or after a dry-run, never the middle, without serializing reads against each other.
 
 **Also (second pass):** `WrapToolHandler` maps `ArgumentException` to 9017 **only** when this server's own code threw it (`TargetSite` namespace `LacertMCP.Server*`). BCL-thrown ones are in-server bugs and stay 9203. The idempotency lock acquirer re-checks that it holds the semaphore still registered for the key.
+
+## 2026-11-15 — The Intuit SDK Developer Instructions PDF is the primary source; the bridge follows it
+
+**Chosen:** the live bridge, the ODBC builder and the detail-row validation now follow the public Intuit *Lacerte Software Development Kit Developer Instructions* (https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf). Where `Lacerte_MCP_Structure_Spec.md` or the `docs/research` notes disagree, the PDF wins; the spec now carries a "Corrections from the primary source" section. Specifically:
+- Objects come from `LacerteAccess` factories, not undocumented ProgIDs.
+- TPSDKStatus raw values 0..4 map to 200..204.
+- The documented `ReadFromDBFData` / `WriteToDBFDatabase` / `UpdateTaxReturn` / `CreateClient` signatures are used, with String values.
+- The connection string uses `DataDir` and a 4-digit `TaxYear`.
+- TY21+ state tables are named `-Detail-ClientStateInfo` / `-Detail-SubClientStateInfo`.
+- Detail-file column constraints are enforced in both modes. TSJ is stored as Taxpayer/Spouse/Joint.
+
+**Fail-closed where the PDF documents no COM API:** live detail-row writes return `9202 SimulationOnly`. The SDK writes detail files through its ODBC driver, whose write path is not wired yet. A live create returns Success with a null ClientNumber because the SDK returns none.
+
+**Inference flagged:** the `TaxModule` enum's integer values are not printed. The .NET sample's `(TaxModule)(SelectedIndex + 1)`, together with the documented module order (Individual … Benefit), gives ordinal = index + 1 (`Modules.TaxModuleOrdinal`). TPSDKStatus 1..4 follow the same C# enum-position rule from the documented `ConsentDenied = 0`.

@@ -198,7 +198,7 @@ namespace LacertMCP.Tests.Session
         public async Task WriteDetail_OnReadOnlySession_ThrowsFieldIsReadOnly()
         {
             var mgr = await NewSimManagerWithContextAsync(readOnly: true);
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1000m == 1000m ? (double?)1000 : null, "test");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1000m == 1000m ? (double?)1000 : null, "test");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteDetail("1001", row));
             Assert.Equal(SyntheticStatusCodes.FieldIsReadOnly, ex.StatusCode);
@@ -296,7 +296,7 @@ namespace LacertMCP.Tests.Session
             // (which doesn't run AssertWritable) â€” that's a clean idempotent
             // happy-path proof.
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "first");
             var result1 = await mgr.WriteDetail("1001", row, idempotencyKey: "k1");
             Assert.Equal(StatusCodes.Success, result1);
 
@@ -315,8 +315,8 @@ namespace LacertMCP.Tests.Session
         public async Task WriteField_SameKey_DifferentPayload_ThrowsIdempotencyConflict()
         {
             var mgr = await NewSimManagerWithContextAsync();
-            var row1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
-            var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second â€” different payload");
+            var row1 = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "first");
+            var row2 = new DetailRow("12", "", "1", "", "", "", "Source", "T", "", 250.0, "second â€” different payload");
 
             await mgr.WriteDetail("1001", row1, idempotencyKey: "k2");
 
@@ -335,7 +335,7 @@ namespace LacertMCP.Tests.Session
             var mgr = await NewSimManagerWithContextAsync();
             var before = (await mgr.ReadDetail("1001")).Count;
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 9999.0, "dry-run row");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 9999.0, "dry-run row");
             var status = await mgr.WriteDetail("1001", row, dryRun: true);
             Assert.Equal(StatusCodes.Success, status);
 
@@ -643,7 +643,7 @@ namespace LacertMCP.Tests.Session
         {
             var mgr = NewSimManager();
             mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "x");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "x");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("1001", row));
             Assert.Equal(StatusCodes.NotSignedIn, ex.StatusCode);
         }
@@ -684,8 +684,8 @@ namespace LacertMCP.Tests.Session
         public async Task WriteDetail_SameKey_DifferentPayload_ConflictCarriesTimestamps()
         {
             var mgr = await NewSimManagerWithContextAsync();
-            var row1 = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "first");
-            var row2 = new DetailRow("Int", "", "1", "", "", "", "1099INT", "T", "", 250.0, "second");
+            var row1 = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "first");
+            var row2 = new DetailRow("12", "", "1", "", "", "", "Source", "T", "", 250.0, "second");
 
             await mgr.WriteDetail("1001", row1, idempotencyKey: "k-conflict-ts");
 
@@ -715,7 +715,7 @@ namespace LacertMCP.Tests.Session
         public async Task WriteDetail_SameKey_SamePayload_Concurrent_AppendsExactlyOnce()
         {
             var mgr = await NewSimManagerWithContextAsync();
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 5000.0, "concurrent");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "concurrent");
             var before = (await mgr.ReadDetail("1001")).Count;
 
             // 50 parallel writes with the same key â€” only ONE must actually
@@ -740,7 +740,7 @@ namespace LacertMCP.Tests.Session
         public async Task Idempotency_LockMap_BoundedByCache()
         {
             var mgr = await NewSimManagerWithContextAsync();
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "boundtest");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "boundtest");
             // Write 20 distinct idempotency keys.
             for (int i = 0; i < 20; i++)
             {
@@ -760,7 +760,7 @@ namespace LacertMCP.Tests.Session
         public async Task Idempotency_ExpiredEntry_ReExecutes()
         {
             var mgr = await NewSimManagerWithContextAsync();
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "ttltest");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "ttltest");
             var before = (await mgr.ReadDetail("1001")).Count;
 
             await mgr.WriteDetail("1001", row, idempotencyKey: "ttl1");
@@ -789,7 +789,7 @@ namespace LacertMCP.Tests.Session
             // future refactor that flips the inequality (>= vs >) gets
             // caught by one of the two tests.
             var mgr = await NewSimManagerWithContextAsync();
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "ttlinside");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "ttlinside");
             var before = (await mgr.ReadDetail("1001")).Count;
 
             // First write â€” establishes the cache entry.
@@ -826,7 +826,7 @@ namespace LacertMCP.Tests.Session
                     DateTimeOffset.UtcNow.AddMinutes(-i));
             }
             // One more write trips the eviction branch.
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "cap");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "cap");
             await mgr.WriteDetail("1001", row, idempotencyKey: "cap-tripper");
             // Eviction must bring cache back to (cap - batch_size + 1)
             // approximately. We don't assert the exact number because

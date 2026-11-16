@@ -153,11 +153,24 @@ namespace LacertMCP.Server.Odbc
             return $"select * from [DATA3-State Client Info] where C3_0 = '{client}' and C3_G1 = '{state}'";
         }
 
-        /// <summary>TY21+ DATA3 (per-client table prefix).</summary>
+        /// <summary>
+        /// TY21+ DATA3 (per-client table). R7-SRC — the SDK Developer
+        /// Instructions name it <c>[ClientNumber-Detail-ClientStateInfo]</c>
+        /// (sample: <c>select * from [TEST-Detail-ClientStateInfo] where C3_G1 = 'TX'</c>);
+        /// the previous <c>[{client}-StateClientInfo]</c> is not an SDK table.
+        /// </summary>
         public static string Data3NewForm(string client)
         {
             ValidateClient(client);
-            return $"select * from [{client}-StateClientInfo]";
+            return $"select * from [{client}-Detail-ClientStateInfo]";
+        }
+
+        /// <summary>TY21+ DATA3 filtered by state (C3_G1 holds the state abbreviation).</summary>
+        public static string Data3NewFormByState(string client, string state)
+        {
+            ValidateClient(client);
+            ValidateState(state);
+            return $"select * from [{client}-Detail-ClientStateInfo] where C3_G1 = '{state}'";
         }
 
         // -------------------------------------------------------------------
@@ -172,11 +185,35 @@ namespace LacertMCP.Server.Odbc
             return $"select * from [DATA4-State Subclient Info] where C4_0 = '{client}' and C4_G1 = '{state}'";
         }
 
-        /// <summary>TY21+ DATA4 (per-client table prefix).</summary>
+        /// <summary>
+        /// TY21+ DATA4 (per-client table). R7-SRC — the SDK names it
+        /// <c>[ClientNumber-Detail-SubClientStateInfo]</c> (sample:
+        /// <c>... where C4_G1 = 'TX' and C4_1 = 1</c>; C4_G1 = state,
+        /// C4_1 = subclient number); the previous
+        /// <c>[{client}-StateSubClientInfo]</c> is not an SDK table.
+        /// </summary>
         public static string Data4NewForm(string client)
         {
             ValidateClient(client);
-            return $"select * from [{client}-StateSubClientInfo]";
+            return $"select * from [{client}-Detail-SubClientStateInfo]";
+        }
+
+        /// <summary>TY21+ DATA4 filtered by state and, optionally, subclient number.</summary>
+        public static string Data4NewFormByState(string client, string state, int? subClientId = null)
+        {
+            ValidateClient(client);
+            ValidateState(state);
+            var sql = $"select * from [{client}-Detail-SubClientStateInfo] where C4_G1 = '{state}'";
+            if (subClientId.HasValue)
+            {
+                if (subClientId.Value <= 0)
+                {
+                    throw new LacerteSDKError(StatusCodes.InValidSubClientID,
+                        new Dictionary<string, object?> { ["subClientId"] = subClientId.Value });
+                }
+                sql += " and C4_1 = " + subClientId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+            return sql;
         }
 
         // -------------------------------------------------------------------

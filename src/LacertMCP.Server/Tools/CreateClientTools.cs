@@ -183,7 +183,7 @@ namespace LacertMCP.Server.Tools
                 // (possibly colloquial) alias (e.g. "1040", "1120S",
                 // "S-Corporation") to the canonical spec-mandated ReturnType
                 // ("Individual", "SCorporate", ...) BEFORE building
-                // CreateClientArgs. The live SDK's IClient(TaxType, ...)
+                // CreateClientArgs. The live SDK's IClient.TaxType (TaxModule)
                 // constructor accepts only the 9 spec strings; passing the
                 // form-number variant verbatim would yield TaxModuleMismatch
                 // (14) on a happy-path operator request, violating CLAUDE.md's

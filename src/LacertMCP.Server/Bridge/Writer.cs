@@ -45,13 +45,23 @@ namespace LacertMCP.Server.Bridge
             return WireLog.RecordSync<int>("Bridge.WriteToDBFDatabase",
                 new { dbf, rowNum, field, value }, () =>
             {
-                var writer = AcquireWriter("WriteToDBFDatabase");
+                // R7-SRC — IDBFWriter comes from ILacerteAccess.CreateDBFWriter().
+                using var handle = SdkAccess.Acquire("WriteToDBFDatabase", "CreateDBFWriter");
+                var writer = handle.Target;
                 try
                 {
                     try
                     {
                         dynamic w = writer;
-                        int status = (int)w.WriteToDBFDatabase(appId, dataPath, dbf, rowNum, field, value);
+                        // R7-SRC — documented signature (Developer Instructions,
+                        // "Parameters for WriteToDBFDatabase"): AppID, DataPath,
+                        // DBFName, int RowNum, String Fieldname, String Value,
+                        // ref String newValue. The previous 6-argument call
+                        // matched no overload and passed a non-string value.
+                        string newValue = string.Empty;
+                        int status = (int)w.WriteToDBFDatabase(
+                            appId, dataPath, dbf, rowNum, field,
+                            SdkAccess.ToSdkValueString(value), ref newValue);
                         return status;
                     }
                     catch (LacerteSDKError) { throw; }
@@ -72,11 +82,7 @@ namespace LacertMCP.Server.Bridge
                 {
                     // P14-004 — release RCW per-call to avoid COM leak. Canonical
                     // pattern from CanUseNewApisProbe.cs:96-103.
-                    if (writer != null)
-                    {
-                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
-                        catch (Exception) { /* best-effort */ }
-                    }
+                    // R7-SRC — released by SdkAccess.Handle (LacerteAccess + IDBFWriter).
                 }
             });
         }
@@ -99,14 +105,20 @@ namespace LacertMCP.Server.Bridge
             return WireLog.RecordSync<int>("Bridge.UpdateTaxReturn",
                 new { dbf, clientNumber, field, value, subClientId, stateAbbrev }, () =>
             {
-                var writer = AcquireWriter("UpdateTaxReturn");
+                // R7-SRC — IDBFWriter comes from ILacerteAccess.CreateDBFWriter().
+                using var handle = SdkAccess.Acquire("UpdateTaxReturn", "CreateDBFWriter");
+                var writer = handle.Target;
                 try
                 {
                     try
                     {
                         dynamic w = writer;
+                        // R7-SRC — "Parameters for UpdateTaxReturn": Value is a
+                        // String; SubClientID Integer (0 when not DATA2/DATA4);
+                        // StateAbbrev String ("" when not DATA3/DATA4).
                         int status = (int)w.UpdateTaxReturn(
-                            appId, dataPath, dbf, clientNumber, field, value,
+                            appId, dataPath, dbf, clientNumber, field,
+                            SdkAccess.ToSdkValueString(value),
                             subClientId ?? 0, stateAbbrev ?? string.Empty);
                         return status;
                     }
@@ -128,11 +140,7 @@ namespace LacertMCP.Server.Bridge
                 {
                     // P14-004 — release RCW per-call to avoid COM leak. Canonical
                     // pattern from CanUseNewApisProbe.cs:96-103.
-                    if (writer != null)
-                    {
-                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
-                        catch (Exception) { /* best-effort */ }
-                    }
+                    // R7-SRC — released by SdkAccess.Handle (LacerteAccess + IDBFWriter).
                 }
             });
         }
@@ -159,7 +167,7 @@ namespace LacertMCP.Server.Bridge
             if (row == null) throw new ArgumentNullException(nameof(row));
 
             // P17-001 — fail-CLOSED on replaceIndex in live mode. The SDK's
-            // WriteToDetailFile only appends; silently dropping replaceIndex
+            // SDK documents no COM detail write / update-by-index; silently dropping replaceIndex
             // (the prior behavior of LacerteSessionManager's live branch)
             // converted operator-intended row REPLACE into row APPEND while
             // returning Success — the textbook two-mode-discipline violation.
@@ -185,105 +193,30 @@ namespace LacertMCP.Server.Bridge
             BridgeInputValidation.ValidateWriteDetailArgs(
                 appId, dataPath, clientNumber, row);
 
-            // F11 — wrap with WireLog.
-            return WireLog.RecordSync<int>("Bridge.WriteDetail",
-                new { clientNumber, row }, () =>
-            {
-                var writer = AcquireWriter("WriteDetail");
-                try
-                {
-                    try
-                    {
-                        dynamic w = writer;
-                        // Live verification deferred to Windows + Lacerte box.
-                        // Best-guess COM method shape is WriteToDetailFile(appId,
-                        // dataPath, clientNumber, series, prefix, code, suffix,
-                        // stateAbbr, cityAbbr, source, tsj, importSrc, amount,
-                        // description) — confirm against the SDK headers during the
-                        // live verification session.
-                        int status = (int)w.WriteToDetailFile(
-                            appId, dataPath, clientNumber,
-                            row.Series, row.Prefix, row.Code, row.Suffix,
-                            row.StateAbbr, row.CityAbbr, row.Source, row.TSJ,
-                            row.ImportSrc, row.Amount ?? 0.0, row.Description);
-                        return status;
-                    }
-                    catch (LacerteSDKError) { throw; }
-                    catch (Exception ex)
-                    {
-                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                            new Dictionary<string, object?>
-                            {
-                                ["op"] = "WriteDetail",
-                                ["clientNumber"] = clientNumber,
-                                ["reason"] = ex.Message,
-                            }, ex);
-                    }
-                }
-                finally
-                {
-                    // P14-004 — release RCW per-call to avoid COM leak. Canonical
-                    // pattern from CanUseNewApisProbe.cs:96-103.
-                    if (writer != null)
-                    {
-                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(writer); }
-                        catch (Exception) { /* best-effort */ }
-                    }
-                }
-            });
+            // R7-SRC — fail CLOSED. The SDK Developer Instructions document
+            // detail-file reads/writes only through the ODBC driver ("Working
+            // with Detail Files": each client's detail file is its own ODBC
+            // table; the ODBC driver provides CRUD on "the tables and detail
+            // files"). The .NET/COM library exposes no detail-write method —
+            // the previous late-bound WriteToDetailFile(...) call was a guess
+            // that matches no SDK member and would always fail at runtime.
+            // The live ODBC write path is not wired yet (same as live ODBC
+            // reads, ThrowIfLiveUnwired), so surface that precisely.
+            throw LiveDetailWriteRefusal(clientNumber);
         }
 
-        // =================================================================
-        // Internals
-        // =================================================================
-
-        private static object AcquireWriter(string op)
-        {
-            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                    new Dictionary<string, object?>
-                    {
-                        ["op"] = op,
-                        ["reason"] = "IDBFWriter requires Windows + the Lacerte SDK.",
-                        ["platform"] = Environment.OSVersion.Platform.ToString(),
-                    });
-            }
-
-            try
-            {
-                var t = Type.GetTypeFromProgID("LacerteSDK_Access.DBFWriter");
-                if (t == null)
+        /// <summary>
+        /// R7-SRC — the single 9202 refusal for live detail-row writes, shared
+        /// by the commit (here) and the session's live dry-run preview so the
+        /// two can never diverge.
+        /// </summary>
+        internal static LacerteSDKError LiveDetailWriteRefusal(string clientNumber)
+            => new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
+                new Dictionary<string, object?>
                 {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = op,
-                            ["reason"] = "LacerteSDK_Access.DBFWriter ProgID not registered. Install the Lacerte SDK.",
-                        });
-                }
-                var instance = Activator.CreateInstance(t);
-                if (instance == null)
-                {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = op,
-                            ["reason"] = "Activator.CreateInstance returned null for LacerteSDK_Access.DBFWriter.",
-                        });
-                }
-                return instance;
-            }
-            catch (LacerteSDKError) { throw; }
-            catch (Exception ex)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                    new Dictionary<string, object?>
-                    {
-                        ["op"] = op,
-                        ["reason"] = ex.Message,
-                    }, ex);
-            }
-        }
+                    ["op"] = "WriteDetail",
+                    ["clientNumber"] = clientNumber,
+                    ["reason"] = "Live detail-row writes go through the Lacerte ODBC driver (the SDK's COM library has no detail-write method); the ODBC write path is not wired yet. Run in simulation mode, or enter the row in Lacerte.",
+                });
     }
 }

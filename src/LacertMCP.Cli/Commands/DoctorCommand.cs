@@ -354,7 +354,7 @@ namespace LacertMCP.Cli.Commands
             //     the operator sees a raw COM HRESULT via BridgeUnavailable — NOT
             //     "App.config missing." Both LacertMCP.Server.exe.config (the MCP
             //     server) and lacerte-mcp.exe.config (register/login activate
-            //     TPRegistration in-process) need it. Probe ships with the .exe
+            //     LacerteAccess → CreateTPRegister() in-process) need it. Probe ships with the .exe
             //     regardless of OS (it's a build-output check, not Windows-only),
             //     so we always run it.
             results.Add(ProbeAppConfigShim());
@@ -486,7 +486,7 @@ namespace LacertMCP.Cli.Commands
         /// <summary>
         /// Path to the CLI's OWN exe config (<c>lacerte-mcp.exe.config</c>) — the config
         /// the runtime applies to this process, which is what matters when
-        /// <c>register</c>/<c>login</c> activate <c>LacerteSDK_Access.TPRegistration</c>
+        /// <c>register</c>/<c>login</c> activate <c>LacerteSDK_Access.LacerteAccess</c> (→ <c>CreateTPRegister()</c>)
         /// in-process. Resolved from the CLI assembly's location (equal to
         /// <c>AppDomain.CurrentDomain.SetupInformation.ConfigurationFile</c> when running
         /// as lacerte-mcp.exe, and still pointing at the CLI's config under a test host).
@@ -827,24 +827,26 @@ namespace LacertMCP.Cli.Commands
         {
             try
             {
-                // Both ProgIDs from Bridge/LacerteAccessClient.cs + Bridge/Registration.cs.
-                var t1 = Type.GetTypeFromProgID("LacerteSDK_Access.TPRegistration");
-                var t2 = Type.GetTypeFromProgID("LacerteSDK_Access.LacerteAccess");
-                if (t1 != null && t2 != null)
+                // R7-SRC — per the SDK Developer Instructions the ONLY
+                // directly-creatable class is LacerteSDK_Access.LacerteAccess;
+                // ITPRegistration / IDBFReader / IDBFWriter come from its
+                // CreateTPRegister / CreateDBFReader / CreateDBFWriter
+                // factories (Bridge/SdkAccess.cs). The previous probe also
+                // required an undocumented "LacerteSDK_Access.TPRegistration"
+                // ProgID, which made doctor fail on a correctly-installed box.
+                var t = Type.GetTypeFromProgID("LacerteSDK_Access.LacerteAccess");
+                if (t != null)
                 {
                     return new ProbeResult("Lacerte COM ProgID",
                         ProbeStatus.Pass,
-                        "TPRegistration + LacerteAccess ProgIDs both resolve");
+                        "LacerteSDK_Access.LacerteAccess ProgID resolves");
                 }
 
-                var missing = new List<string>();
-                if (t1 == null) missing.Add("LacerteSDK_Access.TPRegistration");
-                if (t2 == null) missing.Add("LacerteSDK_Access.LacerteAccess");
                 return new ProbeResult("Lacerte COM ProgID",
                     ProbeStatus.Fail,
-                    "missing: " + string.Join(", ", missing),
-                    "SDK files present but COM not registered; re-run the 64-bit Lacerte SDK MSI as Administrator " +
-                    "(or `regsvr32 LacerteSDK_Access.dll` from the install dir).");
+                    "missing: LacerteSDK_Access.LacerteAccess",
+                    "SDK files present but its COM class is not registered; re-run the 64-bit Lacerte SDK MSI as Administrator " +
+                    "(the SDK is a .NET assembly — registration is done by the installer, not regsvr32).");
             }
             catch (Exception ex)
             {

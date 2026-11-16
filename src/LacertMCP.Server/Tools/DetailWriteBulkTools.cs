@@ -95,31 +95,31 @@ namespace LacertMCP.Server.Tools
             [Description("Numeric Code (must parse as integer; leading minus allowed). Required.")]
             public string Code { get; set; } = string.Empty;
 
-            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings).")]
+            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings). SDK range: -999,999,999 to 999,999,999, at most 12 decimal places.")]
             public double? Amount { get; set; }
 
             [Description("Free-form description for the row. Required.")]
             public string Description { get; set; } = string.Empty;
 
-            [Description("Prefix string. Defaults to empty — omit unless the row's natural key needs a prefix segment.")]
+            [Description("Prefix (SDK type Integer): blank or a whole number. Defaults to empty.")]
             public string Prefix { get; set; } = string.Empty;
 
-            [Description("Suffix string. Defaults to empty — omit unless the row's natural key needs a suffix segment.")]
+            [Description("Suffix (SDK type Integer; the SDK notes standard fields start at 1000, suffixed fields at 1): blank or a whole number. Defaults to empty.")]
             public string Suffix { get; set; } = string.Empty;
 
             [Description("State abbreviation for the row's tax bucket — 2-letter postal code if non-empty (validated against ^[A-Z]{2}$). Defaults to empty. Maps to the DBF column StateAbbr internally.")]
             public string StateAbbrev { get; set; } = string.Empty;
 
-            [Description("City abbreviation. Defaults to empty — omit unless the row carries a city-level breakdown.")]
+            [Description("City abbreviation, at most 3 characters (SDK: Length=3). Defaults to empty.")]
             public string CityAbbr { get; set; } = string.Empty;
 
-            [Description("Source tag (e.g. 'W2', '1099INT'). Defaults to empty.")]
+            [Description("SDK detail Source flag: must be blank (default), 'Nonsource' or 'Source' (SDK detail-file constraint). It is NOT a form tag — do not pass 'W2' / '1099INT'.")]
             public string Source { get; set; } = string.Empty;
 
-            [Description("Taxpayer/Spouse/Joint indicator — one of T, S, J, or empty. Defaults to empty.")]
+            [Description("Taxpayer/Spouse/Joint indicator: Taxpayer, Spouse, Joint (or the aliases T, S, J), or empty (= Joint per the SDK). Stored as the SDK value Taxpayer/Spouse/Joint. Defaults to empty.")]
             public string Tsj { get; set; } = string.Empty;
 
-            [Description("Import source tag. Defaults to empty — omit unless the row originated from an import workflow.")]
+            [Description("Read Only per the SDK detail-file schema — leave blank (any non-empty value is rejected with 9008).")]
             public string ImportSrc { get; set; } = string.Empty;
 
             [Description("Optional zero-based index to overwrite an existing row instead of appending. Sim-mode only — live mode rejects replaceIndex with 9019 LiveReplaceIndexUnsupported (the SDK can only append).")]
@@ -464,7 +464,8 @@ namespace LacertMCP.Server.Tools
 
             if (!string.IsNullOrEmpty(entry.Tsj))
             {
-                if (entry.Tsj.Length != 1 || (entry.Tsj != "T" && entry.Tsj != "S" && entry.Tsj != "J"))
+                // R7-SRC — SDK TSJ values (aliases T/S/J accepted).
+                if (LacertMCP.Server.Bridge.BridgeInputValidation.NormalizeTsj(entry.Tsj) == null)
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.DetailWriteInvalid,
@@ -472,7 +473,7 @@ namespace LacertMCP.Server.Tools
                         {
                             ["field"] = "tsj",
                             ["value"] = entry.Tsj,
-                            ["reason"] = "TSJ must be empty OR one of: T, S, J.",
+                            ["reason"] = "TSJ must be empty OR one of: T/Taxpayer, S/Spouse, J/Joint.",
                         });
                 }
             }

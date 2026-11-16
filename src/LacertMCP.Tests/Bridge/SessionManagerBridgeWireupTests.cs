@@ -169,7 +169,7 @@ namespace LacertMCP.Tests.Bridge
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 100.0, "test");
+            var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "test");
             var result = await mgr.WriteDetail("JOHNS", row);
 
             Assert.Equal(StatusCodes.Success, result);
@@ -183,10 +183,14 @@ namespace LacertMCP.Tests.Bridge
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 100.0, "test");
-            var result = await mgr.WriteDetail("JOHNS", row, dryRun: true);
+            // R7-SRC / R7-13 — the live commit always fails closed (the SDK
+            // writes detail files only via its ODBC driver), so the preview
+            // refuses with the same 9202 instead of previewing Success.
+            var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "test");
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.WriteDetail("JOHNS", row, dryRun: true));
 
-            Assert.Equal(StatusCodes.Success, result);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
             Assert.Equal(0, fake.WriteDetailCalls);
         }
 

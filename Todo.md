@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1625 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1663 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1513,8 +1513,8 @@ Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, 
 
 ### Live-box verification items (cannot be closed off-Windows)
 - [x] **R7-L1** Resolved from source: `docs/research/agents/03-odbc-dbf-access.md` §3 puts the state in `C3_G1`/`C4_G1` (what `SqlTemplates` filters on). The sim seed used `C3_1` → seed now uses `C3_G1` (test `R7L1_SimStateRow_CarriesStateInGroupColumn`).
-- [ ] **R7-L2** (hardware confirmation, not a known defect) `Writer.WriteDetail` sends `row.Amount ?? 0.0`; the `WriteToDetailFile` COM signature is not in any source available here. Confirm on a live box whether a null Amount is accepted; adjust only if live reads back differently from sim.
-- [ ] **R7-L3** (hardware confirmation, not a known defect) Spec says CreateClient "returns the new ClientNumber" but names no property. Code reads `IClient.ClientNumber` best-effort; if absent it returns Success + `clientNumberHint` (R7-28/28b), so no unsafe outcome either way. Confirm the property name on a live box.
+- [x] **R7-L2** RESOLVED from the primary source — the SDK has NO COM detail-write method (detail files are written via the ODBC driver); live `WriteDetail` now fails closed with 9202 instead of calling the invented `WriteToDetailFile`. Amount's range (±999,999,999) and precision (≤12 dp) are now validated. The PDF also marks Amount and StateAbbr as Required, but null/blank are still accepted for description-only and federal rows: the PDF is ambiguous there. ~~(hardware confirmation, not a known defect) `Writer.WriteDetail` sends `row.Amount ?? 0.0`; the `WriteToDetailFile` COM signature is not in any source available here. Confirm on a live box whether a null Amount is accepted; adjust only if live reads back differently from sim.~~
+- [x] **R7-L3** RESOLVED from the primary source — `IClientList.CreateClient(client)` returns only a TAPIStatus; no ClientNumber exists to read. Live create returns Success + `clientNumberHint` by design. ~~(hardware confirmation, not a known defect) Spec says CreateClient "returns the new ClientNumber" but names no property. Code reads `IClient.ClientNumber` best-effort; if absent it returns Success + `clientNumberHint` (R7-28/28b), so no unsafe outcome either way. Confirm the property name on a live box.~~
 
 ### Second-pass review of the fix diff (independent reviewer; all fixed)
 - [x] **R7-04b** persist-loop release used `Volatile.Write` → store/load reorder could still miss a request; now `Interlocked.Exchange`
@@ -1530,3 +1530,36 @@ Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, 
 - [x] **R7-35c** `_simGate.Dispose()` could throw `SynchronizationLockException` at shutdown while a call held the gate → best-effort dispose
 - [x] **R7-04c** persist request-flag clear is now a full fence (`Interlocked.Exchange`)
 - [x] **Final review** of the third-pass commit + R7-L1 seed fix + full sweep of the sim visibility gate: **no findings** (1625 passed / 0 failed).
+
+### Source verification against the Intuit SDK Developer Instructions PDF (2026-11-15)
+Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf. It is public, and the round-7 review read it directly. Our `Lacerte_MCP_Structure_Spec.md` had been mined from it with errors. All of the following are fixed and pinned by `Tests/Bridge/SdkSourceAlignmentR7Tests.cs`:
+- [x] **R7-SRC1 (HIGH)** The bridge activated undocumented ProgIDs (`LacerteSDK_Access.TPRegistration` / `.DBFReader` / `.DBFWriter`), so every live register, read and write would have failed. Fix: create `LacerteSDK_Access.LacerteAccess` and use its documented factories (`CreateTPRegister` / `CreateDBFReader` / `CreateDBFWriter`) via the new `Bridge/SdkAccess.cs`.
+- [x] **R7-SRC2 (HIGH)** `Register` returns the `TPSDKStatus` enum (`ConsentDenied = 0`, then AccessGranted=1 …). The code compared the raw value against 201, so a successful live registration was never recognised. Fix: map raw values to 200+raw; the TaxYear argument is now passed as a String.
+- [x] **R7-SRC3 (HIGH)** Live `CreateClient` called members that don't exist (`access.IClientList`, a 5-arg `list.IClient(...)`, `client.CreateClient()`, a 1-arg `SetDataPath`). Fix: rewritten to the documented `CreateClient()` / `CreateClientList()` / `SetDataPath(appId, path, year)` / property sets / `list.CreateClient(client)`, with TaxType set from the `TaxModule` ordinal.
+- [x] **R7-SRC4** `ReadFromDBFData` is `(appId, path, dbf, ref xml)` → TAPIStatus. It is now called that way, and a non-Success status raises. Reads now pass the registered AppID, not "".
+- [x] **R7-SRC5** `WriteToDBFDatabase` takes 7 args (Value String, `ref newValue`), and `UpdateTaxReturn`'s Value is a String. Values are rendered invariantly (`SdkAccess.ToSdkValueString`).
+- [x] **R7-SRC6** ODBC connection string: the key is `DataDir` (not `Datapath`) and the TaxYear is 4 digits.
+- [x] **R7-SRC7** TY21+ tables: `[<c>-Detail-ClientStateInfo]` / `[<c>-Detail-SubClientStateInfo]` (were `-StateClientInfo` / `-StateSubClientInfo`). State-filter variants were added and the sim query templates updated.
+- [x] **R7-SRC8** Detail-file column rules are now enforced in both modes:
+  - Source must be blank, Nonsource or Source. The seeds and tool descriptions had used form tags like `W2`.
+  - ImportSrc is read-only.
+  - CityAbbr is at most 3 characters.
+  - Prefix and Suffix are Integer.
+  - Amount must be within ±999,999,999 with at most 12 decimal places.
+  - TSJ is stored as the SDK values Taxpayer/Spouse/Joint; the aliases T/S/J are accepted.
+- [x] **F1/F2** TAPIStatus 0–9 are explicit in the source; 10–28 match the source table's listed order. TPSDKStatus collisions are resolved by the 200+raw mapping. `NotRegistered` appears only in the samples, never in the table; it surfaces as `Unknown(n)`.
+
+### Second source pass: independent review of the bridge against the PDF (2026-11-15; all fixed)
+- [x] **R7-SRC9** The doctor "Lacerte COM ProgID" probe still required the undocumented `LacerteSDK_Access.TPRegistration` ProgID, so it failed on a correct install. It now probes only `LacerteSDK_Access.LacerteAccess`.
+- [x] **R7-SRC10** Live detail-write dry runs previewed Success while the commit always returns 9202. The preview now refuses with the same shared `Writer.LiveDetailWriteRefusal`.
+- [x] **R7-SRC11** `IClient.TaxType = int` via `dynamic` throws on a managed SDK object (no implicit int→enum conversion). `LacerteAccessClient.SetTaxType` now uses `Enum.ToObject` on the managed enum property, and falls back to the int for a COM RCW.
+- [x] **R7-SRC12** The 9202 text told operators to "set LACERTE_LIVE=1" (backwards). It now says the live path is not wired. The 9019 remediation no longer sends callers into a guaranteed 9202. Stale `WriteToDetailFile` / `IClient(...)` text was fixed, along with the ConnectionStringBuilder doc comments and the prompt's "blank TSJ = unspecified" (the SDK says blank = Joint).
+- [x] **R7-SRC13** The Integer columns rejected neither a lone "-" nor out-of-range digit strings. Series wasn't numeric-checked at the chokepoint. Both are fixed.
+- [x] **R7-SRC14** The field-access map shipped empty despite the 2026-05-30 decision ("ship hard-coded entries from spec"). The PDF's literal access rows and the TY21 not-supported lists (I and P) now ship. Range rules are documented but stay fail-closed (FieldAccessMap README).
+- [x] **R7-36** `FieldAccessMapLoader.SchemaRoot()` used `Assembly.Location`, which under a shadow-copying host (the net48 xUnit runner) is a temp folder without the JSON tree. The loader silently saw an empty map, which is why the shipped-shard coverage test only ever passed vacuously. It now probes CodeBase, then the AppDomain base directory, then Location. The shard-mutating test fixtures now target `GetSchemaRoot()`.
+- Known PDF-internal ambiguities (not code defects; the code follows the parameter lists, and the live smoke test will settle them):
+  - The C# `UpdateTaxReturn` sample's argument order differs from its parameter list.
+  - The C# `WriteToDBFDatabase` sample has 6 args.
+  - The TY21 DATA2 name is given as `-Detail-SubClientInfo` in the list but `-SubClientInfo` in the sample.
+  - The pre-TY21 DATA4 sample says `[DATA4-Subclient State Info]`, but the table list says "State Subclient Info".
+  - The `TaxModule` / TPSDKStatus 1–4 integers are positional.

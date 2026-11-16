@@ -149,5 +149,6 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] A live `lacerte_field_write` while the return is open in Lacerte returns `success:false` + `statusCode 2 DBFNotAccessable` (not `success:true`).
 - [ ] `lacerte-mcp register` succeeds from the CLI exe (its own `lacerte-mcp.exe.config` carries the legacy-runtime shim); `doctor` App.config probe is green for both exe configs.
 - [ ] `lacerte_state_read` on a TY24 client returns rows and the state is in `C3_G1` (Todo R7-L1 — resolved from source; this is the live sanity check).
-- [ ] A description-only detail row written live reads back with the same Amount as sim (Todo R7-L2).
-- [ ] `lacerte_client_create` live returns the assigned `clientNumber` (Todo R7-L3).
+- [ ] Live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files via ODBC only — Todo R7-L2/R7-SRC8) until the ODBC write path is wired.
+- [ ] `lacerte_client_create` live returns Success with `clientNumber: null` + `clientNumberHint` (the SDK returns no number — Todo R7-L3), and `lacerte_client_find` then resolves it by ClientID.
+- [ ] `lacerte-mcp register` returns exit 0 on Grant (raw TPSDKStatus 1 → 201 AccessGranted — Todo R7-SRC2) and activates `LacerteSDK_Access.LacerteAccess` → `CreateTPRegister()` (R7-SRC1).

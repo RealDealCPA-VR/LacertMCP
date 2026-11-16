@@ -1,4 +1,829 @@
 {
   "taxYear": 2021,
-  "overrides": {}
+  "overrides": {
+    "I|1|C1_100": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_63": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_80": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_83": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_86": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_89": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_90": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_91": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_94": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_96": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_97": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_98": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_99": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G10": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G20": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G23": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G32": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G37": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G38": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G49": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G52": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G53": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G56": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G57": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G59": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G64": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G65": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G83": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|1|C1_G9": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_1": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_10": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_11": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_12": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_13": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_14": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_15": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_16": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_17": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_18": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_19": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_2": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_20": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_21": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_22": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_23": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_24": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_25": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_26": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_27": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_28": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_29": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_3": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_30": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_31": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_32": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_33": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_34": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_35": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_36": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_37": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_38": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_39": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_4": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_40": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_41": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_42": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_43": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_44": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_45": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_46": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_47": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_48": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_49": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_5": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_50": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_51": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_52": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_53": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_54": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_55": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_56": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_57": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_58": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_59": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_6": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_60": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_61": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_62": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_63": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_64": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_65": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_66": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_67": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_7": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_8": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_9": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G2": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G3": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G4": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G50": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G51": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "I|5|C5_G6": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_15": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_32": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_36": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_39": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_40": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_41": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_46": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_47": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_48": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_49": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_50": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_51": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_52": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_53": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G10": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G20": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G23": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G32": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G37": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G38": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G49": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G52": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G53": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G56": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G57": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G59": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G64": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G65": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G8": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G83": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|1|C1_G9": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_1": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_10": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_11": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_12": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_13": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_14": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_15": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_16": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_17": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_18": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_19": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_2": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_20": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_21": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_22": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_23": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_24": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_25": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_26": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_27": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_28": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_29": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_3": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_30": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_31": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_32": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_33": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_34": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_35": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_36": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_37": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_38": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_39": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_4": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_40": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_41": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_42": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_43": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_44": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_45": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_46": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_47": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_48": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_49": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_5": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_50": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_51": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_52": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_53": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_54": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_55": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_56": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_57": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_58": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_59": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_6": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_60": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_61": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_62": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_63": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_64": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_65": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_66": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_67": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_7": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_8": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_9": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G2": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G3": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G4": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G50": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G51": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    },
+    "P|5|C5_G6": {
+      "access": "NotSupported",
+      "source": "sdk-pdf"
+    }
+  }
 }

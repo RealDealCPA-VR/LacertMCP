@@ -9,7 +9,14 @@ namespace LacertMCP.Server.Odbc
     ///
     /// <para>
     /// Shape:
-    /// <code>Driver={LacerteDSIIDriver};Datapath=...;ReturnType=...;TaxYear=YY</code>
+    /// <code>Driver={LacerteDSIIDriver};DataDir={...};TaxYear=YYYY;ReturnType=...</code>
+    /// </para>
+    ///
+    /// <para>
+    /// R7-SRC — per the Intuit SDK Developer Instructions ("Connection String"):
+    /// <c>driver=LacerteDSIIDriver; DataDir=c:\Lacerte\18tax\idata; TaxYear=2019; ReturnType=Individual</c>.
+    /// The key is <c>DataDir</c> (the earlier research note's <c>Datapath</c> is
+    /// not a driver keyword) and <c>TaxYear</c> is the FOUR-digit year.
     /// </para>
     ///
     /// <para>
@@ -30,10 +37,10 @@ namespace LacertMCP.Server.Odbc
         /// <paramref name="returnType"/> is one of <c>Individual, Corporate, Partnership,
         /// SCorporate, Fiduciary, Exempt, Estate, Gift, Benefit</c>, and
         /// <paramref name="taxYear"/> is the four-digit calendar year (e.g. 2024) — it is
-        /// rendered as two digits in the output per the SDK spec.
+        /// rendered as all four digits per the SDK Developer Instructions (R7-SRC).
         ///
         /// <para>
-        /// <b>Brace-wrap-always policy:</b> the emitted <c>Datapath</c> value is unconditionally
+        /// <b>Brace-wrap-always policy:</b> the emitted <c>DataDir</c> value is unconditionally
         /// brace-wrapped (<c>{...}</c>) and any embedded <c>}</c> in the input is doubled to
         /// <c>}}</c> per the ODBC connection-string grammar. This closes the
         /// connection-string-injection surface — a heuristic that only braces "when the path
@@ -84,13 +91,11 @@ namespace LacertMCP.Server.Odbc
             }
 
             // SDK floor per StatusCodes.InValidTaxYear remediation (>= 2018); upper bound is a
-            // sanity guard so the two-digit truncation below never produces a non-sensical year.
+            // sanity guard against a non-sensical year.
             if (taxYear < 2018 || taxYear > 2099)
             {
                 throw new ArgumentException($"taxYear must be between 2018 and 2099 (got {taxYear}).", nameof(taxYear));
             }
-
-            var twoDigitYear = (taxYear % 100).ToString("D2");
 
             // Always brace-wrap dataPath and double any embedded '}' per ODBC grammar
             // (the literal-'}' escape inside a brace-quoted value is '}}'). This handles
@@ -98,7 +103,8 @@ namespace LacertMCP.Server.Odbc
             // the conditional-on-';' heuristic was an injection surface.
             var datapathSegment = "{" + dataPath.Replace("}", "}}") + "}";
 
-            return $"Driver={{LacerteDSIIDriver}};Datapath={datapathSegment};ReturnType={returnType};TaxYear={twoDigitYear}";
+            var year = taxYear.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $"Driver={{LacerteDSIIDriver}};DataDir={datapathSegment};TaxYear={year};ReturnType={returnType}";
         }
     }
 }

@@ -110,7 +110,8 @@ namespace LacertMCP.Server.Errors
         public const int InvalidArgument = 9017;
 
         // 9019 — lacerte_detail_write replaceIndex is supplied in LIVE mode.
-        // P17-001: the live SDK's WriteToDetailFile COM method only appends
+        // P17-001 / R7-SRC: the SDK documents no COM detail-write method (detail
+        // files are written only via its ODBC driver) and no update-by-index path
         // (spec §2); there is no documented update-by-index path. Prior
         // behavior silently dropped replaceIndex on the floor (two
         // `_ = replaceIndex;` discards in LacerteSessionManager.WriteDetail's
@@ -277,8 +278,8 @@ namespace LacertMCP.Server.Errors
             [LiveReplaceIndexUnsupported] = new StatusInfo(
                 "LiveReplaceIndexUnsupported",
                 Severity.Error,
-                "lacerte_detail_write received a replaceIndex while running in LIVE mode. The Lacerte SDK's WriteToDetailFile COM method only appends (spec §2); there is no documented update-by-index path. Sim mode honors replaceIndex for parity testing; the live path fails closed rather than silently appending and reporting Success.",
-                "To correct a detail row in live mode: (1) call lacerte_detail_read to enumerate existing rows; (2) call lacerte_detail_write WITHOUT replaceIndex to append the corrected row; (3) delete the stale row once a detail-delete tool ships (none exists yet — do not attempt to call one). Until then, surface the divergence to the operator rather than mutating live tax-return data with a stale row left in place."),
+                "lacerte_detail_write received a replaceIndex while running in LIVE mode. Live detail-row writes are not available: per the Lacerte SDK Developer Instructions the COM library has no detail-write method (detail files are written only through the SDK's ODBC driver, whose write path is not wired yet), and there is no documented update-by-index path. Simulation mode honors replaceIndex for parity testing.",
+                "Correct the detail row directly in Lacerte, or run the workflow in simulation mode. Do not retry lacerte_detail_write live without replaceIndex — live detail writes return 9202 SimulationOnly until the ODBC write path ships."),
 
             [BulkBatchTooLarge] = new StatusInfo(
                 "BulkBatchTooLarge",
@@ -319,8 +320,12 @@ namespace LacertMCP.Server.Errors
             [SimulationOnly] = new StatusInfo(
                 "SimulationOnly",
                 Severity.Error,
-                "Live-only op (e.g. lacerte_client_create) called while running in simulation mode.",
-                "Set LACERTE_LIVE=1 on a Windows + Lacerte machine, or stub the op in the simulation store."),
+                // R7-SRC — every 9202 throw site is a LIVE path that is not
+                // wired yet (pre-TY21 row-number writes; detail-row writes,
+                // which the SDK performs only through its ODBC driver). The
+                // old text ("set LACERTE_LIVE=1") pointed the wrong way.
+                "This operation is available in simulation mode only — its live path is not wired yet (see context.reason for which one and why).",
+                "Run the operation in simulation mode, or perform the step directly in Lacerte. For pre-TY21 field writes use a TY21+ context; for detail rows enter them in Lacerte until the ODBC write path ships."),
 
             [InternalServerError] = new StatusInfo(
                 "InternalServerError",
