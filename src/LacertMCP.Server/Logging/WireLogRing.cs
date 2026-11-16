@@ -36,6 +36,15 @@ namespace LacertMCP.Server.Logging
         public const int MaxCapacity = 4096;
         public const string CapacityEnvName = "LACERTE_RECENT_LOG_CAPACITY";
 
+        /// <summary>
+        /// R7 — per-entry size cap (UTF-16 chars). Lines longer than this
+        /// are compacted by <see cref="CompactOversizedLine"/> so the ring's
+        /// worst case is bounded by capacity x cap (1 MB at the default 256
+        /// entries) regardless of result shape or
+        /// <c>LACERTE_DEBUG_LOG_FULL_RESULTS</c>.
+        /// </summary>
+        public const int MaxEntryChars = 4096;
+
         private static readonly ConcurrentQueue<string> _ring = new ConcurrentQueue<string>();
         private static long _totalSeen;
         private static long _droppedSinceStart;
@@ -57,6 +66,14 @@ namespace LacertMCP.Server.Logging
             if (string.IsNullOrEmpty(redactedLine)) return;
             try
             {
+                // R7 — per-entry size backstop. The capacity cap is by entry
+                // COUNT, so the documented memory bound only holds while each
+                // entry stays small; oversized lines are compacted to their
+                // diagnostic envelope before they enter the ring.
+                if (redactedLine.Length > MaxEntryChars)
+                {
+                    redactedLine = CompactOversizedLine(redactedLine);
+                }
                 _ring.Enqueue(redactedLine);
                 Interlocked.Increment(ref _totalSeen);
                 // Trim down to capacity — concurrent pushes may briefly
@@ -72,6 +89,56 @@ namespace LacertMCP.Server.Logging
             {
                 // Defensive — never propagate logging faults.
             }
+        }
+
+        /// <summary>
+        /// R7 — replace an oversized line with a compact JSON envelope that
+        /// keeps the keys <c>lacerte_recent_log</c> projects (ts / op / cid /
+        /// durationMs / error — the error only when it is itself small) and
+        /// marks the entry <c>truncated</c> with the original length. The
+        /// input is already redacted; this only drops content. Never
+        /// returns a string longer than <see cref="MaxEntryChars"/>.
+        /// </summary>
+        internal static string CompactOversizedLine(string line)
+        {
+            var compact = new JsonObject();
+            try
+            {
+                if (JsonNode.Parse(line) is JsonObject obj)
+                {
+                    foreach (var key in new[] { "ts", "op", "cid", "durationMs" })
+                    {
+                        if (obj.TryGetPropertyValue(key, out var n) && n is JsonValue
+                            && n.ToJsonString().Length <= 256)
+                        {
+                            compact[key] = JsonNode.Parse(n.ToJsonString());
+                        }
+                    }
+                    if (obj.TryGetPropertyValue("error", out var err) && err != null)
+                    {
+                        var errJson = err.ToJsonString();
+                        compact["error"] = errJson.Length <= MaxEntryChars / 2
+                            ? JsonNode.Parse(errJson)
+                            : JsonValue.Create("<error truncated>");
+                    }
+                }
+            }
+            catch
+            {
+                // Unparseable — fall through to the minimal envelope.
+            }
+            compact["truncated"] = true;
+            compact["originalLength"] = line.Length;
+            var result = compact.ToJsonString();
+            if (result.Length > MaxEntryChars)
+            {
+                result = new JsonObject
+                {
+                    ["truncated"] = true,
+                    ["originalLength"] = line.Length,
+                }.ToJsonString();
+            }
+            return result;
         }
 
         /// <summary>
