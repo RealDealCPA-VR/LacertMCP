@@ -26,9 +26,9 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>0.2.1</Version>
-    <AssemblyVersion>0.2.1.0</AssemblyVersion>
-    <FileVersion>0.2.1.0</FileVersion>
+    <Version>0.2.2</Version>
+    <AssemblyVersion>0.2.2.0</AssemblyVersion>
+    <FileVersion>0.2.2.0</FileVersion>
     <!--
       P17-009 — Include the short git SHA in InformationalVersion when
       $(SourceRevisionId) is populated AT EVALUATION TIME, i.e. only when it
