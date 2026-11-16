@@ -9,9 +9,10 @@ namespace LacertMCP.Cli
     ///
     /// <para>
     /// Why this exists: the server's <c>FieldAccessMapLoader</c> reads the tree
-    /// next to <c>LacertMCP.Server.dll</c>. In the dev bin layout the CLI and
-    /// server share one output folder, so "next to lacerte-mcp.exe" is the same
-    /// place. In the release zip (scripts/release.ps1) the server and CLI are
+    /// next to <c>LacertMCP.Server.dll</c>. In a dev checkout the CLI and server
+    /// build into DIFFERENT folders (src/LacertMCP.Cli/bin/... vs
+    /// src/LacertMCP.Server/bin/...), so the resolver targets the server's build
+    /// output there (R7 DevServerBuild tier). In the release zip (scripts/release.ps1) the server and CLI are
     /// staged into separate <c>server/</c> and <c>cli/</c> folders — and because
     /// the CLI project references the server, <c>cli/</c> carries its own copy
     /// of the schema tree. Writing beside lacerte-mcp.exe there edits a copy the
@@ -35,7 +36,7 @@ namespace LacertMCP.Cli
     /// </summary>
     public static class SchemaDirResolver
     {
-        public enum SchemaDirSource { Explicit, ReleaseServerSibling, CliLocal }
+        public enum SchemaDirSource { Explicit, ReleaseServerSibling, DevServerBuild, CliLocal }
 
         public readonly struct Resolution
         {
@@ -59,6 +60,7 @@ namespace LacertMCP.Cli
             {
                 SchemaDirSource.Explicit => $"{Root} (from --schema-dir)",
                 SchemaDirSource.ReleaseServerSibling => $"{Root} (release layout: the server's schema tree)",
+                SchemaDirSource.DevServerBuild => $"{Root} (dev checkout: the server's build output, which the dev server reads — rebuilds overwrite it, so copy lasting changes into src/LacertMCP.Server/Schema/FieldAccessMap)",
                 _ => $"{Root} (next to lacerte-mcp.exe)",
             };
         }
@@ -128,6 +130,33 @@ namespace LacertMCP.Cli
             {
                 return new Resolution(sibling, SchemaDirSource.ReleaseServerSibling);
             }
+
+            // R7 — dev checkout: <repo>/src/LacertMCP.Cli/bin/<plat>/<cfg>/ →
+            // <repo>/src/LacertMCP.Server/bin/<plat>/<cfg>/Schema/FieldAccessMap,
+            // the tree the documented dev server exe actually reads. Previously
+            // the CLI edited its OWN bin copy, which no server reads, so
+            // `field-access set` (and the doctor probe) disagreed with the
+            // running server. Gated on the CLI's own bin layout so test hosts
+            // (whose bin is LacertMCP.Tests) keep the CLI-local tier.
+            try
+            {
+                var cfgDir = new DirectoryInfo(exeDir);
+                var platDir = cfgDir.Parent;
+                var binDir = platDir?.Parent;
+                var projDir = binDir?.Parent;
+                if (projDir?.Parent != null
+                    && string.Equals(binDir!.Name, "bin", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(projDir.Name, "LacertMCP.Cli", StringComparison.OrdinalIgnoreCase))
+                {
+                    var dev = Path.Combine(projDir.Parent.FullName, "LacertMCP.Server", "bin",
+                        platDir!.Name, cfgDir.Name, "Schema", "FieldAccessMap");
+                    if (Directory.Exists(dev))
+                    {
+                        return new Resolution(Path.GetFullPath(dev), SchemaDirSource.DevServerBuild);
+                    }
+                }
+            }
+            catch (Exception) { /* fall through to CLI-local */ }
 
             return new Resolution(Path.GetFullPath(Path.Combine(exeDir, "Schema", "FieldAccessMap")),
                 SchemaDirSource.CliLocal);

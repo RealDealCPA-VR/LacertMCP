@@ -335,6 +335,38 @@ namespace LacertMCP.Tests.Cli
             finally { DeleteTree(root); }
         }
 
+        // R7 — the CLI / dumper writers emit PascalCase ("Source", "Access");
+        // the loader is case-insensitive, so the probe must be too.
+        [Fact]
+        public void Doctor_Shards_PascalCaseBaseline_StillWarns()
+        {
+            var root = NewShardTree(
+                ("individual.json", "{ \"I|1|C1_G4\": { \"Access\": \"ReadWrite\", \"Source\": \"sdk-pdf\" } }"));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Warn, r.Status);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        // R7 — entries the loader cannot deserialize make it drop the WHOLE
+        // shard; the probe reports them as Fail, never as operator entries.
+        [Theory]
+        [InlineData("{ \"I|1|C1_15\": \"ReadWrite\" }")]                                   // non-object value
+        [InlineData("{ \"I|1|C1_15\": { \"access\": \"ReadWrit\", \"source\": \"x\" } }")]   // bad enum
+        [InlineData("{ \"I|1|C1_15\": { \"source\": \"manual\" } }")]                       // missing access
+        public void Doctor_Shards_UnloadableEntry_Fails(string json)
+        {
+            var root = NewShardTree(("individual.json", json));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, r.Status);
+            }
+            finally { DeleteTree(root); }
+        }
+
         [Fact]
         public void Doctor_Shards_EntriesBeyondBaseline_Pass()
         {

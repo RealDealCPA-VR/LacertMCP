@@ -43,6 +43,21 @@ namespace LacertMCP.Tests.Cli
             Assert.Contains(res.Root, res.Describe());
         }
 
+        // R7 — dev checkout: the CLI runs from src/LacertMCP.Cli/bin/<plat>/<cfg>
+        // and must target the SERVER's build output (what the dev server reads),
+        // not its own bin copy.
+        [Fact]
+        public void DevCheckout_CliBin_TargetsServerBuildOutput()
+        {
+            var cliBin = Directory.CreateDirectory(Path.Combine(_root, "src", "LacertMCP.Cli", "bin", "x64", "Debug")).FullName;
+            var serverMap = Directory.CreateDirectory(Path.Combine(_root, "src", "LacertMCP.Server", "bin", "x64", "Debug", "Schema", "FieldAccessMap")).FullName;
+
+            var res = SchemaDirResolver.Resolve(null, cliBin);
+
+            Assert.Equal(SchemaDirResolver.SchemaDirSource.DevServerBuild, res.Source);
+            Assert.True(SchemaDirResolver.SamePath(serverMap, res.Root), $"expected {serverMap}, got {res.Root}");
+        }
+
         [Fact]
         public void DevLayout_NoServerSibling_UsesCliLocalTree()
         {

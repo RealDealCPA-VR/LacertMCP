@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1665 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1671 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1570,3 +1570,12 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
 - [x] **R7-SRC17** The schema JSON is copied with `Always`, not `PreserveNewest`, so a bin copy left stale by an aborted shard-mutating fixture is refreshed on the next build.
 - [x] Stale text fixed: loader probe-order comment, `DetailRow.TSJ` comment, SKILL TSJ set, bulk replaceIndex wording. The detail-write tools and the onboarding prompt now say that live detail writes return 9202.
 - Decision recorded: the appendix's global-field rows ship for Individual and Partnership only; other modules stay fail-closed for those fields.
+
+### Confirmation review of adf42e1 (2026-11-15; all fixed)
+- [x] **R7-37 (latent fail-open)** `FieldEntry` / `OverlayEntry` bound a missing `"access"` to `default(FieldAccess)` == ReadWrite, so such an entry loaded as writable. Both are now `[JsonRequired]`; the loader handles the resulting JsonException fail-closed.
+- [x] **R7-38** The doctor shard probe:
+  - checks property names case-insensitively, since the CLI and dumper write PascalCase and a `field-access set` round-trip used to flip it to Pass;
+  - reports entries the loader can't deserialize (non-object value, bad enum, missing access) as Fail, because the loader drops the whole shard for them;
+  - no longer recommends the stubbed dumper `--live`.
+- [x] **R7-39** In a dev checkout, `SchemaDirResolver` now targets the **server's** build output (`src/LacertMCP.Server/bin/<plat>/<cfg>/Schema/FieldAccessMap`), the tree the dev server reads. Before, `field-access set` and doctor used the CLI's own bin copy, and the claim that "CLI and server share one output folder" was false.
+- [x] The README no longer advises a base-map `field-access set` for `C1_G38`; it says to use a per-year overlay entry. The bulk detail-write description now states the stop-on-error behaviour, and the HANDOFF DECISIONS count is corrected.

@@ -1063,15 +1063,41 @@ namespace LacertMCP.Cli.Commands
                             malformed.Add($"{Path.GetFileName(file)} (root is {doc.RootElement.ValueKind}, expected an object)");
                             continue;
                         }
+                        // R7 — mirror what FieldAccessMapLoader accepts: each value
+                        // must be an object whose "access" (property names are
+                        // case-insensitive — the CLI / dumper writers emit PascalCase)
+                        // is a FieldAccess name. One bad entry makes the loader's
+                        // Deserialize throw and treat the WHOLE shard as empty, so it
+                        // is a Fail here, not an "operator entry".
+                        string? badEntry = null;
+                        int fileEntries = 0, fileNonBaseline = 0;
                         foreach (var entry in doc.RootElement.EnumerateObject())
                         {
-                            totalEntries++;
-                            var isBaseline = entry.Value.ValueKind == JsonValueKind.Object
-                                && entry.Value.TryGetProperty("source", out var src)
-                                && src.ValueKind == JsonValueKind.String
-                                && string.Equals(src.GetString(), "sdk-pdf", StringComparison.OrdinalIgnoreCase);
-                            if (!isBaseline) nonBaselineEntries++;
+                            fileEntries++;
+                            if (entry.Value.ValueKind != JsonValueKind.Object)
+                            {
+                                badEntry = $"{entry.Name}: value is {entry.Value.ValueKind}, expected an object";
+                                break;
+                            }
+                            var access = GetStringPropertyCI(entry.Value, "access");
+                            if (access == null
+                                || !Enum.TryParse<LacertMCP.Server.Schema.FieldAccess>(access, ignoreCase: true, out var parsed)
+                                || !Enum.IsDefined(typeof(LacertMCP.Server.Schema.FieldAccess), parsed)
+                                || access.Trim().Length == 0 || char.IsDigit(access.Trim()[0]))
+                            {
+                                badEntry = $"{entry.Name}: access '{access ?? "<missing>"}' is not a FieldAccess value";
+                                break;
+                            }
+                            var source = GetStringPropertyCI(entry.Value, "source");
+                            if (!string.Equals(source, "sdk-pdf", StringComparison.OrdinalIgnoreCase)) fileNonBaseline++;
                         }
+                        if (badEntry != null)
+                        {
+                            malformed.Add($"{Path.GetFileName(file)} ({badEntry})");
+                            continue;
+                        }
+                        totalEntries += fileEntries;
+                        nonBaselineEntries += fileNonBaseline;
                     }
                 }
                 catch (JsonException ex)
@@ -1105,12 +1131,26 @@ namespace LacertMCP.Cli.Commands
                 return new ProbeResult(Name,
                     ProbeStatus.Warn,
                     $"only the SDK-PDF baseline is present ({totalEntries} documented entries across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}) — most fields still return 9012 UnknownFieldAccess until catalogued",
-                    "Catalogue the fields you write: run LacertMCP.FieldAccessDumper.exe --live --year <yyyy> on the Lacerte box, or `lacerte-mcp field-access set ...` per field, then call lacerte_reload_schema.");
+                    "Catalogue the fields you write with `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access <...>` after confirming each on the Lacerte box (the FieldAccessDumper's --live introspection is not implemented yet), then call lacerte_reload_schema.");
             }
 
             return new ProbeResult(Name,
                 ProbeStatus.Pass,
                 $"{totalEntries} entr{(totalEntries == 1 ? "y" : "ies")} ({nonBaselineEntries} beyond the SDK-PDF baseline) across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}");
+        }
+
+        // R7 — case-insensitive string property lookup (System.Text.Json's
+        // JsonElement.TryGetProperty is case-sensitive; the loader is not).
+        private static string? GetStringPropertyCI(JsonElement obj, string name)
+        {
+            foreach (var p in obj.EnumerateObject())
+            {
+                if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : null;
+                }
+            }
+            return null;
         }
 
         /// <summary>

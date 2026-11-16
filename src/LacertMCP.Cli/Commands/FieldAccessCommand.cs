@@ -394,7 +394,8 @@ namespace LacertMCP.Cli.Commands
         /// Shard path under the DEFAULT schema root (<see cref="SchemaDirResolver.Resolve(string)"/>
         /// with no explicit dir): the release layout's <c>..\server\Schema\FieldAccessMap</c>
         /// when present — the tree the MCP server actually reads — else the tree next
-        /// to lacerte-mcp.exe (dev bin layout, where CLI and server share one folder).
+        /// the server's build output in a dev checkout (R7 DevServerBuild), else the
+        /// tree next to lacerte-mcp.exe.
         /// </summary>
         public static string ShardPath(string basename)
             => ShardPath(basename, SchemaDirResolver.Resolve().Root);

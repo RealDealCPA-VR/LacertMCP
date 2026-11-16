@@ -143,6 +143,20 @@ namespace LacertMCP.Tests.Bridge
             Assert.Equal(expected, FieldAccessMapLoader.GetFieldAccess(module, table, field, year));
         }
 
+        // R7 — a shard entry without "access" must not deserialize as the
+        // enum default (ReadWrite): [JsonRequired] turns it into a JsonException,
+        // which the loader handles fail-closed.
+        [Fact]
+        public void FieldEntry_MissingAccess_IsRejected_NotReadWrite()
+        {
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+            Assert.ThrowsAny<JsonException>(() =>
+                JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>("{\"I|1|C1_15\":{\"source\":\"manual\"}}", opts));
+            var ok = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>("{\"I|1|C1_15\":{\"access\":\"ReadOnly\"}}", opts);
+            Assert.Equal(FieldAccess.ReadOnly, ok!["I|1|C1_15"].Access);
+        }
+
         // R7-SRC — TaxType is the SDK TaxModule enum; a managed SDK object
         // needs a real enum value (dynamic int assignment would throw).
         private enum FakeTaxModule { TaxModule_Individual = 1, TaxModule_Corporate = 2, TaxModule_Benefit = 9 }
