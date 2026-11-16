@@ -958,28 +958,34 @@ namespace LacertMCP.Server.Session
             RequireRegistered();
             ThrowIfLiveUnwired();
             var module = RequireSimModule(ctx);
-            IEnumerable<DbfRow> rows = module.Clients.Values;
-
-            if (!string.IsNullOrEmpty(lastNameFilter))
-            {
-                var f = lastNameFilter!;
-                var nameKey = ctx.Module == 'I' ? "C1_2" : "C1_1";
-                rows = rows.Where(r =>
-                    r.Fields.TryGetValue(nameKey, out var v) && v is string s &&
-                    s.StartsWith(f, StringComparison.OrdinalIgnoreCase));
-            }
 
             // R7-11 — deterministic ClientNumber order (ConcurrentDictionary
             // enumeration order is unspecified and can change when a create
             // resizes the map between two offset pages, skipping/repeating
             // rows). Live SQL orders by ClientNumber too.
-            // R7-10 — materialize under the shared _simGate so a dry-run create's
-            // phantom row is never listed.
-            var result = UnderSimRead(() => rows
-                .OrderBy(r => r.ClientNumber, StringComparer.OrdinalIgnoreCase)
-                .Take(Math.Max(0, limit))
-                .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
-                .ToList());
+            // R7-10 / R7-35b — the ENTIRE read happens under the shared
+            // _simGate, including the Clients.Values snapshot. On net48
+            // ConcurrentDictionary.Values copies eagerly, so taking it before
+            // entering the gate captured a dry-run create's phantom client
+            // (reproduced ~1-in-80 under contention) and the gate only
+            // protected the clone of that stale snapshot.
+            var result = UnderSimRead(() =>
+            {
+                IEnumerable<DbfRow> rows = module.Clients.Values;
+                if (!string.IsNullOrEmpty(lastNameFilter))
+                {
+                    var f = lastNameFilter!;
+                    var nameKey = ctx.Module == 'I' ? "C1_2" : "C1_1";
+                    rows = rows.Where(r =>
+                        r.Fields.TryGetValue(nameKey, out var v) && v is string s &&
+                        s.StartsWith(f, StringComparison.OrdinalIgnoreCase));
+                }
+                return rows
+                    .OrderBy(r => r.ClientNumber, StringComparer.OrdinalIgnoreCase)
+                    .Take(Math.Max(0, limit))
+                    .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
+                    .ToList();
+            });
             return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
         }
 
@@ -3379,7 +3385,9 @@ namespace LacertMCP.Server.Session
             {
                 try
                 {
-                    Volatile.Write(ref _persistRequested, 0);
+                    // R7-04c — full fence so the clear cannot reorder after
+                    // the cache snapshot taken in PersistOnce.
+                    Interlocked.Exchange(ref _persistRequested, 0);
                     PersistIdempotencyCacheToDiskOnce();
                 }
                 finally
@@ -3774,7 +3782,12 @@ namespace LacertMCP.Server.Session
             _odbc?.Dispose();
             // Dispose all idempotency-lock semaphores.
             foreach (var sem in _idempotencyLocks.Values) sem.Dispose();
-            _simGate.Dispose();
+            // R7-35c — ReaderWriterLockSlim.Dispose throws
+            // SynchronizationLockException on net48 while any thread holds or
+            // waits on it (shutdown racing an in-flight tool call). Disposal
+            // is best-effort cleanup; never let it abort shutdown.
+            try { _simGate.Dispose(); }
+            catch (SynchronizationLockException) { /* in use at shutdown */ }
         }
 
         // ===================================================================

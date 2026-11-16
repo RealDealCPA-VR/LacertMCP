@@ -358,6 +358,40 @@ namespace LacertMCP.Tests.Session
             Assert.Equal(0, leaks);
         }
 
+        // R7-35b — the reproduced leak: ListClients snapshotted
+        // Clients.Values BEFORE entering the gate, so a dry-run create's
+        // phantom client was listed (~1-in-80 iterations under contention).
+        [Fact]
+        public async Task R735b_ConcurrentDryRunCreates_NeverListPhantomClients()
+        {
+            using var mgr = await NewRegisteredSimAsync();
+            var baseline = (await mgr.ListClients(null, int.MaxValue)).Count;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            int phantoms = 0, iterations = 0;
+            var creators = Enumerable.Range(0, 2).Select(w => Task.Run(async () =>
+            {
+                int i = 0;
+                while (!cts.IsCancellationRequested)
+                {
+                    await mgr.CreateClient(
+                        new CreateClientArgs("PH" + w + (i++ % 1000), "Individual", "F", "L", "e@x.com"),
+                        dryRun: true);
+                }
+            })).ToArray();
+            var readers = Enumerable.Range(0, 3).Select(_ => Task.Run(async () =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    Interlocked.Increment(ref iterations);
+                    if ((await mgr.ListClients(null, int.MaxValue)).Count != baseline)
+                        Interlocked.Increment(ref phantoms);
+                }
+            })).ToArray();
+            await Task.WhenAll(creators.Concat(readers));
+            Assert.True(iterations > 100, "reader loop barely ran: " + iterations);
+            Assert.Equal(0, phantoms);
+        }
+
         [Fact]
         public async Task R728_LiveCreate_SuccessWithoutNumber_CarriesHint()
         {

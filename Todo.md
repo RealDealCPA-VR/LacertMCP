@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1623 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1624 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1524,3 +1524,8 @@ Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, 
 - [x] **R7-35** dry-run state still visible to `ReadTable` / `ReadEFStatus` / `ListClients` → reader/writer sim gate (exclusive for creates + dry-runs, shared for every sim read)
 - [x] **R7-28b** live create Success with no readable ClientNumber now carries `clientNumberHint` (single + bulk)
 - [x] Doc drift: INSTRUCTION_MANUAL / README `set_context` signature; stray form-feed byte in SKILL.md
+
+### Third pass — independent re-review of the second-pass commit (all fixed)
+- [x] **R7-35b** `ListClients` snapshotted `Clients.Values` (eager copy on net48) BEFORE entering the sim gate → dry-run phantom clients still listed (reproduced: 1183 leaks in 2s pre-fix; regression test `R735b_ConcurrentDryRunCreates_NeverListPhantomClients`)
+- [x] **R7-35c** `_simGate.Dispose()` could throw `SynchronizationLockException` at shutdown while a call held the gate → best-effort dispose
+- [x] **R7-04c** persist request-flag clear is now a full fence (`Interlocked.Exchange`)

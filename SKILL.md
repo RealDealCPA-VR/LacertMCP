@@ -445,7 +445,7 @@ For SDK codes, also check `lacerte_return_codes` for the full enum.
 
 ## Versioning + back-compat note
 
-This is v0.1.x pre-release. Wire conventions canonicalized in P16/P17/P18 (1623 tests passing, 0 failures as of the round-7 deep review). Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are kept until v0.2 but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
+This is v0.1.x pre-release. Wire conventions canonicalized in P16/P17/P18 (1624 tests passing, 0 failures as of the round-7 deep review). Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are kept until v0.2 but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
 
 Registration: `lacerte-mcp register` and `lacerte-mcp login` run the REAL Intuit consent + sign-in ceremony (`Bridge/Registration.cs`, wired in R6-05). Exit 0 = `AccessGranted` (or off-Windows `[skipped]` mint-only); exit 1 = denied/failed ceremony; exit 2 = PARTIAL (Lacerte SDK COM surface unavailable — AppID persisted, run `lacerte-mcp doctor`). Exit 3 is RETIRED for these verbs. The end-to-end ceremony against a real Intuit dialog is still pending verification on a Windows + Lacerte box.
 
