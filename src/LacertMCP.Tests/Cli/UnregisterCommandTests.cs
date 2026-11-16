@@ -49,6 +49,52 @@ namespace LacertMCP.Tests.Cli
             Assert.Contains("nothing to unregister", stdout.ToString());
         }
 
+        // ----- ParseFailed: corrupt stored AppID must be deletable -----
+
+        private static void WriteCorruptAppId(string raw)
+        {
+            var path = AppIdStore.FallbackConfigPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "{ \"AppId\": \"" + raw + "\" }");
+        }
+
+        [Fact]
+        public void Unregister_Confirm_With_Corrupt_AppId_Deletes_Entry()
+        {
+            // Doctor's ParseFailed remediation says "run unregister --confirm, then
+            // register". Previously unregister used AppIdStore.Get() (which collapses
+            // ParseFailed to null), said "nothing to unregister", and deleted nothing.
+            WriteCorruptAppId("not-a-guid-1234");
+            Assert.Equal(AppIdStore.AppIdDiagnostic.ParseFailed, AppIdStore.GetDiagnostic(out _, out _));
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = UnregisterCommand.Run(confirm: true, stdout, stderr);
+
+            Assert.Equal(0, exit);
+            Assert.DoesNotContain("nothing to unregister", stdout.ToString());
+            Assert.Contains("corrupt AppID", stdout.ToString());
+            Assert.Equal(AppIdStore.AppIdDiagnostic.Absent, AppIdStore.GetDiagnostic(out _, out _));
+            Assert.False(File.Exists(AppIdStore.FallbackConfigPath));
+            // The raw (possibly partially valid) value is never echoed.
+            Assert.DoesNotContain("not-a-guid-1234", stdout.ToString() + stderr.ToString());
+        }
+
+        [Fact]
+        public void Unregister_Without_Confirm_With_Corrupt_AppId_Refuses_And_Keeps_Entry()
+        {
+            WriteCorruptAppId("garbage");
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = UnregisterCommand.Run(confirm: false, stdout, stderr);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("Refusing", stderr.ToString());
+            Assert.Contains("corrupt AppID", stdout.ToString());
+            Assert.Equal(AppIdStore.AppIdDiagnostic.ParseFailed, AppIdStore.GetDiagnostic(out _, out _));
+        }
+
         [Fact]
         public void Unregister_Without_Confirm_Refuses_With_Exit_1()
         {

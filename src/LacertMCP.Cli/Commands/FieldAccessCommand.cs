@@ -16,11 +16,18 @@ namespace LacertMCP.Cli.Commands
     /// <c>lacerte-mcp field-access {set | list | discover}</c>
     ///
     /// <para>
-    /// Operator surface for the per-field access map (agent 04 §5). <c>list</c> reads via
-    /// <see cref="FieldAccessMapLoader"/>; <c>set</c> upserts a row into the right
-    /// <c>Schema/FieldAccessMap/base/&lt;module&gt;.json</c> shard and writes it back
-    /// sorted; <c>discover</c> is a stub today — bulk introspection needs the live SDK
-    /// (follow-up F5 in <c>Todo.md</c>).
+    /// Operator surface for the per-field access map (agent 04 §5). <c>list</c> reads the
+    /// raw shard and reports effective access (overlay applied); <c>set</c> upserts a row
+    /// into the right <c>Schema/FieldAccessMap/base/&lt;module&gt;.json</c> shard and writes
+    /// it back sorted (manifest.json is not modified); <c>discover</c> is a stub today —
+    /// bulk introspection needs the live SDK (follow-up F5 in <c>Todo.md</c>).
+    /// </para>
+    ///
+    /// <para>
+    /// The schema root is resolved by <see cref="SchemaDirResolver"/> (explicit
+    /// <c>--schema-dir</c> → release-layout <c>..\server\Schema\FieldAccessMap</c> →
+    /// dev-checkout server build output → next to lacerte-mcp.exe) so edits land in the tree the MCP server reads; both
+    /// verbs print the resolved path.
     /// </para>
     /// </summary>
     public static class FieldAccessCommand
@@ -54,10 +61,12 @@ namespace LacertMCP.Cli.Commands
                 "Table number (1..7).") { IsRequired = true };
             var yearOpt = new Option<int>("--year", () => DateTime.UtcNow.Year - 1,
                 "Tax year (used to pick overlay).");
+            var schemaDirOpt = BuildSchemaDirOption();
 
             list.AddOption(moduleOpt);
             list.AddOption(tableOpt);
             list.AddOption(yearOpt);
+            list.AddOption(schemaDirOpt);
 
             list.SetHandler((context) =>
             {
@@ -70,13 +79,23 @@ namespace LacertMCP.Cli.Commands
                 }
                 var table = context.ParseResult.GetValueForOption(tableOpt);
                 var year = context.ParseResult.GetValueForOption(yearOpt);
+                var schemaDir = context.ParseResult.GetValueForOption(schemaDirOpt);
                 // P15-067: pass stdout + stderr explicitly so the routing is grep-able
                 // at the closure boundary, not buried in the method.
-                context.ExitCode = RunList(moduleStr[0], table, year, Console.Out, Console.Error);
+                context.ExitCode = RunList(moduleStr[0], table, year, schemaDir, Console.Out, Console.Error);
             });
 
             return list;
         }
+
+        private static Option<string?> BuildSchemaDirOption()
+            => new Option<string?>("--schema-dir", () => null,
+                "Schema/FieldAccessMap root to read/write (the folder holding base/ and overlays/, " +
+                "or an install folder containing Schema/FieldAccessMap). Default: the release " +
+                "layout's ..\\server\\Schema\\FieldAccessMap when present (the tree the MCP server " +
+                "actually reads); in a dev checkout the server's build output " +
+                "(src\\LacertMCP.Server\\bin\\<plat>\\<cfg>\\Schema\\FieldAccessMap; rebuilds overwrite it); " +
+                "else Schema\\FieldAccessMap next to lacerte-mcp.exe.");
 
         /// <summary>
         /// Back-compat overload — preserved for existing call sites that pre-date the
@@ -85,7 +104,11 @@ namespace LacertMCP.Cli.Commands
         public static int RunList(char module, int table, int year, TextWriter writer)
             => RunList(module, table, year, writer, Console.Error);
 
+        /// <summary>Back-compat overload — default schema-dir resolution.</summary>
         public static int RunList(char module, int table, int year, TextWriter writer, TextWriter stderr)
+            => RunList(module, table, year, schemaDir: null, writer, stderr);
+
+        public static int RunList(char module, int table, int year, string? schemaDir, TextWriter writer, TextWriter stderr)
         {
             if (Modules.FileBasenameFor(module) == null)
             {
@@ -101,7 +124,15 @@ namespace LacertMCP.Cli.Commands
             }
 
             // Read the raw shard so we can print everything (the loader is lookup-oriented).
-            var rows = ReadShard(module);
+            var schema = SchemaDirResolver.Resolve(schemaDir);
+            writer.WriteLine($"# Schema dir: {schema.Describe()}");
+            var shard = ReadShard(module, schema.Root);
+            if (shard.Error != null)
+            {
+                stderr.WriteLine($"Shard {shard.Path} is not valid JSON ({shard.Error}). The server treats it as empty — fix or regenerate it.");
+                return 1;
+            }
+            var rows = shard.Rows;
             var prefix = module + "|" + table + "|";
             var filtered = rows
                 .Where(r => r.Key.StartsWith(prefix, StringComparison.Ordinal))
@@ -121,13 +152,14 @@ namespace LacertMCP.Cli.Commands
             }
 
             writer.WriteLine($"# Module {module} / DATA{table} — {filtered.Count} entries (year={year})");
+            var effectiveOf = BuildEffectiveResolver(schema.Root, module, table, year);
             foreach (var kv in filtered)
             {
                 var key = kv.Key;
                 var entry = kv.Value;
                 var field = key.Substring(prefix.Length);
                 // Apply overlay so callers see the effective access (mirrors loader behavior).
-                var effective = FieldAccessMapLoader.GetFieldAccess(module, table, field, year);
+                var effective = effectiveOf(field, entry.Access);
                 writer.WriteLine($"  {field,-12} base={entry.Access,-12} effective={effective,-12} src={entry.Source}");
             }
             return 0;
@@ -153,7 +185,9 @@ namespace LacertMCP.Cli.Commands
             // <letter><table>_<n> convention (e.g. legacy import).
             var forceOpt = new Option<bool>("--force", () => false,
                 "Override the field-name shape check (defaults to <letter><table>_<n>, e.g. C1_42).");
+            var schemaDirOpt = BuildSchemaDirOption();
 
+            set.AddOption(schemaDirOpt);
             set.AddOption(moduleOpt);
             set.AddOption(tableOpt);
             set.AddOption(fieldOpt);
@@ -181,9 +215,10 @@ namespace LacertMCP.Cli.Commands
                 var src = context.ParseResult.GetValueForOption(sourceOpt)!;
                 var note = context.ParseResult.GetValueForOption(noteOpt);
                 var force = context.ParseResult.GetValueForOption(forceOpt);
+                var schemaDir = context.ParseResult.GetValueForOption(schemaDirOpt);
                 // P15-067: pass stdout + stderr explicitly so the routing is grep-able
                 // at the closure boundary.
-                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, force, Console.Out, Console.Error);
+                context.ExitCode = RunSet(moduleStr[0], t, f, a, dt, ml, src, note, force, schemaDir, Console.Out, Console.Error);
             });
 
             return set;
@@ -205,8 +240,14 @@ namespace LacertMCP.Cli.Commands
             string? dataType, int? maxLength, string source, string? note, TextWriter writer, TextWriter stderr)
             => RunSet(module, table, field, accessRaw, dataType, maxLength, source, note, force: false, writer, stderr);
 
+        /// <summary>Back-compat overload — default schema-dir resolution.</summary>
         public static int RunSet(char module, int table, string field, string accessRaw,
             string? dataType, int? maxLength, string source, string? note, bool force, TextWriter writer, TextWriter stderr)
+            => RunSet(module, table, field, accessRaw, dataType, maxLength, source, note, force, schemaDir: null, writer, stderr);
+
+        public static int RunSet(char module, int table, string field, string accessRaw,
+            string? dataType, int? maxLength, string source, string? note, bool force, string? schemaDir,
+            TextWriter writer, TextWriter stderr)
         {
             // R6-28 — uppercase-normalize BEFORE any validation or shard write.
             // FieldAccessMapLoader.GetFieldAccess uppercases the field name and
@@ -245,8 +286,17 @@ namespace LacertMCP.Cli.Commands
                 return 1;
             }
 
-            var path = ShardPath(basename);
-            var rows = ReadShard(module);
+            var schema = SchemaDirResolver.Resolve(schemaDir);
+            var path = ShardPath(basename, schema.Root);
+            var shard = ReadShard(module, schema.Root);
+            if (shard.Error != null)
+            {
+                // Refuse rather than silently replacing a malformed shard with a
+                // one-entry map (which would drop every other row in it).
+                stderr.WriteLine($"Refusing to write: shard {path} is not valid JSON ({shard.Error}). Fix or restore it first (the server currently treats it as empty).");
+                return 1;
+            }
+            var rows = shard.Rows;
             var key = module + "|" + table + "|" + field;
             var existed = rows.TryGetValue(key, out var prior);
 
@@ -261,7 +311,8 @@ namespace LacertMCP.Cli.Commands
 
             WriteShardSorted(path, rows);
 
-            // Print diff so the operator can audit before checking in.
+            // Print diff so the operator can audit the change.
+            writer.WriteLine($"# Schema dir: {schema.Describe()}");
             writer.WriteLine($"# Wrote {path}");
             if (existed)
             {
@@ -276,6 +327,9 @@ namespace LacertMCP.Cli.Commands
                     (entry.DataType != null ? $" type={entry.DataType}" : "") +
                     (entry.MaxLength.HasValue ? $" maxLen={entry.MaxLength}" : ""));
             }
+
+            writer.WriteLine("  (manifest.json is not touched. A running MCP server caches shards — call the " +
+                "lacerte_reload_schema tool to pick this up without a restart.)");
 
             // Pop the loader cache so a subsequent `list` in the same process shows the new value.
             try { FieldAccessMapLoader_ResetCache(); } catch { /* internal accessor — best effort */ }
@@ -338,33 +392,109 @@ namespace LacertMCP.Cli.Commands
             return opts;
         }
 
+        /// <summary>
+        /// Shard path under the DEFAULT schema root (<see cref="SchemaDirResolver.Resolve(string)"/>
+        /// with no explicit dir): the release layout's <c>..\server\Schema\FieldAccessMap</c>
+        /// when present — the tree the MCP server actually reads — else, in a dev
+        /// checkout, the server's build output (R7 DevServerBuild), else the tree
+        /// next to lacerte-mcp.exe.
+        /// </summary>
         public static string ShardPath(string basename)
+            => ShardPath(basename, SchemaDirResolver.Resolve().Root);
+
+        public static string ShardPath(string basename, string schemaRoot)
+            => Path.Combine(schemaRoot, "base", basename + ".json");
+
+        private sealed class ShardRead
         {
-            // Resolve relative to the running assembly — same convention the server loader uses.
-            // The .Cli assembly is co-deployed with the .Server assembly + Schema tree, so this works.
-            var asmDir = Path.GetDirectoryName(typeof(FieldAccessCommand).Assembly.Location)!;
-            return Path.Combine(asmDir, "Schema", "FieldAccessMap", "base", basename + ".json");
+            public ShardRead(string path, Dictionary<string, FieldEntry> rows, string? error)
+            {
+                Path = path;
+                Rows = rows;
+                Error = error;
+            }
+
+            public string Path { get; }
+            public Dictionary<string, FieldEntry> Rows { get; }
+
+            /// <summary>Non-null when the file exists but is not parseable JSON.</summary>
+            public string? Error { get; }
         }
 
-        private static Dictionary<string, FieldEntry> ReadShard(char module)
+        private static ShardRead ReadShard(char module, string schemaRoot)
         {
             var basename = Modules.FileBasenameFor(module);
             if (basename == null)
             {
-                return new Dictionary<string, FieldEntry>();
+                return new ShardRead(string.Empty, new Dictionary<string, FieldEntry>(), null);
             }
-            var path = ShardPath(basename);
-            if (!File.Exists(path)) return new Dictionary<string, FieldEntry>();
+            var path = ShardPath(basename, schemaRoot);
+            if (!File.Exists(path)) return new ShardRead(path, new Dictionary<string, FieldEntry>(), null);
             var json = File.ReadAllText(path);
-            if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}") return new Dictionary<string, FieldEntry>();
+            if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}")
+            {
+                return new ShardRead(path, new Dictionary<string, FieldEntry>(), null);
+            }
             try
             {
                 var parsed = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(json, _jsonOptions);
-                return parsed ?? new Dictionary<string, FieldEntry>();
+                return new ShardRead(path, parsed ?? new Dictionary<string, FieldEntry>(), null);
             }
-            catch
+            catch (JsonException ex)
             {
-                return new Dictionary<string, FieldEntry>();
+                return new ShardRead(path, new Dictionary<string, FieldEntry>(), ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Effective-access lookup for <c>list</c>. When the resolved schema root is the
+        /// one the in-process <see cref="FieldAccessMapLoader"/> reads, delegate to it
+        /// (single source of truth). Otherwise (release layout / --schema-dir) the
+        /// loader would consult a different tree, so apply the same documented lookup
+        /// order against the resolved root: universal <c>C{table}_0</c> rule → exact-year
+        /// overlay → base entry.
+        /// </summary>
+        private static Func<string, FieldAccess, FieldAccess> BuildEffectiveResolver(
+            string schemaRoot, char module, int table, int year)
+        {
+            if (SchemaDirResolver.SamePath(schemaRoot, FieldAccessMapLoader.GetSchemaRoot()))
+            {
+                return (field, _) => FieldAccessMapLoader.GetFieldAccess(module, table, field, year);
+            }
+
+            var overrides = ReadOverlayOverrides(schemaRoot, year);
+            var clientNumberField = "C" + table + "_0";
+            return (field, baseAccess) =>
+            {
+                if (string.Equals(field, clientNumberField, StringComparison.OrdinalIgnoreCase))
+                {
+                    return FieldAccess.ReadOnly;
+                }
+                var key = module + "|" + table + "|" + field.ToUpperInvariant();
+                return overrides.TryGetValue(key, out var o) ? o.Access : baseAccess;
+            };
+        }
+
+        private sealed class OverlayFileShape
+        {
+            public int TaxYear { get; set; }
+            public Dictionary<string, OverlayEntry>? Overrides { get; set; }
+        }
+
+        private static Dictionary<string, OverlayEntry> ReadOverlayOverrides(string schemaRoot, int year)
+        {
+            var yy = (year % 100).ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+            var path = Path.Combine(schemaRoot, "overlays", "ty" + yy + "-not-supported.json");
+            if (!File.Exists(path)) return new Dictionary<string, OverlayEntry>();
+            try
+            {
+                var raw = JsonSerializer.Deserialize<OverlayFileShape>(File.ReadAllText(path), _jsonOptions);
+                return raw?.Overrides ?? new Dictionary<string, OverlayEntry>();
+            }
+            catch (JsonException)
+            {
+                // Mirrors the loader: a malformed overlay degrades to "no overrides".
+                return new Dictionary<string, OverlayEntry>();
             }
         }
 

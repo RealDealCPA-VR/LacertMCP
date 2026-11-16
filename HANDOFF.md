@@ -1,69 +1,111 @@
 # Handoff State
 
-## Last Session Summary (2026-06-11) — Phase 20: deferred-item closure (R6-D2 + F9)
+## Last Session Summary (2026-11-15) — Phase 21: round-7 deep code review
 
-Goal was "assess and confirm complete; close everything still doable on this box." Round-6 state re-verified first (build 0/0, 1492 green, CLI/server smoke), then the two non-Windows-gated deferred items were closed. Net: **1492 → 1506 tests passing, 0 warnings, 0 failures** — verified across **3 consecutive full-suite runs** plus isolated re-runs.
+Goal: a deep review of the whole project, checked against source and `Lacerte_MCP_Structure_Spec.md`, with every confirmed bug or gap fixed and no regressions. The review ran in five independent lanes:
+
+- bridge / ODBC / errors, checked against the spec
+- session layer
+- core tools
+- bulk and aggregate tools, plus logging
+- CLI, startup and build
+
+Each finding was re-verified against source before it was fixed. Net: **1506 → 1678 tests passing, 11 skipped, 0 failed (3 consecutive full-suite runs), build 0 warnings / 0 errors.** All work is on branch `review/r7-deep-review`. The full per-finding list is in `Todo.md` Phase 21, and the policy choices are in `DECISIONS.md` (the 10 2026-11-15 entries).
 
 ### What changed (read these to understand the diff)
 
-1. **R6-D2 closed — explicit-context `*At` read overloads, ContextScanGate deleted.**
-   `LacerteSessionManager` now has `ListClientsAt` / `ReadClientAt` / `ReadDetailAt` / `ReadEFStatusAt` — each takes `(dataPath, taxYear, module)` per call, resolves a read-only per-call `SessionContext`, and never touches the global `Context`. Validation is the shared `ValidateContextTuple` (extracted from `SetContext`) so error parity is exact. `lacerte_firm_dashboard` and `lacerte_year_over_year` read exclusively through them; the snapshot/set/restore shims and `Tools/Internal/ContextScanGate.cs` are **gone**. The R6-09 limitation (concurrent non-scan tool sees a scan-flipped read-only tuple → spurious 9001) is structurally impossible now. The `*At` surface is **reads-only by design** — do not add `WriteFieldAt` (see DECISIONS.md 2026-06-11).
-2. **F9 closed — MCP SDK `ModelContextProtocol` 0.3.0-preview.4 → 1.4.0** (1.x finally shipped on NuGet; netstandard2.0 TFM, net48-clean). `System.Text.Json` 8.0.6 → 10.0.7 in Server + FieldAccessDumper (NU1605 floor from MCP.Core). Server-code API impact zero; test harness renames only (`IMcpClient`→`McpClient`, `McpClientFactory.CreateAsync`→`McpClient.CreateAsync`).
-3. **HeartbeatWriter StartAsync override (fallout of #2).** Hosting.Abstractions 10.x schedules `BackgroundService.ExecuteAsync` asynchronously — it no longer runs synchronously to the first await inside `StartAsync`, which silently broke the "heartbeat file on disk by the time host startup returns" contract (caught by the suite). Startup sweep + immediate `TryWrite` moved into a `StartAsync` override. **Audit any future BackgroundService for the same assumption.**
-4. **Pre-existing test flake fixed** in `FieldAccessMapLoaderP18AtomicityTests.ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader`: under full-suite thread-pool pressure the reloader could finish (and set `stopReader`) before the reader task ever got scheduled → zero observations → NotEmpty/Contains failures. ~1-in-5 full-suite runs on this box. Reloader now waits on a `ManualResetEventSlim` set by the reader's first observation. 0-failures across all subsequent runs.
-5. **Docs synced:** README dashboard row, SKILL.md (pure-read wording, SDK 1.4.0, 1506 count, plus a latent drift fix: `summary.totalModulesScanned` → `totalTuplesScanned` per R6-33b), INSTRUCTION_MANUAL §7b/§7d + glossary, ARCHITECTURE stack line, DECISIONS.md two new 2026-06-11 entries, Todo.md Phase 20.
-
-### New tests (14 net)
-
-- `Tests/Session/SessionManagerAtOverloadsTests.cs` (13) — parity with active-context reads, context isolation (null stays null; `Assert.Same` reference pin), SetContext-identical validation (9003/TaxYearTooNew/24/9009-blank-path/9013-relative-path), NotSignedIn gate.
-- FirmDashboard/YoY tests replaced gate assertions with `Assert.Same` context-isolation pins + a new "dashboard runs with NO active context" test.
+1. **Live/sim parity on writes.**
+   - A live write the SDK rejects now raises a structured error. Previously it came back as `success:true, statusCode:2`.
+   - Bridge content rules (length caps, control characters, NaN, non-scalar) now run in both modes, with corrected codes: 9015 for field writes, 24 for create-client text.
+   - A live dry-run now fails wherever the commit would.
+2. **PII.**
+   - The diff and year-over-year tools no longer leak SSN/DOB/email/bank values through `a`/`b`/`fromValue`/`toValue`.
+   - `lacerte_field_access_map` no longer masks the access labels of PII field codes.
+3. **Idempotency.**
+   - The backend mode is part of the fingerprint, and simulation uses its own cache file (`idempotency-cache.sim.json`).
+   - The persist loop can no longer drop an entry; the cache is capped at load and at persist.
+   - Eviction no longer disposes a semaphore that is in use.
+4. **Concurrency.** Detail reads take a locked snapshot. Simulated client creates are serialized. The client list is ordered and never shows a dry-run client. Bulk rows are pinned to the batch's context (9016).
+5. **Validation.**
+   - `dataPath` is canonicalized; drive-relative and drive-less paths are rejected.
+   - A blank `clientNumber` on single-client reads returns 9017; it used to return every client.
+   - `clientNumber` is trimmed and `stateAbbrev` upper-cased on writes.
+   - Regexes now use `\z` and `[0-9]`.
+   - Bulk create rejects a batch containing the same clientId twice.
+6. **Tool contracts.**
+   - `ArgumentException` maps to 9017, and cancellation propagates.
+   - `sinceUtc` uses the exact timestamp.
+   - `client_find("John Smith")` works.
+   - `set_context` falls back to `LACERTE_DEFAULT_TAX_YEAR`. Its `taxYear` parameter is now optional and comes after `module`.
+   - An invalid default tax year is ignored instead of crashing startup.
+   - `can_use_new_apis` validates year and module, and `field_access_map` enumerates the real catalog.
+7. **Resilience.** `AutoReconnect` now looks inside the bridge's 9201 wrapper, so the retry policy actually runs in live mode. A failed `ClientNumber` read after a successful create is now best-effort.
+8. **CLI / build.**
+   - The CLI and dumper have the legacy-runtime `App.config` shim; doctor checks both config files.
+   - The shard writers target the server's schema tree.
+   - The doctor shard probe now warns when every shard is empty.
+   - The Windows version is read correctly.
+   - `unregister` can remove a corrupt AppID.
+   - `--app-name` honors `LACERTE_APP_NAME`.
+   - `release.ps1` stamps the tag version into the binaries.
+   - The `build.ps1` / `test.ps1` `--` argument forwarding works.
+9. **Logging.** Invariant-culture timestamps and file names; the in-memory ring stays bounded when full results are on.
+10. **Guard test.** New `ToolsR7Tests.R734`: every `lacerte_*` reference in server source must resolve to a real tool or prompt. It caught two stale references the reviewers missed.
 
 ## Verify Before Continuing
 
-- [ ] **Build:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" build C:/Users/VR/Projects/LacertMCP/LacertMCP.sln -c Debug -p:Platform=x64` — must report **0 warnings, 0 errors**.
-- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` — must report **1506 passed, 11 skipped, 0 failed**. Skips: 9 `[Fact(Skip="Requires real Lacerte SDK")]` in Tests/Bridge/ + 1 Credential Manager P/Invoke in Tests/Cli/AppIdStoreTests.cs + 1 `LiveLegParityPlaceholder` (flips green when a recording lands under `Tests/Parity/fixtures/`).
-- [ ] **CLI smoke:** `src/LacertMCP.Cli/bin/x64/Debug/net48/lacerte-mcp.exe status` → exit 0; `tools --names-only` → **42 names**, exit 0; `doctor` → exit 1 on this box (red SDK/ProgID/AppID probes — no Lacerte installed), exit 0 only on a green Windows+Lacerte box, exit 2 when only warns remain.
-- [ ] **MCP server smoke:** `src/LacertMCP.Server/bin/x64/Debug/net48/LacertMCP.Server.exe` boots (`[startup] LacertMCP 0.1.0 mode=simulation ...` on stderr), exits cleanly on stdin EOF. (Verified on SDK 1.4.0 this session.)
+- [ ] **Build:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" build C:/Users/VR/Projects/LacertMCP/LacertMCP.sln -c Debug -p:Platform=x64` → **0 warnings, 0 errors**.
+- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` → **1678 passed, 11 skipped, 0 failed**.
+- [ ] **CLI smoke:** `src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` → exit 0; `tools --names-only` → **42 names**; `doctor` → exit 1 on this box (no Lacerte installed). Note: since `0776766` there is **no `net48` subfolder** under `bin/x64/<Config>/`.
+- [ ] **MCP server smoke:** `src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` boots (`[startup] LacertMCP 0.1.0 mode=simulation ...`) and exits 0 on stdin EOF, including with `LACERTE_DEFAULT_TAX_YEAR=abc` (banner shows `defaultTaxYear=<ignored>`).
 
 ## Next Task
 
-**Everything sim-verifiable is done — including all previously deferred sim-doable items.** The ONLY remaining work requires the operator's Windows + Lacerte box (single focused session):
+Everything sim-verifiable is done. Remaining work needs the operator's Windows + Lacerte box:
 
-1. Walk `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification" — includes the register/login ceremony items (AccessGranted exit 0 / ConsentDenied exit 1 / SDK-missing exit 2) and the round-6 bulk/query tool items.
-2. `lacerte-mcp register` — mint AppID, click through Intuit dialogs; capture actual integers for `AccessGranted`/`NotSignedIn` (closes F1 + F7).
-3. `LacertMCP.FieldAccessDumper.exe --year <yyyy>` on the live box, then `lacerte_reload_schema`.
-4. Capture `Tests/Parity/fixtures/live-ty24-individual.json` recording (flips the parity placeholder + 29 live-leg rows green).
-5. Tag `v0.1.0` after first all-green pass; record the 60-second walkthrough (Todo #87/#88).
+1. Walk `REGRESSION_CHECKLIST.md` "Manual Live-Mode Verification", including the new "Round-7 live items".
+2. R7-L1/L2/L3 are all resolved from the primary source: the Intuit SDK Developer Instructions PDF, which is now pinned by `SdkSourceAlignmentR7Tests`; see `Todo.md` "Source verification". On the live box, walk the updated "Round-7 live items" in `REGRESSION_CHECKLIST.md` as a smoke test of the source-aligned bridge.
+3. Run `lacerte-mcp register` and capture the real `AccessGranted` / `NotSignedIn` integers (F1 + F7).
+4. Run the FieldAccessDumper `--live --year <yyyy>`, then `lacerte_reload_schema`.
+5. Capture the parity fixture `Tests/Parity/fixtures/live-ty24-individual.json`.
+6. Tag `v0.1.0` after the first all-green pass.
 
-Deferred (Windows-gated only now): **R6-D1** (live replaceIndex / detail delete — blocked on live SDK verification of the append-only contract). F2/F4 likewise live-box items.
-
-NOTE: this session's changes are **uncommitted** in git (prior sessions committed at milestones — `0220bae` is the last commit). Suggest committing as "phase 20: R6-D2 *At overloads + MCP SDK 1.4.0 (F9)".
+Deferred (Windows-gated, unchanged): **R6-D1** (live replaceIndex / detail delete), F2/F4.
 
 ## Context Notes
 
-### Wire-surface conventions (canonical — unchanged from round 6)
+### Wire-surface conventions (canonical — unchanged except where noted)
 
-camelCase `taxYear`/`stateAbbrev`/`clientId`; write tools use `field`; collection key `rows`; lowercase mode strings; `cid` correlation; `module` = single-char string + `moduleName` friendly; paginated envelopes `total`/`limit`/`returnedCount`/`hasMore`/`nextOffset`; bulk envelopes `requestedCount`/`processedCount`/`succeededCount`/`failedCount`/`skippedCount`/`stoppedEarly`; idempotency = unkeyed SHA-256 fingerprints incl. (dataPath, taxYear, module, dryRun), Success-only caching, positional per-row bulk keys, preview/commit prefix split (`bulk-<batchId>-preview` / `bulk-<batchId>`).
+These are unchanged:
 
-NEW: `lacerte_firm_dashboard` summary key is `totalTuplesScanned` (R6-33b — SKILL.md had drifted; fixed). Dashboard requires no active context at all now.
+- camelCase `taxYear`/`stateAbbrev`/`clientId`; write tools use `field`; the collection key is `rows`.
+- Mode strings are lowercase; `cid` is the correlation id.
+- `module` is a single-char string plus a friendly `moduleName`.
+- Paginated envelopes carry `total`/`limit`/`returnedCount`/`hasMore`/`nextOffset`.
+- Bulk envelopes carry `requestedCount`/`processedCount`/`succeededCount`/`failedCount`/`skippedCount`/`stoppedEarly`.
+
+New this round:
+
+- Idempotency fingerprints are SHA-256 over `{op, mode, args}`.
+- `ArgumentException` surfaces as 9017 with `{argument, reason[, value]}`.
+- ODBC errors may carry `context.hint`.
 
 ### Gotchas (carry-forward, updated)
 
-- Use `$env:USERPROFILE\.dotnet\dotnet.exe` — system-wide `dotnet` is runtime-only.
-- CLI/server binaries live under `bin/x64/Debug/net48/`.
-- **MCP SDK is 1.4.0** (F9 done). Client-side test code uses `McpClient.CreateAsync` (no `IMcpClient`/`McpClientFactory`). STJ pinned 10.0.7 — don't downgrade below MCP.Core's floor or NU1605 fails the restore (warnings-as-errors).
-- **Hosting.Abstractions 10.x runs `BackgroundService.ExecuteAsync` asynchronously** — anything that must complete by end-of-host-startup belongs in a `StartAsync` override (see HeartbeatWriter).
-- Reads that must not disturb the operator's context: use the session manager `*At` overloads. They are reads-only by design; writes stay on the active-context path.
-- `LACERTE_IDEMPOTENCY_PERSIST` defaults ON; `=0` disables. There is NO `LACERTE_IDEMPOTENCY_TTL_SECONDS` (TTL hardcoded 24h).
-- `LACERTE_DEBUG_WIRE=1` activates wire log; disk scope scrubs `sql`, name filters, and non-anchor `C{t}_N` codes. The `*At` overloads log under their own op names with the tuple in args.
-- FieldHistoryToolsTests seed log files via `WriteLogLinesWithRetry` — background WireLog threads can transiently hold the day-file handle.
-- **NEVER mutate `LACERTE_DATA_ROOT`/`LACERTE_DATA_PATH` process env in tests** — use the `DoctorCommand.RunAllProbes(envOverrides)` seam or join `DataRootEnvCollection`. (The `*At` overloads still run `PathValidation` against `LACERTE_DATA_ROOT` at call time — same discipline applies; `SessionManagerAtOverloadsTests` joined `DataRootEnvCollection`.)
-- `NamingConventionsTests` sentinels: no `year` keys (YoY), single-char `module` values, `returnedCount` on all 9 paginated envelopes. `HelpToolsTests` parity is bidirectional (42 tools).
-- Tests use `[Collection("AccessMapMutation")]` for access-map/env mutation and `DataRootEnvCollection` for SetContext path races.
-- Concurrency tests that spawn reader/writer task pairs must handshake start order (see the P20-005 fix) — a `Task.Run` body may not get scheduled for many ms under full-suite load.
+- Use `$env:USERPROFILE\.dotnet\dotnet.exe`; the system-wide `dotnet` is runtime-only.
+- Binaries live under `bin/x64/<Config>/` (flattened; there is no `net48` folder). Stale pre-flatten copies may still sit in `bin/x64/Debug/net48/`, so don't run those.
+- **MCP SDK 1.4.0**; STJ is pinned at 10.0.7. Hosting.Abstractions 10.x runs `BackgroundService.ExecuteAsync` asynchronously.
+- **Lock order in `LacerteSessionManager`:** `_simGate` (ReaderWriterLockSlim: exclusive for sim creates + dry-runs, shared for sim reads) → per-client write lock → `lock(list)`. Never take them in the reverse order, and never hold one across an `await` (the gate is thread-affine).
+- The session normalizes `clientNumber` (trim) and `stateAbbrev` (trim + upper-case) **before** the idempotency fingerprint and the dispatch. Tests and tools should not rely on raw spellings.
+- Live write paths now **throw** on non-Success. Callers still check `status == Success` defensively, but that branch is effectively sim/legacy-only.
+- `*At` overloads are reads-only by design; writes stay on the active context, now optionally pinned via `expectedContext`.
+- `LACERTE_IDEMPOTENCY_PERSIST` defaults ON (`=0` disables). The TTL is a hardcoded 24h, and the cap of 10k applies on disk too.
+- **NEVER mutate `LACERTE_DATA_ROOT`/`LACERTE_DATA_PATH` process env in tests.** Use the `DoctorCommand.RunAllProbes(envOverrides)` seam or join `DataRootEnvCollection`.
+- Test collections are serialized (`xunit.runner.json` → `parallelizeTestCollections:false`) because static state is shared (WireLogRing, StatsRegistry, the FieldAccessMapLoader snapshot).
+- Concurrency tests must handshake their start order (see P20-005 and the R7 tests that use `ManualResetEventSlim`).
 
 ### How to /pickup this session
 
-1. Read this HANDOFF.md, then `Todo.md` Phase 20, then `DECISIONS.md` 2026-06-11 entries.
+1. Read this HANDOFF.md, then `Todo.md` Phase 21, then the `DECISIONS.md` 2026-11-15 entries.
 2. Run the Verify Before Continuing checks.
-3. The only open work is Windows+Lacerte-gated (above). If on the operator's live box, start at "Next Task" step 1.
+3. The only open work is Windows+Lacerte-gated (see Next Task).

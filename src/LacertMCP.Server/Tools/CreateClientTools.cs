@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Schema;
@@ -30,7 +31,7 @@ namespace LacertMCP.Server.Tools
     public class CreateClientTools
     {
         private static readonly Regex _rxClientId = new Regex(
-            @"^[A-Z0-9]+$",
+            @"^[A-Z0-9]+\z",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         // Per-module accepted TaxType strings now live on
@@ -58,7 +59,8 @@ namespace LacertMCP.Server.Tools
             [Description("Last name (individual). Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
             [Description("EmailId. Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailId,
             [Description("If true, validate + simulate the create then roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -181,7 +183,7 @@ namespace LacertMCP.Server.Tools
                 // (possibly colloquial) alias (e.g. "1040", "1120S",
                 // "S-Corporation") to the canonical spec-mandated ReturnType
                 // ("Individual", "SCorporate", ...) BEFORE building
-                // CreateClientArgs. The live SDK's IClient(TaxType, ...)
+                // CreateClientArgs. The live SDK's IClient.TaxType (TaxModule)
                 // constructor accepts only the 9 spec strings; passing the
                 // form-number variant verbatim would yield TaxModuleMismatch
                 // (14) on a happy-path operator request, violating CLAUDE.md's
@@ -236,7 +238,9 @@ namespace LacertMCP.Server.Tools
                     LastName: lastName,
                     EmailId: emailId);
 
-                var result = await _session.CreateClient(args, dryRun, idempotencyKey);
+                // R7-23 — forward the MCP cancellation token (the session honors it
+                // before the mutation, like lacerte_detail_write).
+                var result = await _session.CreateClient(args, dryRun, idempotencyKey, cancellationToken);
 
                 // The session returns CreateClientResult { Status, ClientNumber? }.
                 // Translate non-Success into a structured error so the tool
@@ -253,6 +257,23 @@ namespace LacertMCP.Server.Tools
                 }
 
                 var info = StatusCodes.GetStatusInfo(result.Status);
+                // R7-28b — a committed live create whose assigned number could
+                // not be read back (LacerteAccessClient best-effort read) is
+                // still a real client. Say so, and how to resolve it, instead
+                // of a bare clientNumber:null an LLM could mistake for a
+                // dry-run. Do NOT retry the create — it would DuplicateClient.
+                if (!dryRun && result.ClientNumber == null)
+                {
+                    return (object)new
+                    {
+                        statusCode = result.Status,
+                        statusName = info.Name,
+                        clientNumber = (string?)null,
+                        clientId,
+                        dryRun,
+                        clientNumberHint = $"The client WAS created, but the SDK did not return its ClientNumber. Resolve it with lacerte_client_find(name) or lacerte_client_list, matching clientId '{clientId}'. Do not re-run the create (it would fail with DuplicateClient).",
+                    };
+                }
                 // P16-054/P16-080 — wire envelope key is `clientId` (was
                 // `clientID`).
                 return (object)new

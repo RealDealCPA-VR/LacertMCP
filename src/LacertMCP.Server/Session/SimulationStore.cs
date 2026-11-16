@@ -63,7 +63,7 @@ namespace LacertMCP.Server.Session
         string StateAbbr,
         string CityAbbr,
         string Source,
-        string TSJ,            // "T" | "S" | "J" | ""
+        string TSJ,            // SDK: "Taxpayer" | "Spouse" | "Joint" | "" (blank = Joint); T/S/J aliases normalized on write (R7-SRC)
         string ImportSrc,
         double? Amount,
         string Description);
@@ -324,7 +324,7 @@ namespace LacertMCP.Server.Session
 
         // ClientID validation per spec: <=8 alphanumeric, no special chars.
         private static readonly Regex _rxClientId = new Regex(
-            @"^[A-Z0-9]+$",
+            @"^[A-Z0-9]+\z",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         /// <summary>
@@ -555,7 +555,7 @@ namespace LacertMCP.Server.Session
         // -------------------------------------------------------------------
 
         /// <summary>
-        /// Sim implementation of <c>IClientList.SetDataPath → IClient(...) → CreateClient</c>.
+        /// Sim implementation of the SDK create flow (<c>IClientList.SetDataPath</c> → set <c>IClient</c> properties → <c>IClientList.CreateClient(client)</c>, R7-SRC).
         /// Per agent 06 §6: check order is NotSignedIn → InValidTaxYear →
         /// LengthExceeded (ClientID > 8) → InValidClientName (regex) →
         /// TaxModuleMismatch → DuplicateClient → assign next ClientNumber.

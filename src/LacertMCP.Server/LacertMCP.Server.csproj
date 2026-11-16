@@ -40,8 +40,12 @@
     <!-- Sharded JSON field-access map — loaded at runtime by FieldAccessMapLoader.
          Copy the entire tree (base/*.json + overlays/*.json + manifest.json) to
          the build output so the loader can read them next to the assembly. -->
+    <!-- R7: Always (not PreserveNewest). The source tree is canonical; shard-
+         mutating test fixtures write to the output copy and restore it on
+         dispose, and an aborted run used to leave a stale, NEWER bin copy that
+         PreserveNewest would never refresh. The tree is a few small files. -->
     <Content Include="Schema\FieldAccessMap\**\*.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 

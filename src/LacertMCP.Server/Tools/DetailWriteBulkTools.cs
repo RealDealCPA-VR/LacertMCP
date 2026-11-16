@@ -59,15 +59,15 @@ namespace LacertMCP.Server.Tools
         // Validation regexes mirror DetailsTools (private there, so mirrored
         // here — the shapes ARE the contract per agent 06 §5 / P14-055).
         private static readonly Regex _rxStateAbbrev = new Regex(
-            @"^[A-Z]{2}$",
+            @"^[A-Z]{2}\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly Regex _rxNumeric = new Regex(
-            @"^-?\d+$",
+            @"^-?[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly Regex _rxNumericSeries = new Regex(
-            @"^\d+$",
+            @"^[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
@@ -95,39 +95,39 @@ namespace LacertMCP.Server.Tools
             [Description("Numeric Code (must parse as integer; leading minus allowed). Required.")]
             public string Code { get; set; } = string.Empty;
 
-            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings).")]
+            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings). SDK range: -999,999,999 to 999,999,999, at most 12 decimal places.")]
             public double? Amount { get; set; }
 
             [Description("Free-form description for the row. Required.")]
             public string Description { get; set; } = string.Empty;
 
-            [Description("Prefix string. Defaults to empty — omit unless the row's natural key needs a prefix segment.")]
+            [Description("Prefix (SDK type Integer): blank or a whole number. Defaults to empty.")]
             public string Prefix { get; set; } = string.Empty;
 
-            [Description("Suffix string. Defaults to empty — omit unless the row's natural key needs a suffix segment.")]
+            [Description("Suffix (SDK type Integer; the SDK notes standard fields start at 1000, suffixed fields at 1): blank or a whole number. Defaults to empty.")]
             public string Suffix { get; set; } = string.Empty;
 
             [Description("State abbreviation for the row's tax bucket — 2-letter postal code if non-empty (validated against ^[A-Z]{2}$). Defaults to empty. Maps to the DBF column StateAbbr internally.")]
             public string StateAbbrev { get; set; } = string.Empty;
 
-            [Description("City abbreviation. Defaults to empty — omit unless the row carries a city-level breakdown.")]
+            [Description("City abbreviation, at most 3 characters (SDK: Length=3). Defaults to empty.")]
             public string CityAbbr { get; set; } = string.Empty;
 
-            [Description("Source tag (e.g. 'W2', '1099INT'). Defaults to empty.")]
+            [Description("SDK detail Source flag: must be blank (default), 'Nonsource' or 'Source' (SDK detail-file constraint). It is NOT a form tag — do not pass 'W2' / '1099INT'.")]
             public string Source { get; set; } = string.Empty;
 
-            [Description("Taxpayer/Spouse/Joint indicator — one of T, S, J, or empty. Defaults to empty.")]
+            [Description("Taxpayer/Spouse/Joint indicator: Taxpayer, Spouse, Joint (or the aliases T, S, J), or empty (= Joint per the SDK). Stored as the SDK value Taxpayer/Spouse/Joint. Defaults to empty.")]
             public string Tsj { get; set; } = string.Empty;
 
-            [Description("Import source tag. Defaults to empty — omit unless the row originated from an import workflow.")]
+            [Description("Read Only per the SDK detail-file schema — leave blank (any non-empty value is rejected with 9008).")]
             public string ImportSrc { get; set; } = string.Empty;
 
-            [Description("Optional zero-based index to overwrite an existing row instead of appending. Sim-mode only — live mode rejects replaceIndex with 9019 LiveReplaceIndexUnsupported (the SDK can only append).")]
+            [Description("Optional zero-based index to overwrite an existing row instead of appending. Sim-mode only — live mode rejects replaceIndex with 9019 LiveReplaceIndexUnsupported (the SDK documents no update-by-index path; live detail writes are not wired at all — they return 9202 — because the SDK writes detail files only through its ODBC driver).")]
             public int? ReplaceIndex { get; set; }
         }
 
         [McpServerTool]
-        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call — the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
+        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call — the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Simulation mode only for now: in live mode a row fails with 9202 SimulationOnly (with the default continueOnError=false the first such row stops the batch and the rest are marked skipped) (the Lacerte SDK writes detail files only through its ODBC driver, which is not wired yet). Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
         public Task<string> LacerteDetailWriteBulk(
             [Description("Array of per-row detail writes. Each entry: {clientNumber, series, code, amount, description, prefix?, suffix?, stateAbbrev?, cityAbbr?, source?, tsj?, importSrc?, replaceIndex?}. Empty array returns a no-op envelope with requestedCount=0. Capped at 500 entries by default (shared LACERTE_BULK_WRITE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkDetailEntry[] entries,
             [Description("If true, validate + simulate every row write then roll back without persisting. Each row returns its would-be TAPIStatus.")] bool dryRun = false,
@@ -266,7 +266,9 @@ namespace LacertMCP.Server.Tools
 
                         int status = await _session.WriteDetail(
                             entry.ClientNumber, row, entry.ReplaceIndex,
-                            dryRun, rowKey, cancellationToken).ConfigureAwait(false);
+                            dryRun, rowKey, cancellationToken,
+                            // R7-25 — pin every row to the context validated above.
+                            expectedContext: ctx).ConfigureAwait(false);
 
                         var info = StatusCodes.GetStatusInfo(status);
                         if (status == StatusCodes.Success)
@@ -462,7 +464,8 @@ namespace LacertMCP.Server.Tools
 
             if (!string.IsNullOrEmpty(entry.Tsj))
             {
-                if (entry.Tsj.Length != 1 || (entry.Tsj != "T" && entry.Tsj != "S" && entry.Tsj != "J"))
+                // R7-SRC — SDK TSJ values (aliases T/S/J accepted).
+                if (LacertMCP.Server.Bridge.BridgeInputValidation.NormalizeTsj(entry.Tsj) == null)
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.DetailWriteInvalid,
@@ -470,7 +473,7 @@ namespace LacertMCP.Server.Tools
                         {
                             ["field"] = "tsj",
                             ["value"] = entry.Tsj,
-                            ["reason"] = "TSJ must be empty OR one of: T, S, J.",
+                            ["reason"] = "TSJ must be empty OR one of: T/Taxpayer, S/Spouse, J/Joint.",
                         });
                 }
             }

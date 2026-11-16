@@ -111,10 +111,12 @@ Step 4 — Seed core address / phone fields (if collected during intake)
   / `Unknown` / absent from the response, STOP and report the column.
 
 Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at intake)
+  • Simulation mode only for now: live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files only via its ODBC driver, not wired yet). In live mode skip this step and ask the operator to enter the rows in Lacerte.
   • `lacerte_detail_write` takes 5 REQUIRED flat params (clientNumber, series, code, amount, description) plus 7 optional row-key segments that default to empty string (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) and 3 optional control params (replaceIndex, dryRun, idempotencyKey). There is NO nested `row:` wrapper — every field is a top-level kwarg.
   • A W-2 row looks like:
-      `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", source: ""W2"", tsj: ""T"" }})`
-    Series cheat-sheet: 11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners. `tsj` is one of T/S/J/"""" (taxpayer/spouse/joint/unspecified). `stateAbbrev` is """" or a 2-letter postal code (validated ^[A-Z]{{2}}$).
+      `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", tsj: ""T"" }})`
+    `source` is the SDK detail Source flag (blank, ""Nonsource"" or ""Source"") — NOT a form tag; `importSrc` is read-only (leave blank); `cityAbbr` is at most 3 chars; `prefix`/`suffix` are blank or whole numbers; `amount` is within ±999,999,999 with at most 12 decimals.
+    Series cheat-sheet: 11=W-2, 12=Interest, 13=Dividends, 14=Dependents, 20=Income, 30=State, 40=Partners. `tsj` is Taxpayer/Spouse/Joint (aliases T/S/J) or """" (blank = Joint per the SDK); it is stored as the SDK word. `stateAbbrev` is """" or a 2-letter postal code (validated ^[A-Z]{{2}}$).
   • For idempotent retries pass `idempotencyKey: ""intake-<clientId>-detail-<seriesCode>""`. For a dry-run preview pass `dryRun: true` — and if you dry-run first, use a DIFFERENT key for the real write (e.g. append `-preview` to the dry-run key): `dryRun` is part of the idempotency fingerprint and dry-run results are cached, so reusing one key across a dry-run and a real write throws `IdempotencyConflict (9102)`.
   • The SDK does NOT validate detail-row shape; this tool's client-side validation is the only safeguard. Read the error message verbatim — series/code/stateAbbrev/tsj each surface a per-field `reason` in the error context if rejected.
 
@@ -233,7 +235,7 @@ Step 2 — Sanity-check the field is writable
 
 Step 3 — Build the target client list
   • Either: the operator gave you an explicit `[clientNumber...]` list — use it.
-  • Or: call `lacerte_client_list` with the relevant filter and extract the `ClientNumber` field.
+  • Or: call `lacerte_client_list` with the relevant filter and extract each row's `clientNumber` field.
   • Tell the operator the count. If > 50, ask for explicit confirmation before proceeding.
 
 Step 4 — Dry-run preview (first {previewCount})

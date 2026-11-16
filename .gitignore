@@ -35,3 +35,6 @@ sdk-trace/
 # IDE
 .vscode/
 .idea/
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/

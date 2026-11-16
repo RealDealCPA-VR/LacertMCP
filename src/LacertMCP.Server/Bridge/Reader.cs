@@ -28,7 +28,7 @@ namespace LacertMCP.Server.Bridge
     public static class Reader
     {
         /// <summary>
-        /// Wraps <c>IDBFReader.ReadFromDBFData(appId, dataPath, dbf)</c>.
+        /// Wraps <c>IDBFReader.ReadFromDBFData(appId, dataPath, dbf, ref xml)</c>.
         /// Returns the raw XML payload the COM call produces; parsing into
         /// row dicts is a separate concern (see
         /// <c>scripts/dump-field-access.csx</c> from follow-up F5).
@@ -53,93 +53,44 @@ namespace LacertMCP.Server.Bridge
             return WireLog.RecordSync<string>("Bridge.ReadFromDBFData",
                 new { dbf, dataPath }, () =>
             {
-                var reader = AcquireReader("ReadFromDBFData");
+                // R7-SRC — documented shape (Developer Instructions, "Database
+                // Read Example"): IDBFReader comes from
+                // ILacerteAccess.CreateDBFReader(), and
+                // ReadFromDBFData(AppID, DataPath, DBFName, ref string XML)
+                // RETURNS a TAPIStatus with the XML in the ref parameter. The
+                // previous 3-argument call returning the XML matched no SDK
+                // overload.
+                using var handle = SdkAccess.Acquire("ReadFromDBFData", "CreateDBFReader");
+                int status;
+                string xml = string.Empty;
                 try
                 {
-                    try
-                    {
-                        dynamic r = reader;
-                        // Live verification deferred to Windows + Lacerte box.
-                        var xml = (string)r.ReadFromDBFData(appId, dataPath, dbf);
-                        return xml ?? string.Empty;
-                    }
-                    catch (LacerteSDKError) { throw; }
-                    catch (Exception ex)
-                    {
-                        throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                            new Dictionary<string, object?>
-                            {
-                                ["op"] = "ReadFromDBFData",
-                                ["dbf"] = dbf,
-                                ["dataPath"] = dataPath,
-                                ["reason"] = ex.Message,
-                            }, ex);
-                    }
+                    dynamic r = handle.Target;
+                    status = (int)r.ReadFromDBFData(appId, dataPath, dbf, ref xml);
                 }
-                finally
+                catch (LacerteSDKError) { throw; }
+                catch (Exception ex)
                 {
-                    // P14-004 — release RCW per-call to avoid COM leak. Canonical
-                    // pattern from CanUseNewApisProbe.cs:96-103.
-                    if (reader != null)
-                    {
-                        try { System.Runtime.InteropServices.Marshal.ReleaseComObject(reader); }
-                        catch (Exception) { /* best-effort */ }
-                    }
+                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = "ReadFromDBFData",
+                            ["dbf"] = dbf,
+                            ["dataPath"] = dataPath,
+                            ["reason"] = ex.Message,
+                        }, ex);
                 }
+                if (status != StatusCodes.Success)
+                {
+                    throw new LacerteSDKError(status,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = "ReadFromDBFData",
+                            ["dbf"] = dbf,
+                        });
+                }
+                return xml ?? string.Empty;
             });
-        }
-
-        // =================================================================
-        // Internals
-        // =================================================================
-
-        private static object AcquireReader(string op)
-        {
-            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                    new Dictionary<string, object?>
-                    {
-                        ["op"] = op,
-                        ["reason"] = "IDBFReader requires Windows + the Lacerte SDK.",
-                        ["platform"] = Environment.OSVersion.Platform.ToString(),
-                    });
-            }
-
-            try
-            {
-                var t = Type.GetTypeFromProgID("LacerteSDK_Access.DBFReader");
-                if (t == null)
-                {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = op,
-                            ["reason"] = "LacerteSDK_Access.DBFReader ProgID not registered. Install the Lacerte SDK.",
-                        });
-                }
-                var instance = Activator.CreateInstance(t);
-                if (instance == null)
-                {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = op,
-                            ["reason"] = "Activator.CreateInstance returned null for LacerteSDK_Access.DBFReader.",
-                        });
-                }
-                return instance;
-            }
-            catch (LacerteSDKError) { throw; }
-            catch (Exception ex)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                    new Dictionary<string, object?>
-                    {
-                        ["op"] = op,
-                        ["reason"] = ex.Message,
-                    }, ex);
-            }
         }
     }
 }

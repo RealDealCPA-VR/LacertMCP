@@ -97,7 +97,11 @@ namespace LacertMCP.Server.Logging
     /// <c>{ "field": "&lt;name&gt;", "value": &lt;secret&gt; }</c>: when
     /// <c>field</c> is one of the known PII field codes (Lacerte
     /// DATA1-Individual fields that hold SSN/DOB/email/etc.), the sibling
-    /// <c>value</c> is redacted regardless of its JSON shape.
+    /// <c>value</c> is redacted regardless of its JSON shape. When the code
+    /// is a true-secret PII code, every value-slot sibling (diff/audit
+    /// shapes such as <c>a</c>/<c>b</c>, <c>fromValue</c>/<c>toValue</c>,
+    /// <c>before</c>/<c>after</c>, <c>delta</c>, any <c>*Value</c>) is
+    /// redacted too.
     /// </para>
     ///
     /// <para>Thread-safety: a cached StreamWriter per logfile path keeps the
@@ -423,13 +427,14 @@ namespace LacertMCP.Server.Logging
             WireLogConfig? cfg, string op, object? args, object? result,
             IReadOnlyDictionary<string, object?>? error, long durationMs)
         {
+            int sampleLimit = cfg?.ResultSampleLimit ?? WireLogConfig.DefaultResultSampleLimit;
             string line = BuildRedactedLine(
                 op, args, result, error, durationMs,
-                resultSampleLimit: cfg?.ResultSampleLimit ?? WireLogConfig.DefaultResultSampleLimit,
+                resultSampleLimit: sampleLimit,
                 fullResults: cfg?.FullResults ?? false);
 
             // Ring push is always-on (independent of cfg). Never throws.
-            try { WireLogRing.Push(line); }
+            try { WireLogRing.Push(RingLineFor(line, sampleLimit, cfg?.FullResults ?? false, error != null)); }
             catch { /* defensive */ }
 
             // Disk write only when the env-gated config is live.
@@ -437,6 +442,21 @@ namespace LacertMCP.Server.Logging
             {
                 WriteRecord(cfg, line);
             }
+        }
+
+        // R7 — the in-process ring's memory bound (WireLogRing: ~50 KB at
+        // the default 256 entries) relies on large results being
+        // summarized. LACERTE_DEBUG_LOG_FULL_RESULTS=1 is a DISK opt-in for
+        // deep debugging; it must not let a 5000-row read land verbatim in
+        // up to 4096 ring slots. When the disk line carries full results,
+        // derive the ring line by applying the same summarizer the default
+        // path uses (the line is already redacted, and summarization only
+        // drops items, so redaction is preserved). WireLogRing.Push also
+        // enforces a per-entry size cap as a backstop for non-array results.
+        internal static string RingLineFor(string diskLine, int sampleLimit, bool fullResults, bool isError)
+        {
+            if (!fullResults || isError) return diskLine;
+            return SummarizeLargeResultArray(diskLine, sampleLimit);
         }
 
         // P15-014 — capture ex.Data alongside type + message so the
@@ -713,6 +733,17 @@ namespace LacertMCP.Server.Logging
         // Redaction helpers
         // -----------------------------------------------------------------
 
+        // R7-33 — the exact FieldAccess enum names (case-sensitive, as
+        // MetadataTools emits them via FieldAccess.ToString()).
+        private static readonly HashSet<string> _fieldAccessLabels = new HashSet<string>(
+            Enum.GetNames(typeof(LacertMCP.Server.Schema.FieldAccess)), StringComparer.Ordinal);
+
+        private static bool IsFieldAccessLabel(JsonNode? node)
+            => node is JsonValue v
+               && v.TryGetValue<string>(out var s)
+               && s != null
+               && _fieldAccessLabels.Contains(s);
+
         private static void RedactNode(JsonNode node, HashSet<string> keys, bool diskScope)
         {
             switch (node)
@@ -738,6 +769,14 @@ namespace LacertMCP.Server.Logging
                         // the wire-scope LLM consumer should never see them either.
                         if (_piiFieldCodes.Contains(name))
                         {
+                            // R7-33 — exempt FieldAccess labels. The
+                            // lacerte_field_access_map envelope is keyed by the
+                            // same field codes ({"C1_15":"ReadWrite"}), so the
+                            // LLM saw "***" for exactly the SSN/DOB/bank fields
+                            // whose writability it most needs to check. An
+                            // access-enum literal is metadata, never a value:
+                            // no SSN/DOB/email/bank number can equal one.
+                            if (IsFieldAccessLabel(obj[name])) continue;
                             obj[name] = JsonValue.Create("***");
                             continue;
                         }
@@ -778,6 +817,44 @@ namespace LacertMCP.Server.Logging
             }
         }
 
+        // R7 — value-slot names scrubbed alongside a `field` whose code is a
+        // true secret (_piiFieldCodes). Matching is on the slot NAME:
+        //   * explicit short diff/audit slot names (a/b, before/after,
+        //     old/new, from/to, prior/current, original/updated), plus
+        //     `delta` (a numeric difference of two secrets leaks their
+        //     relationship) and `values`;
+        //   * any key ending in "Value" / "Values" (case-insensitive) —
+        //     covers value, fromValue, toValue, oldValue, newValue,
+        //     priorValue, previousValue, currentValue, rawValue, ... so a
+        //     future tool that invents `<x>Value` is masked by default.
+        //
+        // Why not "every sibling except `field`": objects carrying a `field`
+        // key are also addressing/diagnostic envelopes — WriteField args
+        // `{table, clientNumber, field, value, dryRun}` (FieldHistoryTools
+        // matches on args.clientNumber), lacerte_field_history's top-level
+        // `{clientNumber, field, rows, total, logPath, hint}`, error contexts
+        // `{field, value, reason, expected, maxLength}`. Wiping those for a
+        // PII field would break history lookups and strip the actionable
+        // `reason` the LLM needs to self-correct, with no secret gained:
+        // none of those slots carries the field's value. The value-slot
+        // naming convention is what every diff/audit/write shape in the
+        // codebase follows, so the denylist stays fail-closed for them.
+        private static readonly HashSet<string> _piiValueSlotNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "a", "b",
+            "before", "after",
+            "old", "new",
+            "from", "to",
+            "prior", "current",
+            "original", "updated",
+            "delta",
+        };
+
+        private static bool IsPiiValueSlot(string name)
+            => _piiValueSlotNames.Contains(name)
+               || name.EndsWith("Value", StringComparison.OrdinalIgnoreCase)
+               || name.EndsWith("Values", StringComparison.OrdinalIgnoreCase);
+
         // Second pass: when we see a sibling pair {"field":"<code>", "value": <anything>}
         // within the same object, redact the sibling "value" regardless of
         // the field code or module (P15-058 — denylist semantics).
@@ -817,6 +894,32 @@ namespace LacertMCP.Server.Logging
                         obj["value"] = JsonValue.Create("***");
                     }
                     var names = obj.Select(kv => kv.Key).ToList();
+                    // R7 — true-secret field codes: scrub EVERY value-slot
+                    // sibling, not just `value`. Diff/audit tools emit the
+                    // field's value under other slot names —
+                    // lacerte_diff_clients `{field, a, b}`,
+                    // lacerte_year_over_year `{field, fromValue, toValue}` —
+                    // and the `value`-only rule above let SSN/DOB/email/bank
+                    // values reach the LLM unmasked while
+                    // lacerte_client_read masked the same columns by key.
+                    // See IsPiiValueSlot for why this is a value-slot
+                    // denylist (explicit short names + any *Value/*Values
+                    // suffix) rather than an every-sibling rule.
+                    if (obj.TryGetPropertyValue("field", out var piiFieldNode)
+                        && piiFieldNode is JsonValue piiFieldVal
+                        && piiFieldVal.TryGetValue<string>(out var piiFieldCode)
+                        && !string.IsNullOrEmpty(piiFieldCode)
+                        && _piiFieldCodes.Contains(piiFieldCode))
+                    {
+                        foreach (var name in names)
+                        {
+                            if (string.Equals(name, "field", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (IsPiiValueSlot(name))
+                            {
+                                obj[name] = JsonValue.Create("***");
+                            }
+                        }
+                    }
                     foreach (var name in names)
                     {
                         var child = obj[name];
@@ -861,7 +964,7 @@ namespace LacertMCP.Server.Logging
         {
             var record = new Dictionary<string, object?>
             {
-                ["ts"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                ["ts"] = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture),
                 ["op"] = op,
                 ["args"] = args,
                 ["durationMs"] = durationMs,
@@ -1010,7 +1113,7 @@ namespace LacertMCP.Server.Logging
             // New target name: lacerte-YYYYMMDD-HHmmss.log (UTC). The hyphen
             // separator distinguishes a rotated file from the canonical
             // per-day file, which is lacerte-YYYYMMDD.log (no time suffix).
-            var rotated = "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + ".log";
+            var rotated = "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".log";
             var rotatedPath = Path.Combine(cfg.LogDir, rotated);
 
             try
@@ -1025,7 +1128,7 @@ namespace LacertMCP.Server.Logging
                     {
                         salt++;
                         attemptPath = Path.Combine(cfg.LogDir,
-                            "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + salt + ".log");
+                            "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + "-" + salt + ".log");
                     }
                     File.Move(path, attemptPath);
                     rotatedPath = attemptPath;
@@ -1050,10 +1153,10 @@ namespace LacertMCP.Server.Logging
                 var cb = OnRotation;
                 if (cb != null)
                 {
-                    var msg = string.Format(
+                    var msg = string.Format(System.Globalization.CultureInfo.InvariantCulture,
                         "WireLog rotated {0} → {1} (size cap {2} bytes){3}",
                         path, rotatedPath, cfg.MaxBytes,
-                        pruned > 0 ? string.Format(", pruned {0} bytes from dir to fit MaxDirBytes={1}", pruned, cfg.MaxDirBytes) : "");
+                        pruned > 0 ? string.Format(System.Globalization.CultureInfo.InvariantCulture, ", pruned {0} bytes from dir to fit MaxDirBytes={1}", pruned, cfg.MaxDirBytes) : "");
                     cb(msg);
                 }
             }
@@ -1095,7 +1198,7 @@ namespace LacertMCP.Server.Logging
                     var cb = OnRotation;
                     if (cb != null)
                     {
-                        cb(string.Format(
+                        cb(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                             "WireLog pruned {0} stale files (older than {1} days) from {2}",
                             deleted, retentionDays, logDir));
                     }
@@ -1279,7 +1382,7 @@ namespace LacertMCP.Server.Logging
         }
 
         private static string FilenameForToday()
-            => "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd") + ".log";
+            => "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture) + ".log";
 
         private static WireLogConfig? ResolveConfig()
         {
@@ -1371,7 +1474,7 @@ namespace LacertMCP.Server.Logging
                 op, args, result, error: null, durationMs,
                 resultSampleLimit: cfg.ResultSampleLimit,
                 fullResults: cfg.FullResults);
-            try { WireLogRing.Push(line); } catch { /* defensive */ }
+            try { WireLogRing.Push(RingLineFor(line, cfg.ResultSampleLimit, cfg.FullResults, isError: false)); } catch { /* defensive */ }
             WriteRecord(cfg, line);
             // Ensure the file handle isn't held open past the call boundary
             // for one-shot probe writes — keeps WriteForTest semantics

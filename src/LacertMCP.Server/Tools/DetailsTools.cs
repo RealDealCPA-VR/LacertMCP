@@ -36,14 +36,14 @@ namespace LacertMCP.Server.Tools
         // DetailRow.StateAbbr (model property) keeps its name because it maps
         // to the DBF column.
         private static readonly Regex _rxStateAbbrev = new Regex(
-            @"^[A-Z]{2}$",
+            @"^[A-Z]{2}\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // Numeric Code shape — Lacerte detail Code fields are integer-valued
         // per the detail-file spec. Allow leading minus for negative codes;
         // do NOT allow decimals (use Amount for those).
         private static readonly Regex _rxNumeric = new Regex(
-            @"^-?\d+$",
+            @"^-?[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // Numeric Series shape — Lacerte Series IDs are non-negative screen
@@ -54,7 +54,7 @@ namespace LacertMCP.Server.Tools
         // the invariant that makes the string safe to interpolate into the
         // unquoted-integer SQL emitted by SqlTemplates.DetailBySeries.
         private static readonly Regex _rxNumericSeries = new Regex(
-            @"^\d+$",
+            @"^[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
@@ -103,28 +103,28 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success). Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
+        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Simulation mode only for now: in live mode this returns 9202 SimulationOnly (the Lacerte SDK writes detail files only through its ODBC driver, which is not wired yet) — enter live detail rows in Lacerte. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success). Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
         public Task<string> LacerteDetailWrite(
             [Description("Lacerte ClientNumber.")] string clientNumber,
             [Description("Numeric Series identifier per Lacerte spec §2 — must match ^\\d+$ (e.g. '11'=W-2, '12'=Interest, '13'=Dividends, '14'=Dependents, '20'=Income, '30'=State, '40'=Partners). Required.")] string series,
             [Description("Numeric Code (must parse as integer). Required.")] string code,
-            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings). Required.")] double? amount,
+            [Description("Dollar amount as a number (or null for non-numeric rows like dependent listings). SDK range: -999,999,999 to 999,999,999, at most 12 decimal places. Required.")] double? amount,
             [Description("Free-form description for the row. Required.")] string description,
             // P16-008 — the seven row-key segments below default to empty
             // string so the common W-2 happy path can omit them. C# requires
             // defaulted params come last; required params (clientNumber,
             // series, code, amount, description) reorder above.
-            [Description("Prefix string. Defaults to empty — omit unless the row's natural key needs a prefix segment.")] string prefix = "",
-            [Description("Suffix string. Defaults to empty — omit unless the row's natural key needs a suffix segment.")] string suffix = "",
+            [Description("Prefix (SDK type Integer): blank or a whole number. Defaults to empty.")] string prefix = "",
+            [Description("Suffix (SDK type Integer; the SDK notes standard fields start at 1000, suffixed fields at 1): blank or a whole number. Defaults to empty.")] string suffix = "",
             // P16-025/P16-045 — operator-facing wire name is `stateAbbrev`
             // (matches every other write tool). DetailRow.StateAbbr (the
             // model property) keeps its name because it maps to the DBF
             // column.
             [Description("State abbreviation for the row's tax bucket — 2-letter postal code if non-empty (validated against ^[A-Z]{2}$). Defaults to empty. Maps to the DBF column StateAbbr internally.")] string stateAbbrev = "",
-            [Description("City abbreviation. Defaults to empty — omit unless the row carries a city-level breakdown.")] string cityAbbr = "",
-            [Description("Source tag (e.g. 'W2', '1099INT'). Defaults to empty.")] string source = "",
-            [Description("Taxpayer/Spouse/Joint indicator — one of T, S, J, or empty. Defaults to empty.")] string tsj = "",
-            [Description("Import source tag. Defaults to empty — omit unless the row originated from an import workflow.")] string importSrc = "",
+            [Description("City abbreviation, at most 3 characters (SDK: Length=3). Defaults to empty.")] string cityAbbr = "",
+            [Description("SDK detail Source flag: must be blank (default), 'Nonsource' or 'Source' (SDK detail-file constraint). It is NOT a form tag — do not pass 'W2' / '1099INT'.")] string source = "",
+            [Description("Taxpayer/Spouse/Joint indicator: Taxpayer, Spouse, Joint (or the aliases T, S, J), or empty (= Joint per the SDK). Stored as the SDK value Taxpayer/Spouse/Joint. Defaults to empty.")] string tsj = "",
+            [Description("Read Only per the SDK detail-file schema — leave blank (any non-empty value is rejected with 9008).")] string importSrc = "",
             [Description("Optional zero-based index to overwrite an existing row instead of appending.")] int? replaceIndex = null,
             [Description("If true, validate + simulate the write but roll back without persisting.")] bool dryRun = false,
             [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'detail_write-{clientNumber}-{series}-{code}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry will APPEND a duplicate detail row (detail writes default to append when replaceIndex is null — silently doubling a W-2/1099/dependent row). Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null,
@@ -236,7 +236,9 @@ namespace LacertMCP.Server.Tools
 
             if (!string.IsNullOrEmpty(tsj))
             {
-                if (tsj.Length != 1 || (tsj != "T" && tsj != "S" && tsj != "J"))
+                // R7-SRC — SDK: TSJ "Must be equal to Joint (or blank), Taxpayer, Spouse";
+                // T/S/J aliases accepted (normalized at the session chokepoint).
+                if (LacertMCP.Server.Bridge.BridgeInputValidation.NormalizeTsj(tsj) == null)
                 {
                     throw new LacerteSDKError(
                         SyntheticStatusCodes.DetailWriteInvalid,
@@ -244,7 +246,7 @@ namespace LacertMCP.Server.Tools
                         {
                             ["field"] = "tsj",
                             ["value"] = tsj,
-                            ["reason"] = "TSJ must be empty OR one of: T, S, J.",
+                            ["reason"] = "TSJ must be empty OR one of: T/Taxpayer, S/Spouse, J/Joint.",
                         });
                 }
             }

@@ -5,6 +5,10 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>LacertMCP.FieldAccessDumper</RootNamespace>
     <AssemblyName>LacertMCP.FieldAccessDumper</AssemblyName>
+    <!-- Load-bearing legacy-runtime shim (useLegacyV2RuntimeActivationPolicy)
+         for the live-probe mode's in-process LacerteSDK_Access COM activation.
+         Mirrors the Server. -->
+    <AppConfig>App.config</AppConfig>
   </PropertyGroup>
 
   <ItemGroup>

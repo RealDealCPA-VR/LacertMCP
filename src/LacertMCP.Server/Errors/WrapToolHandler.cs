@@ -152,6 +152,41 @@ namespace LacertMCP.Server.Errors
                     // catch-all (which would label it as InternalServerError).
                     return SerializeError(OdbcErrorMapper.Map(odbcEx), cid);
                 }
+                catch (OperationCanceledException)
+                {
+                    // R7-18 — a host/client cancellation is not an in-server
+                    // fault. Let it propagate so the MCP SDK applies its
+                    // cancellation semantics (a cancelled request gets no
+                    // response) instead of minting a 9203 "file an issue"
+                    // envelope for a normal notifications/cancelled.
+                    throw;
+                }
+                catch (ArgumentException argEx) when (IsOwnValidationThrow(argEx))
+                {
+                    // R7-18 — argument-validation failures (Pagination's
+                    // negative-limit guard, lacerte_client_find's blank name /
+                    // limit checks, ClientResourceTools' clientNumber checks)
+                    // are caller errors, not server faults. Map them to
+                    // 9017 InvalidArgument — the documented convention — so
+                    // the LLM self-corrects instead of being told to set
+                    // LACERTE_DEBUG_WIRE and file an issue (9203).
+                    var message = argEx.Message ?? string.Empty;
+                    // net48 appends "\r\nParameter name: x" — keep the reason
+                    // to the first line; the name is surfaced separately.
+                    var newline = message.IndexOfAny(new[] { '\r', '\n' });
+                    var reason = newline >= 0 ? message.Substring(0, newline) : message;
+                    var context = new Dictionary<string, object?>
+                    {
+                        ["argument"] = argEx.ParamName,
+                        ["reason"] = reason,
+                    };
+                    if (argEx is ArgumentOutOfRangeException aoor && aoor.ActualValue != null)
+                    {
+                        context["value"] = aoor.ActualValue;
+                    }
+                    var wrapped = new LacerteSDKError(SyntheticStatusCodes.InvalidArgument, context, argEx);
+                    return SerializeError(wrapped, cid);
+                }
                 catch (Exception ex)
                 {
                     // P15-035 — wrap as SyntheticStatusCodes.InternalServerError
@@ -187,6 +222,23 @@ namespace LacertMCP.Server.Errors
                 // in whatever state we found it.
                 WireLog.CurrentCorrelationId.Value = prior;
             }
+        }
+
+        /// <summary>
+        /// R7-18b — only ArgumentExceptions THROWN BY THIS SERVER'S OWN CODE
+        /// (tool / pagination / ODBC-builder validation guards) are caller
+        /// errors. One raised inside the BCL — a List indexer or Substring
+        /// off-by-one, Dictionary.Add on a duplicate key — is an in-server bug
+        /// and must stay 9203 (with exceptionType) rather than telling the LLM
+        /// to "self-correct" an argument it never supplied. TargetSite is the
+        /// method that executed the throw; for async/lambda bodies it is the
+        /// compiler-generated MoveNext / closure, whose declaring type still
+        /// lives in the LacertMCP.Server namespace.
+        /// </summary>
+        internal static bool IsOwnValidationThrow(ArgumentException ex)
+        {
+            var ns = ex.TargetSite?.DeclaringType?.Namespace;
+            return ns != null && ns.StartsWith("LacertMCP.Server", StringComparison.Ordinal);
         }
 
         private static string SerializeError(LacerteSDKError err, string cid)

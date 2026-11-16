@@ -89,41 +89,70 @@ Two paths, both described in agent 04 §5:
 
 ```
 lacerte-mcp field-access set \
-  --module Individual --table 2 --field C2_45 \
+  --module I --table 2 --field C2_45 \
   --access ReadWrite --data-type numeric --max-length 12 \
   --source manual --note "discovered while writing dependent SSN"
 ```
 
+`--module` is the single module character (`I`/`C`/`P`/`S`/`F`/`R`/`T`/`N`/`B`).
 The CLI loads the right `base/<module>.json`, upserts the entry, re-sorts
-the file, updates `manifest.json`, and prints a diff. Commit the diff.
+the file by key, writes it back, and prints the resolved schema directory
+plus a one-line before/after diff of the entry. It does **not** touch
+`manifest.json` (the loader never reads the manifest; it only lists the
+shipped shard names). It refuses to write if the existing shard is not
+valid JSON rather than replacing it.
+
+Where it writes — the schema directory is resolved in this order:
+
+1. `--schema-dir <path>` (a `FieldAccessMap` root, or an install folder
+   containing `Schema/FieldAccessMap`);
+2. `..\server\Schema\FieldAccessMap` relative to `lacerte-mcp.exe`, if it
+   exists — the release-zip layout, where this is the tree
+   `LacertMCP.Server.exe` actually reads;
+3. in a dev checkout (CLI running from `src/LacertMCP.Cli/bin/<plat>/<cfg>/`),
+   the **server's** build output `src/LacertMCP.Server/bin/<plat>/<cfg>/Schema/FieldAccessMap`
+   — the tree the dev server exe reads (CLI and server build into different folders);
+4. otherwise `Schema\FieldAccessMap` next to `lacerte-mcp.exe`.
+
+That is a **build-output / install** copy, not the source tree: an edit
+made there is overwritten by the next build or release unzip. To make it
+permanent, copy the entry into
+`src/LacertMCP.Server/Schema/FieldAccessMap/base/<module>.json` and commit
+it (or point `--schema-dir` at that source folder). A running MCP server
+caches shards — call the `lacerte_reload_schema` tool to pick up a change
+without a restart.
 
 **B. Introspection dump (bulk) — preferred for full population.**
 
-A script (per agent 04 §5 path A) probes the installed SDK with no-op
-writes and maps the returned `TAPIStatus` to a `FieldAccess`. Output
-overwrites `base/<module>.json` and a PR is opened.
+`LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]`
+probes fields and maps the returned status to a `FieldAccess`, merging the
+results into `base/<module>.json` (existing entries are preserved unless
+`--overwrite`). Default output: a sibling `..\server\Schema\FieldAccessMap\base`
+when present (release layout), else this source tree's `base/` when run
+from a checkout, else `Schema/FieldAccessMap/base` next to the exe. Today
+`--live` is a stub (throws BridgeUnavailable) and sim mode has no fields to
+enumerate, so the dumper writes nothing yet.
 
-## v1 coverage status — TODO
+## Coverage status (R7, 2026-11-15)
 
-**The shipped base files (`individual.json`, `partnership.json`, all
-others) are intentionally empty `{}`.**
+The source SDK PDF (Intuit *Lacerte SDK Developer Instructions*, https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf) was re-mined. Its literal rows now ship with `source: "sdk-pdf"`:
 
-`Lacerte_MCP_Structure_Spec.md` §2 mentions that the source SDK PDF
-contains a "Database Field Access" table for Individual/Partnership table
-1 & 5 globals plus a "Not Supported Fields in TY21" list — but the
-extracted spec checked into this repo does **not** include the actual
-field names with stated access, only the description that such tables
-exist in the upstream PDF.
+- **`individual.json` / `partnership.json`.** The documented DATA1 global fields:
+  - `C1_G4`, `C1_G12` and `C1_G13` are ReadWrite. The PDF also lists `C1_G38` as ReadWrite, but its "Not Supported Fields in TY21" list removes it from TY21. Overlays are exact-year and no TY22+ list exists, so a ReadWrite base entry would fail **open** for TY22+. It is therefore omitted and stays fail-closed (9012); to enable it for a specific verified year, add a ReadWrite entry to that year's overlay file. The loader reads only `overlays/ty{yy}-not-supported.json` (one per tax year; the manifest is not read), so put it there, then run `lacerte-mcp doctor`, which validates overlays with the loader's own parser — never a base entry (`field-access set` writes the base map, which applies to every year and would reintroduce the fail-open).
+  - The other listed `C1_G*` fields are ReadOnly.
+  - The listed DATA5 globals (`C5_G5`, `C5_G48`, `C5_G49`, `C5_G52`–`C5_G54`, `C5_G56`–`C5_G61`) are Hidden.
+- **Scope.** The global-field rows above ship for Individual and Partnership only, the scope the PDF's TY21 lists and the original spec mining attribute them to. Other modules stay fail-closed for those fields.
+- **All nine modules.** The structural DATA2–DATA4 rows: `C2_1` and `C4_1` (subclient number), `C3_G1` and `C4_G1` (state abbreviation), and `C2_G1`, all ReadOnly.
+- **`overlays/ty21-not-supported.json`.** The PDF's "Not Supported Fields in TY21" lists for Individual and Partnership. These include `C5_1`–`C5_67`, expanded to literal keys. Per DECISIONS 2026-05-30, an overlay applies to its **exact** year only.
 
-Until the source SDK PDF is re-mined for the literal field rows (or the
-introspection dumper is run against a live install — see agent 04 §4 v2),
-the v1 base files ship empty. **The fail-closed write path** in
-`FieldAccessMapLoader.AssertWritable(...)` plus the universal
-`C{table}_0 → ReadOnly` rule keeps the system safe: any uncatalogued
-field returns `Unknown` and write tools refuse without `force: true`.
+The PDF also states **range rules**, which are *not* encoded as literal keys:
 
-`overlays/ty21-not-supported.json` similarly ships with `overrides: {}` —
-populate it once the spec's TY21 list is extracted.
+- `C{1,3}_1+` and `C{2,4}_2+` ("remaining non-global fields") are ReadWrite.
+- `C5_1+`, `C6_1+` and `C7_1+` are ReadOnly.
+- Unlisted `C1_G+` / `C2_G2+` / `C3_G2+` / `C4_G2+` / `C6_G+` / `C7_G+` are Hidden.
+- Unlisted `C5_G+` are ReadWrite.
+
+Per the 2026-05-30 design decision, any field without a literal entry stays **fail-closed**: `Unknown` gives 9012, and writing it needs `force: true` or a `field-access set`. The SDK itself still enforces the range rules server-side, returning 7 NotExposed or 8 ExposedForRead. The universal `C{table}_0 → ReadOnly` rule is unchanged.
 
 Cross-references for the introspection workflow: agent 04 §5 and Todo
 follow-up F5 ("decide whether to ship `scripts/dump-field-access.csx` for

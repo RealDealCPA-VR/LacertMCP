@@ -119,7 +119,10 @@ namespace LacertMCP.Server.Bridge
             // every live call with a misleading remediation. year/module are
             // no longer discarded.
             var dbf = FormatDbfName(table: 1, module: module, year: year);
-            var xml = Reader.ReadFromDBFData(appId: string.Empty, dataPath: dataPath, dbf: dbf);
+            // R7-SRC — "1. String – AppID – AppID used for calling Register
+            // function": pass the registered AppID, not an empty string.
+            var registeredAppId = Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
+            var xml = Reader.ReadFromDBFData(appId: registeredAppId, dataPath: dataPath, dbf: dbf);
             // Parsing the XML payload into a row-dict shape is a Phase 11
             // hardening task — for now return an empty list with a TODO so
             // the operator surface doesn't crash but the gap is loud.
@@ -204,7 +207,7 @@ namespace LacertMCP.Server.Bridge
             // Live verification deferred to Windows + Lacerte box.
             _ = year; _ = module;
             // P17-001 — fail-CLOSED on replaceIndex in live mode. The SDK's
-            // WriteToDetailFile only appends (spec §2); silently dropping
+            // SDK has no documented COM detail write / update-by-index (R7-SRC); silently dropping
             // replaceIndex (the prior behavior) made an operator-requested
             // row replace silently become an append against a live tax
             // return. Until a real read-delete-append path lands at this
@@ -233,6 +236,34 @@ namespace LacertMCP.Server.Bridge
         // Create
         // =================================================================
 
+        /// <summary>
+        /// R7-SRC — sets <c>IClient.TaxType</c> (the SDK's <c>TaxModule</c>
+        /// enum). The SDK is a .NET assembly registered for COM ("Add reference
+        /// to the SDK access libraries (From GAC)"), so a net48 process that
+        /// activates it by ProgID typically receives the MANAGED object, not a
+        /// COM wrapper — and C# <c>dynamic</c> binding has no implicit
+        /// int → enum conversion (RuntimeBinderException → every live create
+        /// would fail 9201). Use reflection with <c>Enum.ToObject</c> when the
+        /// property is a managed enum; fall back to the int for a genuine COM
+        /// RCW, where IDispatch accepts the integral value.
+        /// </summary>
+        internal static void SetTaxType(object client, int ordinal)
+        {
+            var prop = Marshal.IsComObject(client) ? null : client.GetType().GetProperty("TaxType");
+            if (prop != null && prop.PropertyType.IsEnum)
+            {
+                prop.SetValue(client, Enum.ToObject(prop.PropertyType, ordinal));
+                return;
+            }
+            if (prop != null)
+            {
+                prop.SetValue(client, Convert.ChangeType(ordinal, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
+                return;
+            }
+            dynamic d = client;
+            d.TaxType = ordinal;
+        }
+
         public BridgeCreateClientResult CreateClient(
             string appId, string dataPath, int year, char module,
             string clientId, string taxType,
@@ -251,39 +282,54 @@ namespace LacertMCP.Server.Bridge
                 appId, dataPath, clientId, taxType, firstName, lastName, emailId);
             EnsureLive();
 
-            // F11 — wrap with WireLog.
+            // R7-SRC — documented flow (Developer Instructions, "Creating a
+            // New client using SDK", .NET + COM samples):
+            //   IClient     client = access.CreateClient();       // blank object
+            //   IClientList list   = access.CreateClientList();
+            //   TAPIStatus  st     = list.SetDataPath(AppID, DataPath, TaxYear);
+            //   client.TaxType = TaxModule.<module>; client.ClientID = ...;
+            //   client.EmailID = ...; client.FirstName = ...; client.LastName = ...;
+            //   TAPIStatus  st2    = list.CreateClient(client);
+            // The previous code used members that do not exist in the SDK
+            // (access.IClientList property, list.IClient(5 args) factory,
+            // client.CreateClient(), one-argument SetDataPath). The SDK
+            // returns ONLY a status — no ClientNumber — so a successful live
+            // create reports ClientNumber=null; the tool layer then tells the
+            // caller to resolve it by ClientID (R7-28b clientNumberHint).
             return WireLog.RecordSync<BridgeCreateClientResult>("Bridge.CreateClient",
                 new { clientId, taxType, firstName, lastName, emailId },
                 () =>
             {
-                // Live verification deferred to Windows + Lacerte box.
-                // The canonical sequence is:
-                //   1. var list = comInstance.IClientList;
-                //   2. list.SetDataPath(dataPath);
-                //   3. var client = list.IClient(taxType, clientId, emailId, firstName, lastName);
-                //   4. var status = (int)client.CreateClient();
-                //   5. var assigned = (string)client.ClientNumber;
-                // Wrapped with late binding via dynamic so this compiles without
-                // the SDK ref.
-                dynamic com = _comInstance!;
-                _ = year; _ = module;
-                // R6-14 — capture the intermediate RCWs (IClientList + IClient)
-                // in object slots so they can be released per-call, following
-                // the P14-004 pattern from Writer.cs / CanUseNewApisProbe.
-                // Without this, every CreateClient (x4 under AutoReconnect
-                // retries) leaked two RCWs for the process lifetime.
-                object? clientListObj = null;
+                dynamic access = _comInstance!;
                 object? clientObj = null;
+                object? clientListObj = null;
                 try
                 {
-                    dynamic clientList = com.IClientList;
-                    clientListObj = (object?)clientList;
-                    clientList.SetDataPath(dataPath);
-                    dynamic client = clientList.IClient(taxType, clientId, emailId, firstName, lastName);
+                    dynamic client = access.CreateClient();
                     clientObj = (object?)client;
-                    int status = (int)client.CreateClient();
-                    string? assigned = status == 1 ? (string?)client.ClientNumber : null;
-                    return new BridgeCreateClientResult(status, assigned);
+                    dynamic clientList = access.CreateClientList();
+                    clientListObj = (object?)clientList;
+
+                    int pathStatus = (int)clientList.SetDataPath(
+                        appId, dataPath, year.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    if (pathStatus != StatusCodes.Success)
+                    {
+                        return new BridgeCreateClientResult(pathStatus, null);
+                    }
+
+                    // TaxType is the SDK's TaxModule enum. The .NET sample sets
+                    // it as (TaxModule)(index + 1); the documented module order
+                    // (Individual, Corporate, Partnership, S-Corporation,
+                    // Fiduciary, Exempt, Estate, Gift, Benefit) is the order of
+                    // Schema.Modules.All, so the ordinal is that index + 1.
+                    SetTaxType(clientObj!, Schema.Modules.TaxModuleOrdinal(module, taxType));
+                    client.ClientID = clientId;
+                    client.EmailID = emailId ?? string.Empty;
+                    client.FirstName = firstName ?? string.Empty;
+                    client.LastName = lastName ?? string.Empty;
+
+                    int status = (int)clientList.CreateClient(client);
+                    return new BridgeCreateClientResult(status, null);
                 }
                 catch (LacerteSDKError)
                 {
@@ -301,32 +347,9 @@ namespace LacertMCP.Server.Bridge
                 }
                 finally
                 {
-                    // P14-004 — release RCWs per-call to avoid COM leak.
-                    // Release in reverse acquisition order (client before its
-                    // parent list). Marshal.IsComObject guards against managed
-                    // fakes substituted by tests/harnesses.
-                    if (clientObj != null)
-                    {
-                        try
-                        {
-                            if (Marshal.IsComObject(clientObj))
-                            {
-                                Marshal.ReleaseComObject(clientObj);
-                            }
-                        }
-                        catch (Exception) { /* best-effort */ }
-                    }
-                    if (clientListObj != null)
-                    {
-                        try
-                        {
-                            if (Marshal.IsComObject(clientListObj))
-                            {
-                                Marshal.ReleaseComObject(clientListObj);
-                            }
-                        }
-                        catch (Exception) { /* best-effort */ }
-                    }
+                    // P14-004 / R6-14 — release the per-call RCWs.
+                    SdkAccess.Release(clientObj);
+                    SdkAccess.Release(clientListObj);
                 }
             });
         }

@@ -34,8 +34,13 @@ namespace LacertMCP.Server.Schema
     /// <c>MaxLength</c>, <c>Description</c>) is populated during v3
     /// validator work.
     /// </summary>
+    // R7 — [JsonRequired] on Access: a positional record parameter missing from
+    // the JSON is bound to default(FieldAccess) == ReadWrite, so an entry
+    // without "access" silently loaded as WRITABLE (fail-open). Required makes
+    // it a JsonException, which FieldAccessMapLoader already handles fail-closed
+    // (the shard is treated as empty) and the doctor probe reports as Fail.
     public sealed record FieldEntry(
-        FieldAccess Access,
+        [property: System.Text.Json.Serialization.JsonRequired] FieldAccess Access,
         string? DataType = null,
         int? MaxLength = null,
         string? Description = null,
@@ -60,5 +65,7 @@ namespace LacertMCP.Server.Schema
     /// actually change per year — almost always <see cref="FieldAccess"/>
     /// flipped to <see cref="FieldAccess.NotSupported"/>.
     /// </summary>
-    public sealed record OverlayEntry(FieldAccess Access, string Source);
+    public sealed record OverlayEntry(
+        [property: System.Text.Json.Serialization.JsonRequired] FieldAccess Access,
+        string Source);
 }

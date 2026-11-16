@@ -58,7 +58,7 @@ server.tool(
 );
 `
 
-Writes follow same pattern but call ddEntity(), modifyEntity(), or deleteEntity(). Support dryRun: true for preview-without-persisting and idempotencyKey for replay protection on creates.
+Writes follow same pattern but call addEntity(), modifyEntity(), or deleteEntity(). Support dryRun: true for preview-without-persisting and idempotencyKey for replay protection on creates.
 
 **What to copy into Lacerte MCP**: Every tool handler follows same shape. Call session methods (queryEntity, addEntity, modifyEntity, deleteEntity). Wrap errors with formatToolError(). Support dryRun and idempotencyKey. Response always { content: [{ type: "text", text: JSON.stringify(...) }] }.
 

@@ -148,7 +148,7 @@ env:
 | `LACERTE_SIMULATION` | one of LIVE / SIMULATION required | `1` off-Windows | `1` forces simulation regardless of platform. |
 | `LACERTE_DATA_PATH` | advisory only | unset | Quoted in ODBC-error remediations and probed by `lacerte-mcp doctor`. NOT auto-applied to session context — every session must still call `lacerte_set_context`. |
 | `LACERTE_DEFAULT_TAX_YEAR` | recommended | unset | Default year used when `lacerte_set_context` omits one. |
-| `LACERTE_APP_NAME` | recommended | `LacerteMCP` | Friendly name in the SDK consent dialog. |
+| `LACERTE_APP_NAME` | recommended | `Operator Lacerte MCP` | Friendly name in the SDK consent dialog. Also the default for `lacerte-mcp register/login --app-name`, so the CLI registers under the same name the server uses. |
 | `LACERTE_APP_ID` | runtime read-only | from Credential Manager | Source of truth is Windows Credential Manager (set via `lacerte-mcp register`). |
 | `LACERTE_DEBUG_WIRE` | optional | `0` | `1` logs COM + SQL to `logs/lacerte-YYYYMMDD.log`. Secrets redacted. |
 | `LACERTE_DEBUG_LOG_PATH` | optional | `./logs` | Override the log directory. |
@@ -219,7 +219,7 @@ The server registers **42 MCP tools**, grouped below by the same categories `lac
 | Tool | Params | What it does |
 | --- | --- | --- |
 | `lacerte_session_status` | none | Snapshot of mode, registration, 24h expiry, active context, `nextSteps[]` hints. Zero wire I/O — call first. |
-| `lacerte_set_context` | `dataPath`, `taxYear`, `module`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
+| `lacerte_set_context` | `dataPath`, `module`, `taxYear?`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
 | `lacerte_list_modules` | none | The 9-module catalog (I/C/P/S/F/R/T/N/B) with names + ODBC ReturnType strings. |
 | `lacerte_list_datapaths` | none | Discover `{YY}Tax\{Module}Data` folders under `LACERTE_DATA_ROOT` (fallback `C:\Lacerte`). |
 | `lacerte_can_use_new_apis` | `taxYear`, `module` | Whether (taxYear, module) supports TY21+ `UpdateTaxReturn`; cached per pair. |
@@ -438,9 +438,9 @@ lacerte_field_write
 
 Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<module>.json`).
 
-- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY]` — print every entry for a module/table at the requested year (overlays applied).
-- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable).
-- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a one-line pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe --module <X> --table <N>` (Windows + live SDK).
+- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY] [--schema-dir <dir>]` — print every entry for a module/table at the requested year (overlays applied).
+- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...] [--schema-dir <dir>]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable). Both commands target, in order: `--schema-dir`, the sibling `..\server\Schema\FieldAccessMap` (release-zip layout — the tree the server actually reads), else the CLI's own folder; the resolved path is printed.
+- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]` (it probes all known modules/tables itself — there are no `--module`/`--table` flags; `--live` needs Windows + the Lacerte SDK).
 
 ### `lacerte-mcp doctor`
 

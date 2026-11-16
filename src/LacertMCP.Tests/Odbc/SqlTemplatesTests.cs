@@ -84,7 +84,7 @@ namespace LacertMCP.Tests.Odbc
         public void Data1Top_Rejects_NonPositive_Or_Out_Of_Range(int limit)
         {
             var ex = Assert.Throws<LacerteSDKError>(() => SqlTemplates.Data1Top(limit));
-            Assert.Equal(StatusCodes.OutOfIndex, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.InvalidArgument, ex.StatusCode);
         }
 
         [Fact]
@@ -205,7 +205,7 @@ namespace LacertMCP.Tests.Odbc
         public void Data3NewForm_Uses_PerClient_Table_Prefix()
         {
             var sql = SqlTemplates.Data3NewForm("SMIT");
-            Assert.Equal("select * from [SMIT-StateClientInfo]", sql);
+            Assert.Equal("select * from [SMIT-Detail-ClientStateInfo]", sql);
         }
 
         [Theory]
@@ -237,7 +237,7 @@ namespace LacertMCP.Tests.Odbc
         public void Data4NewForm_Uses_PerClient_Table_Prefix()
         {
             var sql = SqlTemplates.Data4NewForm("SMIT");
-            Assert.Equal("select * from [SMIT-StateSubClientInfo]", sql);
+            Assert.Equal("select * from [SMIT-Detail-SubClientStateInfo]", sql);
         }
 
         // -------------------------------------------------------------------

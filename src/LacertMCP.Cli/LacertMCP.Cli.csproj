@@ -5,6 +5,11 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>LacertMCP.Cli</RootNamespace>
     <AssemblyName>lacerte-mcp</AssemblyName>
+    <!-- Load-bearing legacy-runtime shim (useLegacyV2RuntimeActivationPolicy):
+         register/login activate LacerteSDK_Access COM in-process via
+         Bridge.Registration. Mirrors the Server; doctor probes the emitted
+         lacerte-mcp.exe.config. -->
+    <AppConfig>App.config</AppConfig>
   </PropertyGroup>
 
   <ItemGroup>

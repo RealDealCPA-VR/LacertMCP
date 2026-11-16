@@ -144,3 +144,11 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] `lacerte-mcp doctor` returns exit 0 — every probe green (canonical list in `DoctorCommand.cs` XML doc; includes Windows version, x64, App.config shim, .NET 4.8, ODBC DSN, SDK install, COM ProgID, Operating mode, LACERTE_DATA_PATH + directory, LACERTE_DATA_ROOT + directory, FieldAccessMap shards, AppID). Exercised end-to-end.
 - [ ] `LACERTE_DEBUG_WIRE=1` writes a `logs/lacerte-YYYYMMDD.log` with COM call args + SQL strings (Phase 11 #75). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] No tool ever surfaces a raw `TAPIStatus` integer — every error response is the structured `{success:false, statusCode, statusName, severity, userMessage, remediation, context}` shape (Boundary Invariant #9). Exercised end-to-end.
+
+### Round-7 live items
+- [ ] A live `lacerte_field_write` while the return is open in Lacerte returns `success:false` + `statusCode 2 DBFNotAccessable` (not `success:true`).
+- [ ] `lacerte-mcp register` succeeds from the CLI exe (its own `lacerte-mcp.exe.config` carries the legacy-runtime shim); `doctor` App.config probe is green for both exe configs.
+- [ ] `lacerte_state_read` on a TY24 client returns rows and the state is in `C3_G1` (Todo R7-L1 — resolved from source; this is the live sanity check).
+- [ ] Live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files via ODBC only — Todo R7-L2/R7-SRC8) until the ODBC write path is wired.
+- [ ] `lacerte_client_create` live returns Success with `clientNumber: null` + `clientNumberHint` (the SDK returns no number — Todo R7-L3), and `lacerte_client_find` then resolves it by ClientID.
+- [ ] `lacerte-mcp register` returns exit 0 on Grant (raw TPSDKStatus 1 → 201 AccessGranted — Todo R7-SRC2) and activates `LacerteSDK_Access.LacerteAccess` → `CreateTPRegister()` (R7-SRC1).

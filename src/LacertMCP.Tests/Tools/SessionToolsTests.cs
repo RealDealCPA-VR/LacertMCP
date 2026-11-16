@@ -79,7 +79,7 @@ namespace LacertMCP.Tests.Tools
         public async Task SetContext_HappyPath_ReturnsContextEcho()
         {
             var tools = NewTools();
-            var json = await tools.LacerteSetContext(SeedData.DataPathIData2024, 2024, "I");
+            var json = await tools.LacerteSetContext(SeedData.DataPathIData2024, taxYear: 2024, module: "I");
             var root = ToolTestHelpers.Parse(json);
 
             Assert.True(root.GetProperty("success").GetBoolean());
@@ -96,7 +96,7 @@ namespace LacertMCP.Tests.Tools
         {
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext(SeedData.DataPathIData2024, 2017, "I"));
+                await tools.LacerteSetContext(SeedData.DataPathIData2024, taxYear: 2017, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9003, root.GetProperty("statusCode").GetInt32());
         }
@@ -106,7 +106,7 @@ namespace LacertMCP.Tests.Tools
         {
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext(SeedData.DataPathIData2024, 2024, ""));
+                await tools.LacerteSetContext(SeedData.DataPathIData2024, taxYear: 2024, module: ""));
             Assert.False(root.GetProperty("success").GetBoolean());
             // Tool-level validation maps to InValidClientName (24) per the convention used by SetContext.
             Assert.Equal(24, root.GetProperty("statusCode").GetInt32());
@@ -117,7 +117,7 @@ namespace LacertMCP.Tests.Tools
         {
             var mgr = ToolTestHelpers.NewSimManager();
             var tools = new SessionTools(mgr);
-            await tools.LacerteSetContext(SeedData.DataPathIData2024, 2024, "I", readOnly: true);
+            await tools.LacerteSetContext(SeedData.DataPathIData2024, taxYear: 2024, module: "I", readOnly: true);
 
             var statusRoot = ToolTestHelpers.Parse(await tools.LacerteSessionStatus());
             var ctx = statusRoot.GetProperty("result").GetProperty("context");
@@ -210,7 +210,7 @@ namespace LacertMCP.Tests.Tools
             // backend write happens.
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext(@"foo\bar", 2024, "I"));
+                await tools.LacerteSetContext(@"foo\bar", taxYear: 2024, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
         }
@@ -223,7 +223,7 @@ namespace LacertMCP.Tests.Tools
             // PathValidation gate catches it BEFORE canonicalization.
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext(@"C:\Lacerte\24Tax\..\Windows", 2024, "I"));
+                await tools.LacerteSetContext(@"C:\Lacerte\24Tax\..\Windows", taxYear: 2024, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
         }
@@ -236,7 +236,7 @@ namespace LacertMCP.Tests.Tools
             // we don't have to mutate process env in xUnit).
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext(@"\\server\share\IData", 2024, "I"));
+                await tools.LacerteSetContext(@"\\server\share\IData", taxYear: 2024, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
         }
@@ -249,7 +249,7 @@ namespace LacertMCP.Tests.Tools
             // strings in C-FFI marshalling boundaries.
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\0evil", 2024, "I"));
+                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\0evil", taxYear: 2024, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
         }
@@ -259,7 +259,7 @@ namespace LacertMCP.Tests.Tools
         {
             var tools = NewTools();
             var root = ToolTestHelpers.Parse(
-                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\r\n", 2024, "I"));
+                await tools.LacerteSetContext("C:\\Lacerte\\24Tax\\IData\r\n", taxYear: 2024, module: "I"));
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(9013, root.GetProperty("statusCode").GetInt32());
         }

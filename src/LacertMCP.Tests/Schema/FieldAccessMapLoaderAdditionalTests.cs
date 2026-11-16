@@ -38,7 +38,8 @@ namespace LacertMCP.Tests.Schema
 
         public FieldAccessMapLoaderAdditionalTests()
         {
-            var asmDir = Path.GetDirectoryName(typeof(FieldAccessMapLoader).Assembly.Location)
+            // R7-36 — mutate the SAME tree the loader reads (shadow-copy safe).
+            var asmDir = Path.GetDirectoryName(Path.GetDirectoryName(FieldAccessMapLoader.GetSchemaRoot()))
                          ?? Directory.GetCurrentDirectory();
 
             // Always use Individual / Table 1 for these tests (matches the

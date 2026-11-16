@@ -46,9 +46,9 @@ namespace LacertMCP.Tests.Integration
                 Suffix: "",
                 StateAbbr: "",
                 CityAbbr: "",
-                Source: "W2",
+                Source: "Source",
                 TSJ: "T",
-                ImportSrc: "round-trip-tag",
+                ImportSrc: "", // R7-SRC — ImportSrc is Read Only per the SDK schema
                 Amount: 12345.67,
                 Description: "RoundTripEmployer");
 
@@ -62,11 +62,12 @@ namespace LacertMCP.Tests.Integration
             var appended = after[after.Count - 1];
             Assert.Equal("RoundTripEmployer", appended.Description);
             Assert.Equal(12345.67, appended.Amount);
-            Assert.Equal("round-trip-tag", appended.ImportSrc);
+            Assert.Equal("", appended.ImportSrc);
             Assert.Equal(SeedData.SeriesIds.Wages, appended.Series);
             Assert.Equal("1", appended.Code);
-            Assert.Equal("W2", appended.Source);
-            Assert.Equal("T", appended.TSJ);
+            Assert.Equal("Source", appended.Source);
+            // R7-SRC — "T" is normalized to the SDK value "Taxpayer" on write.
+            Assert.Equal("Taxpayer", appended.TSJ);
         }
 
         [Fact]
@@ -91,9 +92,9 @@ namespace LacertMCP.Tests.Integration
                 Suffix: "",
                 StateAbbr: "",
                 CityAbbr: "",
-                Source: "W2",
+                Source: "Source",
                 TSJ: "T",
-                ImportSrc: "replaced",
+                ImportSrc: "", // R7-SRC — ImportSrc is Read Only per the SDK schema
                 Amount: 1.0,
                 Description: "Replaced");
 
@@ -106,7 +107,7 @@ namespace LacertMCP.Tests.Integration
 
             Assert.Equal("Replaced", after[0].Description);
             Assert.Equal(1.0, after[0].Amount);
-            Assert.Equal("replaced", after[0].ImportSrc);
+            Assert.Equal("", after[0].ImportSrc);
 
             // Adjacent row untouched — proves the mutation didn't smear.
             Assert.Equal(keepRow1.Description, after[1].Description);

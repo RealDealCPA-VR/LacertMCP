@@ -6,8 +6,13 @@
 #   ./scripts/test.ps1 -Rebuild                     # build first, then test
 #   ./scripts/test.ps1 -Configuration Release       # Release
 #   ./scripts/test.ps1 -- --filter Category=Live    # forward extra args after `--`
+#   pwsh -File scripts/test.ps1 --filter Category=Live  # from cmd/CI: omit `--` (pwsh -File
+#                                                   # parses a bare `--` as an empty param name)
 
-[CmdletBinding()]
+# PositionalBinding=$false: without it, the first arg forwarded after `--`
+# (e.g. `--filter`) binds positionally to -Configuration and fails ValidateSet.
+# Named params only; everything unbound lands in $Forward.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Debug',

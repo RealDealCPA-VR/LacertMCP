@@ -52,7 +52,7 @@ namespace LacertMCP.Tests.Tools
                 Code = code,
                 Amount = amount,
                 Description = description,
-                Source = "W2",
+                Source = "Source",
                 Tsj = "T",
             };
 

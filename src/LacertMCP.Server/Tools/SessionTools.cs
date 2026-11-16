@@ -174,7 +174,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Set the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates year >= 2018 and module in I/C/P/S/F/R/T/N/B. Pass readOnly=true to lock the session against any write tool.")]
+        [Description("Set the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates year >= 2018 and module in I/C/P/S/F/R/T/N/B. taxYear may be omitted when the server was started with LACERTE_DEFAULT_TAX_YEAR. Pass readOnly=true to lock the session against any write tool.")]
         public Task<string> LacerteSetContext(
             // P16-051/P16-078 — example renders as `C:\Lacerte\24Tax\IData`
             // on the wire (single backslashes), matching the rest of the
@@ -182,8 +182,11 @@ namespace LacertMCP.Server.Tools
             // C#-source escape leak that smaller LLMs would mimic verbatim
             // into the call payload, triggering InvalidDataPath 9013.
             [Description("Absolute path to a Lacerte data folder (e.g. C:\\Lacerte\\24Tax\\IData).")] string dataPath,
-            [Description("Four-digit tax year. SDK floor is 2018.")] int taxYear,
             [Description("Single-character module code: one of I, C, P, S, F, R, T, N, B.")] string module,
+            // R7-17 — optional (defaults to LACERTE_DEFAULT_TAX_YEAR); placed
+            // after `module` because C# optional params must trail. MCP
+            // binds arguments by name, so the order is not wire-visible.
+            [Description("Four-digit tax year. SDK floor is 2018. Optional: when omitted, the server's LACERTE_DEFAULT_TAX_YEAR is used (an error is returned if that is not configured).")] int? taxYear = null,
             [Description("If true, every write tool short-circuits to 9001 (FieldIsReadOnly) before any side effect. Default false.")] bool readOnly = false)
             => WrapToolHandler.Run(() =>
             {
@@ -198,7 +201,22 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
-                _session.SetContext(dataPath, taxYear, module[0], readOnly);
+                // R7-17 — honor LACERTE_DEFAULT_TAX_YEAR when taxYear is
+                // omitted. README / HelpTools / the code 11 + 25 remediation
+                // text all promised this fallback, but the parameter was a
+                // required int and nothing read DefaultTaxYear here.
+                var effectiveYear = taxYear ?? _session.DefaultTaxYear;
+                if (!effectiveYear.HasValue)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.InvalidArgument,
+                        new Dictionary<string, object?>
+                        {
+                            ["argument"] = "taxYear",
+                            ["reason"] = "taxYear is required: pass a four-digit year (>= 2018), or start the server with LACERTE_DEFAULT_TAX_YEAR set.",
+                        });
+                }
+                _session.SetContext(dataPath, effectiveYear.Value, module[0], readOnly);
                 var ctx = _session.SessionStatus().Context!;
                 // P16-069/P16-079 — response field is `taxYear` to match the
                 // input parameter (was `year` pre-P16; renamed for input/
@@ -229,6 +247,9 @@ namespace LacertMCP.Server.Tools
                             ["reason"] = "module must be a single character.",
                         });
                 }
+                // R7-22 — same year-bounds + known-module validation as
+                // lacerte_set_context (9003 / 9014 / 24 with validModules).
+                _session.ValidateYearAndModule(taxYear, module[0]);
                 var canUseNew = _session.CanUseNewApis(taxYear, module[0]);
                 return Task.FromResult<object>(new
                 {
