@@ -254,6 +254,14 @@ namespace LacertMCP.Server.Web
                     return;
                 }
 
+                // Workstation setup: any identified tailnet device may fetch these (they
+                // carry no data, only this server's address); access is still enforced on /mcp.
+                if (req.HttpMethod == "GET" && (path == "/setup.ps1" || path == "/bridge.ps1" || path == "/access-check"))
+                {
+                    await HandleWorkstationSetupAsync(req, res, caller, path).ConfigureAwait(false);
+                    return;
+                }
+
                 if (path == "/mcp")
                 {
                     await HandleMcpAsync(ctx, caller).ConfigureAwait(false);
@@ -324,6 +332,34 @@ namespace LacertMCP.Server.Web
             var ownerId = _self?.OwnerId;
             var isOwner = !string.IsNullOrEmpty(ownerId) && who.Device.OwnerId == ownerId;
             return (new Caller(false, who.Device.StableId, who.Device.Name, isOwner, remote.ToString()), string.Empty, 0);
+        }
+
+        /// <summary>When each tailnet device last ran the workstation setup (shown on the Access tab until it has access).</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _setupRuns = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>();
+
+        private async Task HandleWorkstationSetupAsync(HttpListenerRequest req, HttpListenerResponse res, Caller caller, string path)
+        {
+            var level = LevelFor(caller);
+            if (path == "/access-check")
+            {
+                await SendJson(res, 200, new { device = caller.Name, level = level.ToString().ToLowerInvariant() }).ConfigureAwait(false);
+                return;
+            }
+            if (path == "/bridge.ps1")
+            {
+                await SendText(res, 200, "text/plain; charset=us-ascii", WorkstationSetup.BridgeScript()).ConfigureAwait(false);
+                return;
+            }
+            // HostAllowed already checked the Host header is this PC's tailnet IP (or loopback) + port.
+            var baseUrl = "http://" + req.Headers["Host"];
+            if (!caller.IsLocal)
+            {
+                _setupRuns[caller.StableId] = DateTime.UtcNow;
+                _activity.Record(level == AccessLevel.None ? "warn" : "info", "access",
+                    level == AccessLevel.None ? "Workstation setup ran. Give this device access on the Access tab." : "Workstation setup ran",
+                    caller.Name);
+            }
+            await SendText(res, 200, "text/plain; charset=us-ascii", WorkstationSetup.SetupScript(baseUrl)).ConfigureAwait(false);
         }
 
         private AccessLevel LevelFor(Caller caller) => caller.IsLocal ? AccessLevel.Write : _access.LevelFor(caller.StableId);
@@ -810,6 +846,7 @@ namespace LacertMCP.Server.Web
                 lastSignInResult = StartupRegistration.LastResult,
                 mcpUrls = urls,
                 localUrl = "http://localhost:" + _port + "/mcp",
+                setupUrls = urls.Select(u => u.Substring(0, u.Length - "/mcp".Length) + "/setup.ps1").ToList(),
                 health,
                 tailscaleError = tsError,
                 counts = new
@@ -845,6 +882,7 @@ namespace LacertMCP.Server.Web
                     address = p.Addresses.FirstOrDefault(a => a.Contains('.')),
                     sameOwner = self != null && p.OwnerId == self.OwnerId,
                     level = (grants.FirstOrDefault(g => g.StableId == p.StableId)?.Parsed ?? AccessLevel.None).ToString().ToLowerInvariant(),
+                    setupAt = _setupRuns.TryGetValue(p.StableId, out var ranAt) ? ranAt : (DateTime?)null,
                 }),
                 // Grants for devices no longer on the tailnet, so they can still be removed.
                 orphanGrants = grants.Where(g => peers.All(p => p.StableId != g.StableId)).Select(g => new { g.StableId, g.Name, g.Level }),

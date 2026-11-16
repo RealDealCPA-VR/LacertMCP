@@ -18,9 +18,13 @@ namespace LacertMCP.Server.Errors
     /// </para>
     ///
     /// <para>
-    /// Codes marked with <c>// TODO F1</c> have integer values inferred from SDK declaration order
-    /// in the spec; they MUST be verified against the real SDK headers
-    /// (<c>tlbimp LacerteSDK_Interfaces.tlb</c> + ILSpy) before release per agent 05 follow-up #1.
+    /// F1 (R7): values 0..9 are explicit in the Intuit SDK Developer Instructions
+    /// return-code table; 10..28 follow the table's listed order (enum position).
+    /// TPSDKStatus is documented as <c>ConsentDenied = 0</c> followed by
+    /// AccessGranted / VersionBlocked / NotSignedIn / LacerteTaxSetupRequired, and the
+    /// bridge maps raw 0..4 onto 200..204 (<c>Bridge.SdkAccess.MapTpsdkStatus</c>).
+    /// An integer the table does not list (e.g. the samples' <c>NotRegistered</c>)
+    /// surfaces through <see cref="GetStatusInfo"/> as <c>Unknown(n)</c>.
     /// </para>
     /// </summary>
     public static class StatusCodes
@@ -38,34 +42,34 @@ namespace LacertMCP.Server.Errors
         public const int ExposedForWrite = 9;
 
         // ---- TAPIStatus — inferred integer values; verify against SDK headers ----
-        public const int ExposedForReadWrite = 10;   // TODO F1: verify integer against SDK headers
-        public const int VersionBlocked = 11;        // TODO F1: verify integer against SDK headers
-        public const int DuplicateClient = 12;       // TODO F1: verify integer against SDK headers
-        public const int LengthExceeded = 13;        // TODO F1: verify integer against SDK headers
-        public const int TaxModuleMismatch = 14;     // TODO F1: verify integer against SDK headers
-        public const int DetailCreationError = 15;   // TODO F1: verify integer against SDK headers
-        public const int DB1Error = 16;              // TODO F1: verify integer against SDK headers
-        public const int DB2Error = 17;              // TODO F1: verify integer against SDK headers
-        public const int DB3Error = 18;              // TODO F1: verify integer against SDK headers
-        public const int DB4Error = 19;              // TODO F1: verify integer against SDK headers
-        public const int DB5Error = 20;              // TODO F1: verify integer against SDK headers
-        public const int DB6Error = 21;              // TODO F1: verify integer against SDK headers
-        public const int DB7Error = 22;              // TODO F1: verify integer against SDK headers
-        public const int DB8Error = 23;              // TODO F1: verify integer against SDK headers
-        public const int InValidClientName = 24;     // TODO F1: verify integer against SDK headers (sic: "InValid")
-        public const int InValidTaxYear = 25;        // TODO F1: verify integer against SDK headers
-        public const int FieldNotSupported = 26;     // TODO F1: verify integer against SDK headers
-        public const int InValidSubClientID = 27;    // TODO F1: verify integer against SDK headers
-        public const int InValidStateAbbrev = 28;    // TODO F1: verify integer against SDK headers
+        public const int ExposedForReadWrite = 10;   // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int VersionBlocked = 11;        // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DuplicateClient = 12;       // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int LengthExceeded = 13;        // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int TaxModuleMismatch = 14;     // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DetailCreationError = 15;   // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB1Error = 16;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB2Error = 17;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB3Error = 18;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB4Error = 19;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB5Error = 20;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB6Error = 21;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB7Error = 22;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int DB8Error = 23;              // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int InValidClientName = 24;     // order per SDK Developer Instructions return-code table; value = enum position (F1) (sic: "InValid")
+        public const int InValidTaxYear = 25;        // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int FieldNotSupported = 26;     // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int InValidSubClientID = 27;    // order per SDK Developer Instructions return-code table; value = enum position (F1)
+        public const int InValidStateAbbrev = 28;    // order per SDK Developer Instructions return-code table; value = enum position (F1)
 
         // ---- TPSDKStatus (registration) — namespaced 200+ to avoid TAPIStatus collision ----
         // Per agent 05 §1 follow-up F2: VersionBlocked may collide with TAPIStatus 11; registered
         // as RegVersionBlocked here. Revisit during Phase 9 when both paths first hit live.
-        public const int ConsentDenied = 200;            // TODO F1: verify integer against SDK headers
-        public const int AccessGranted = 201;            // TODO F1: verify integer against SDK headers
-        public const int RegVersionBlocked = 202;        // TODO F1/F2: verify integer + collapse-or-keep collision strategy
-        public const int NotSignedIn = 203;              // TODO F1: verify integer against SDK headers
-        public const int LacerteTaxSetupRequired = 204;  // TODO F1: verify integer against SDK headers
+        public const int ConsentDenied = 200;            // TPSDKStatus raw 0 (documented "ConsentDenied = 0") + 200
+        public const int AccessGranted = 201;            // TPSDKStatus raw 1 + 200 (enum order per SDK Developer Instructions)
+        public const int RegVersionBlocked = 202;        // TPSDKStatus raw 2 (VersionBlocked) → 202 via SdkAccess.MapTpsdkStatus (F1/F2)
+        public const int NotSignedIn = 203;              // TPSDKStatus raw 3 + 200
+        public const int LacerteTaxSetupRequired = 204;  // TPSDKStatus raw 4 + 200
 
         /// <summary>
         /// Canonical status code → <see cref="StatusInfo"/> table.

@@ -358,7 +358,9 @@ namespace LacertMCP.Server.Tools
                             entry.StateAbbrev,
                             dryRun,
                             rowKey,
-                            cancellationToken).ConfigureAwait(false);
+                            cancellationToken,
+                            // R7-25 — pin every row to the context validated above.
+                            expectedContext: ctx).ConfigureAwait(false);
 
                         var verification = dryRun
                             ? null

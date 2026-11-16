@@ -30,7 +30,8 @@ namespace LacertMCP.Tests.Schema
 
         public FieldAccessMapLoaderReloadAndShardCountTests()
         {
-            var asmDir = Path.GetDirectoryName(typeof(FieldAccessMapLoader).Assembly.Location)
+            // R7-36 — mutate the SAME tree the loader reads (shadow-copy safe).
+            var asmDir = Path.GetDirectoryName(Path.GetDirectoryName(FieldAccessMapLoader.GetSchemaRoot()))
                          ?? Directory.GetCurrentDirectory();
             _shardPath = Path.Combine(asmDir, "Schema", "FieldAccessMap", "base", "individual.json");
 

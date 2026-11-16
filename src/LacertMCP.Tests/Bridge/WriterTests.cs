@@ -69,10 +69,10 @@ namespace LacertMCP.Tests.Bridge
         }
 
         [Fact]
-        public void WriteDetail_NoSdk_ThrowsBridgeUnavailable()
+        public void WriteDetail_FailsClosed_SimulationOnly_NoComDetailWriteApi()
         {
             var row = new DetailRow(
-                Series: "S1",
+                Series: "1",
                 Prefix: "",
                 Code: "5",
                 Suffix: "",
@@ -89,7 +89,7 @@ namespace LacertMCP.Tests.Bridge
                     dataPath: @"C:\Lacerte\24data",
                     clientNumber: "JOHNS",
                     row: row));
-            Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
         }
 
         [Fact]
@@ -145,7 +145,7 @@ namespace LacertMCP.Tests.Bridge
         {
             var appId = Registration.GetStoredAppId()!.Value.ToString("D");
             var row = new DetailRow(
-                Series: "Income",
+                Series: "20",
                 Prefix: "",
                 Code: "1",
                 Suffix: "",
@@ -153,7 +153,7 @@ namespace LacertMCP.Tests.Bridge
                 CityAbbr: "",
                 Source: "",
                 TSJ: "T",
-                ImportSrc: "MCP",
+                ImportSrc: "",
                 Amount: 100.00,
                 Description: "manual verification write");
             var status = Writer.WriteDetail(appId, @"C:\Lacerte\24data", "JOHNS", row);

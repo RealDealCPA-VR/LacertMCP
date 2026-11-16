@@ -11,7 +11,7 @@ namespace LacertMCP.Server.Schema
     /// <c>ReturnType</c> string, the per-module access-map shard basename
     /// (e.g. <c>"individual"</c> → <c>Schema/FieldAccessMap/base/individual.json</c>),
     /// and the case-insensitive set of TaxType aliases the SDK accepts
-    /// for <c>IClient(TaxType, ...)</c> on this module.
+    /// for <c>IClient.TaxType (TaxModule)</c> on this module.
     ///
     /// Source: <c>Lacerte_MCP_Structure_Spec.md</c> §2 "Modules" table.
     /// </summary>
@@ -52,6 +52,29 @@ namespace LacertMCP.Server.Schema
             new ModuleInfo('N', "Gift",          "Gift",       "gift",        new[] { "Gift", "709" }),
             new ModuleInfo('B', "Benefit",       "Benefit",    "benefit",     new[] { "Benefit", "5500" }),
         };
+
+        /// <summary>
+        /// R7-SRC — the SDK <c>TaxModule</c> enum ordinal for
+        /// <c>IClient.TaxType</c>. The Developer Instructions' .NET sample sets
+        /// <c>(TaxModule)(SelectedIndex + 1)</c> and the COM sample uses
+        /// <c>TaxModule.TaxModule_Individual</c>; the documented module order
+        /// matches <see cref="All"/>, so the ordinal is index + 1. Resolved from
+        /// the canonical <paramref name="taxType"/> (ReturnType) when known,
+        /// else from the context <paramref name="module"/> char.
+        /// </summary>
+        public static int TaxModuleOrdinal(char module, string? taxType)
+        {
+            for (int i = 0; i < All.Count; i++)
+            {
+                if (taxType != null && string.Equals(All[i].ReturnType, taxType, StringComparison.Ordinal))
+                    return i + 1;
+            }
+            for (int i = 0; i < All.Count; i++)
+            {
+                if (All[i].Char == module) return i + 1;
+            }
+            throw new ArgumentOutOfRangeException(nameof(module), module, "Unknown Lacerte module.");
+        }
 
         /// <summary>Lookup a module by its single-character DBF code (case-sensitive).</summary>
         public static ModuleInfo? GetByChar(char c)
@@ -127,7 +150,7 @@ namespace LacertMCP.Server.Schema
         /// Why this matters — the spec (<c>Lacerte_MCP_Structure_Spec.md</c> §2)
         /// lists only 9 canonical <c>ReturnType</c> strings as valid for the
         /// ODBC connection string AND for the live SDK's
-        /// <c>IClient(TaxType, ...)</c> constructor. The colloquial form-number
+        /// <c>IClient.TaxType (TaxModule)</c> constructor. The colloquial form-number
         /// aliases are useful operator ergonomics but the SDK will reject
         /// them with TaxModuleMismatch (14). Callers should canonicalize at
         /// the tool boundary BEFORE handing the value to the bridge or the

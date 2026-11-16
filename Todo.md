@@ -1475,3 +1475,114 @@ Session goal: assess completeness, close everything still open and doable off th
 - [x] **P20-004** `HeartbeatWriter` immediate-write contract restored under Hosting.Abstractions 10.x (pulled in by F9): the 10.x line schedules `BackgroundService.ExecuteAsync` asynchronously instead of running it synchronously to the first await inside `StartAsync`, which silently broke "file on disk by the time host startup returns". Startup sweep + first `TryWrite` moved into a `StartAsync` override.
 - [x] **P20-005** Fixed pre-existing scheduling flake in `FieldAccessMapLoaderP18AtomicityTests.ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader`: under full-suite thread-pool pressure the reloader could finish all 200 reloads and set `stopReader` before the reader task ever ran → zero observations → NotEmpty/Contains assertion failures. Reloader now waits on a `ManualResetEventSlim` the reader sets after its first observation.
 - [x] **P20-006** Doc sync: README dashboard row, SKILL.md (`totalTuplesScanned` drift fix + pure-read wording + SDK 1.4.0 + 1506 count), INSTRUCTION_MANUAL (7b/7d pure-read wording, glossary SDK version), ARCHITECTURE stack line, DECISIONS.md 2026-06-11 entries, fresh HANDOFF.md.
+
+## Phase 21 — Round-7 deep code review (2026-11-15)
+
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1678 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+
+### HIGH (fixed)
+- [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
+- [x] **R7-PII** `lacerte_diff_clients` / `lacerte_year_over_year` leaked SSN/DOB/email/bank to the LLM (`{field,a,b}` / `{field,fromValue,toValue}` slots unredacted) → value-slot redaction for PII codes
+- [x] **R7-02** Persisted idempotency cache shared across sim and live (sim success replayed by a live process) → mode in fingerprint + separate sim file
+- [x] **R7-07** `ReadDetail` copied the shared detail list without its lock → "Destination array was not long enough" under concurrent writes
+- [x] **R7-10** Two concurrent sim `CreateClient`s with the same ClientId both succeeded → serialized
+- [x] **R7-14** Empty `clientNumber` on the "one client" read tools returned EVERY client's rows → 9017
+- [x] **R7-21** `LACERTE_DEFAULT_TAX_YEAR=abc` crashed the server before the handshake (validator said "ignored") → ignored
+- [x] **R7-CLI1** CLI / dumper exes lacked the `useLegacyV2RuntimeActivationPolicy` shim although `register`/`login` activate the SDK COM in-process; doctor gave a false green
+- [x] **R7-CLI3** `field-access set` / dumper wrote shards the server never reads (CLI's own copy) → schema-dir resolution prefers `..\server\Schema\FieldAccessMap`
+
+### MEDIUM (fixed)
+- [x] **R7-12/13** Bridge content rules ran live-only (sim accepted 300-char Description, `\u0001`, 51-char names); wrong code 9008 for field/create writes; live dry-run previewed Success for pre-TY21 / bad-shape writes the commit refuses
+- [x] **R7-15** `lacerte_ef_status` `sinceUtc` truncated to the day (poll re-delivered the whole day)
+- [x] **R7-16** SKILL.md canonical `lacerte_client_find(name: "John Smith")` always found nothing
+- [x] **R7-17** `lacerte_set_context` never used `LACERTE_DEFAULT_TAX_YEAR` despite docs + remediation text
+- [x] **R7-18** ArgumentException (negative limit, blank name, …) and host cancellation surfaced as 9203 InternalServerError
+- [x] **R7-20** Equivalent dataPath spellings (trailing `\`, `/`) opened an empty sim cell; drive-relative `C:foo` / drive-less `\foo` passed "absolute" validation
+- [x] **R7-24** `lacerte_field_access_map` probed a fixed `C{t}_0..25` grid (could never list C1_71 etc. — prompts treat absence as STOP); **R7-33** its PII-code entries were masked to `***` on the wire
+- [x] **R7-25/26** Bulk rows not pinned to the batch context; bulk-create dry-run passed in-batch duplicate clientIds that the commit half-applied
+- [x] **R7-27/28** AutoReconnect never retried against the real bridge (9201 wrapper); post-commit ClientNumber read failure reported a created client as BridgeUnavailable
+- [x] **R7-YoY** YoY detail totals summed as double (false "changed" rows) → decimal
+- [x] **R7-LOG** WireLog timestamps / file names used the current culture (th-TH/ar-SA/fi-FI broke history + retention); full-results mode made the in-memory ring unbounded
+- [x] **R7-03/04/05** Idempotency eviction could dispose a held semaphore; a lost persist race could drop an entry before a crash; disk cache had no cap
+- [x] **R7-CLI** doctor shard probe passed on all-empty / malformed shards; wrong Windows version (manifest-less OSVersion); unregister couldn't remove a corrupt AppID; `--app-name` ignored `LACERTE_APP_NAME`; release.ps1 never stamped the tag version into binaries; build/test.ps1 `--` forwarding broken
+
+### LOW (fixed)
+- [x] Validation regexes accepted a trailing `\n` (`$`) and non-ASCII digits (`\d`) → `\z` + `[0-9]`
+- [x] Stale tool names in hints (`lacerte_create_client`, `lacerte_list_clients`, callable-looking `lacerte_detail_delete`) + new guard test that every `lacerte_*` reference in server source resolves
+- [x] `lacerte_can_use_new_apis` accepted any module/year; per-tool stats merged both write tools under "Run"; `RejectIfReadOnly` re-read Context; ListClients hash order; `clientNumber`/`stateAbbrev` normalization on writes; client diff always reported `C1_0`; field history marked `result:2` as succeeded; ODBC IM003/IM014 unmapped + guidance hint dropped; SqlTemplates wrong validation codes; ConnectionStringBuilder `returnType` unvalidated; doc drift (APP_NAME default, dumper flags, output paths)
+
+### Live-box verification items (cannot be closed off-Windows)
+- [x] **R7-L1** Resolved from source: `docs/research/agents/03-odbc-dbf-access.md` §3 puts the state in `C3_G1`/`C4_G1` (what `SqlTemplates` filters on). The sim seed used `C3_1` → seed now uses `C3_G1` (test `R7L1_SimStateRow_CarriesStateInGroupColumn`).
+- [x] **R7-L2** RESOLVED from the primary source — the SDK has NO COM detail-write method (detail files are written via the ODBC driver); live `WriteDetail` now fails closed with 9202 instead of calling the invented `WriteToDetailFile`. Amount's range (±999,999,999) and precision (≤12 dp) are now validated. The PDF also marks Amount and StateAbbr as Required, but null/blank are still accepted for description-only and federal rows: the PDF is ambiguous there. ~~(hardware confirmation, not a known defect) `Writer.WriteDetail` sends `row.Amount ?? 0.0`; the `WriteToDetailFile` COM signature is not in any source available here. Confirm on a live box whether a null Amount is accepted; adjust only if live reads back differently from sim.~~
+- [x] **R7-L3** RESOLVED from the primary source — `IClientList.CreateClient(client)` returns only a TAPIStatus; no ClientNumber exists to read. Live create returns Success + `clientNumberHint` by design. ~~(hardware confirmation, not a known defect) Spec says CreateClient "returns the new ClientNumber" but names no property. Code reads `IClient.ClientNumber` best-effort; if absent it returns Success + `clientNumberHint` (R7-28/28b), so no unsafe outcome either way. Confirm the property name on a live box.~~
+
+### Second-pass review of the fix diff (independent reviewer; all fixed)
+- [x] **R7-04b** persist-loop release used `Volatile.Write` → store/load reorder could still miss a request; now `Interlocked.Exchange`
+- [x] **R7-03b** eviction could orphan a semaphore a caller had captured but not yet awaited → acquirer re-checks ownership and retries
+- [x] **R7-18b** `ArgumentException` → 9017 narrowed to throws from this server's own code; BCL-raised (indexer / Substring / Dictionary.Add) stay 9203
+- [x] **R7-20b** canonical dataPath adopted only on Windows (off-Windows `GetFullPath("C:\…")` would orphan sim cells)
+- [x] **R7-35** dry-run state still visible to `ReadTable` / `ReadEFStatus` / `ListClients` → reader/writer sim gate (exclusive for creates + dry-runs, shared for every sim read)
+- [x] **R7-28b** live create Success with no readable ClientNumber now carries `clientNumberHint` (single + bulk)
+- [x] Doc drift: INSTRUCTION_MANUAL / README `set_context` signature; stray form-feed byte in SKILL.md
+
+### Third pass — independent re-review of the second-pass commit (all fixed)
+- [x] **R7-35b** `ListClients` snapshotted `Clients.Values` (eager copy on net48) BEFORE entering the sim gate → dry-run phantom clients still listed (reproduced: 1183 leaks in 2s pre-fix; regression test `R735b_ConcurrentDryRunCreates_NeverListPhantomClients`)
+- [x] **R7-35c** `_simGate.Dispose()` could throw `SynchronizationLockException` at shutdown while a call held the gate → best-effort dispose
+- [x] **R7-04c** persist request-flag clear is now a full fence (`Interlocked.Exchange`)
+- [x] **Final review** of the third-pass commit + R7-L1 seed fix + full sweep of the sim visibility gate: **no findings** (1625 passed / 0 failed).
+
+### Source verification against the Intuit SDK Developer Instructions PDF (2026-11-15)
+Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf. It is public, and the round-7 review read it directly. Our `Lacerte_MCP_Structure_Spec.md` had been mined from it with errors. All of the following are fixed and pinned by `Tests/Bridge/SdkSourceAlignmentR7Tests.cs`:
+- [x] **R7-SRC1 (HIGH)** The bridge activated undocumented ProgIDs (`LacerteSDK_Access.TPRegistration` / `.DBFReader` / `.DBFWriter`), so every live register, read and write would have failed. Fix: create `LacerteSDK_Access.LacerteAccess` and use its documented factories (`CreateTPRegister` / `CreateDBFReader` / `CreateDBFWriter`) via the new `Bridge/SdkAccess.cs`.
+- [x] **R7-SRC2 (HIGH)** `Register` returns the `TPSDKStatus` enum (`ConsentDenied = 0`, then AccessGranted=1 …). The code compared the raw value against 201, so a successful live registration was never recognised. Fix: map raw values to 200+raw; the TaxYear argument is now passed as a String.
+- [x] **R7-SRC3 (HIGH)** Live `CreateClient` called members that don't exist (`access.IClientList`, a 5-arg `list.IClient(...)`, `client.CreateClient()`, a 1-arg `SetDataPath`). Fix: rewritten to the documented `CreateClient()` / `CreateClientList()` / `SetDataPath(appId, path, year)` / property sets / `list.CreateClient(client)`, with TaxType set from the `TaxModule` ordinal.
+- [x] **R7-SRC4** `ReadFromDBFData` is `(appId, path, dbf, ref xml)` → TAPIStatus. It is now called that way, and a non-Success status raises. Reads now pass the registered AppID, not "".
+- [x] **R7-SRC5** `WriteToDBFDatabase` takes 7 args (Value String, `ref newValue`), and `UpdateTaxReturn`'s Value is a String. Values are rendered invariantly (`SdkAccess.ToSdkValueString`).
+- [x] **R7-SRC6** ODBC connection string: the key is `DataDir` (not `Datapath`) and the TaxYear is 4 digits.
+- [x] **R7-SRC7** TY21+ tables: `[<c>-Detail-ClientStateInfo]` / `[<c>-Detail-SubClientStateInfo]` (were `-StateClientInfo` / `-StateSubClientInfo`). State-filter variants were added and the sim query templates updated.
+- [x] **R7-SRC8** Detail-file column rules are now enforced in both modes:
+  - Source must be blank, Nonsource or Source. The seeds and tool descriptions had used form tags like `W2`.
+  - ImportSrc is read-only.
+  - CityAbbr is at most 3 characters.
+  - Prefix and Suffix are Integer.
+  - Amount must be within ±999,999,999 with at most 12 decimal places.
+  - TSJ is stored as the SDK values Taxpayer/Spouse/Joint; the aliases T/S/J are accepted.
+- [x] **F1/F2** TAPIStatus 0–9 are explicit in the source; 10–28 match the source table's listed order. TPSDKStatus collisions are resolved by the 200+raw mapping. `NotRegistered` appears only in the samples, never in the table; it surfaces as `Unknown(n)`.
+
+### Second source pass: independent review of the bridge against the PDF (2026-11-15; all fixed)
+- [x] **R7-SRC9** The doctor "Lacerte COM ProgID" probe still required the undocumented `LacerteSDK_Access.TPRegistration` ProgID, so it failed on a correct install. It now probes only `LacerteSDK_Access.LacerteAccess`.
+- [x] **R7-SRC10** Live detail-write dry runs previewed Success while the commit always returns 9202. The preview now refuses with the same shared `Writer.LiveDetailWriteRefusal`.
+- [x] **R7-SRC11** `IClient.TaxType = int` via `dynamic` throws on a managed SDK object (no implicit int→enum conversion). `LacerteAccessClient.SetTaxType` now uses `Enum.ToObject` on the managed enum property, and falls back to the int for a COM RCW.
+- [x] **R7-SRC12** The 9202 text told operators to "set LACERTE_LIVE=1" (backwards). It now says the live path is not wired. The 9019 remediation no longer sends callers into a guaranteed 9202. Stale `WriteToDetailFile` / `IClient(...)` text was fixed, along with the ConnectionStringBuilder doc comments and the prompt's "blank TSJ = unspecified" (the SDK says blank = Joint).
+- [x] **R7-SRC13** The Integer columns rejected neither a lone "-" nor out-of-range digit strings. Series wasn't numeric-checked at the chokepoint. Both are fixed.
+- [x] **R7-SRC14** The field-access map shipped empty despite the 2026-05-30 decision ("ship hard-coded entries from spec"). The PDF's literal access rows and the TY21 not-supported lists (I and P) now ship. Range rules are documented but stay fail-closed (FieldAccessMap README).
+- [x] **R7-36** `FieldAccessMapLoader.SchemaRoot()` used `Assembly.Location`, which under a shadow-copying host (the net48 xUnit runner) is a temp folder without the JSON tree. The loader silently saw an empty map, which is why the shipped-shard coverage test only ever passed vacuously. It now probes CodeBase, then the AppDomain base directory, then Location. The shard-mutating test fixtures now target `GetSchemaRoot()`.
+- Known PDF-internal ambiguities (not code defects; the code follows the parameter lists, and the live smoke test will settle them):
+  - The C# `UpdateTaxReturn` sample's argument order differs from its parameter list.
+  - The C# `WriteToDBFDatabase` sample has 6 args.
+  - The TY21 DATA2 name is given as `-Detail-SubClientInfo` in the list but `-SubClientInfo` in the sample.
+  - The pre-TY21 DATA4 sample says `[DATA4-Subclient State Info]`, but the table list says "State Subclient Info".
+  - The `TaxModule` / TPSDKStatus 1–4 integers are positional.
+
+### Final review of the source batch (2026-11-15; all fixed)
+- [x] **R7-SRC15** Base `C1_G38` ReadWrite plus the exact-year TY21 overlay meant TY22+ failed OPEN for a field the PDF removes from TY21. It is dropped from base and stays fail-closed (9012).
+- [x] **R7-SRC16** The doctor shard probe reported green with only the SDK-PDF baseline present, while most fields still return 9012. It now Warns, with remediation, until entries beyond the `sdk-pdf` baseline exist.
+- [x] **R7-SRC17** The schema JSON is copied with `Always`, not `PreserveNewest`, so a bin copy left stale by an aborted shard-mutating fixture is refreshed on the next build.
+- [x] Stale text fixed: loader probe-order comment, `DetailRow.TSJ` comment, SKILL TSJ set, bulk replaceIndex wording. The detail-write tools and the onboarding prompt now say that live detail writes return 9202.
+- Decision recorded: the appendix's global-field rows ship for Individual and Partnership only; other modules stay fail-closed for those fields.
+
+### Confirmation review of adf42e1 (2026-11-15; all fixed)
+- [x] **R7-37 (latent fail-open)** `FieldEntry` / `OverlayEntry` bound a missing `"access"` to `default(FieldAccess)` == ReadWrite, so such an entry loaded as writable. Both are now `[JsonRequired]`; the loader handles the resulting JsonException fail-closed.
+- [x] **R7-38** The doctor shard probe:
+  - checks property names case-insensitively, since the CLI and dumper write PascalCase and a `field-access set` round-trip used to flip it to Pass;
+  - reports entries the loader can't deserialize (non-object value, bad enum, missing access) as Fail, because the loader drops the whole shard for them;
+  - no longer recommends the stubbed dumper `--live`.
+- [x] **R7-39** In a dev checkout, `SchemaDirResolver` now targets the **server's** build output (`src/LacertMCP.Server/bin/<plat>/<cfg>/Schema/FieldAccessMap`), the tree the dev server reads. Before, `field-access set` and doctor used the CLI's own bin copy, and the claim that "CLI and server share one output folder" was false.
+- [x] The README no longer advises a base-map `field-access set` for `C1_G38`; it says to use a per-year overlay entry. The bulk detail-write description now states the stop-on-error behaviour, and the HANDOFF DECISIONS count is corrected.
+
+### Confirmation review of 058d52b (2026-11-15; all fixed)
+- [x] **R7-40** Doctor re-implemented the loader's parsing and kept drifting from it: it passed wrongly-typed fields the loader rejects, failed numeric `access` values the loader accepts, and didn't validate overlays at all. Doctor now validates with the loader's own parse path (`FieldAccessMapLoader.ValidateShardFile` / `ValidateOverlayFile`, built on the shared `ParseShard` / `ParseOverlay`), so the two agree by construction. Overlays are validated too, and an overlay file the loader never reads (not `ty{yy}-not-supported.json`) is a Warn.
+- [x] **R7-40b** A `null` shard or overlay entry used to load as a null record and would have thrown NullReferenceException in `GetFieldAccess`. It is now a parse error, handled fail-closed.
+- [x] **R7-41** The dumper's `LoadExisting` swallowed a parse error and "started fresh", silently dropping every existing row on rewrite. It now refuses, with a clear error.
+- [x] The doctor Fail message now describes the real effect, and its remediation no longer points at the stubbed dumper. The README overlay instructions name the only file the loader reads. The `--schema-dir` help and the doc comments describe the dev-checkout tier, and the garbled ShardPath summary is fixed.
+- [x] **R7-40c** Out-of-range numeric `access` (e.g. 99) loaded as an undefined enum value and passed doctor. `ParseShard` / `ParseOverlay` now reject undefined values, so the loader fails closed and doctor reports Fail.

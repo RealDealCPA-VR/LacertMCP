@@ -41,7 +41,7 @@ namespace LacertMCP.Tests.Tools
                 "lacerte-field-history-tests-" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(_tempDir);
             _logFile = Path.Combine(_tempDir,
-                "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd") + ".log");
+                "lacerte-" + DateTime.UtcNow.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture) + ".log");
             _wireWasEnabled = WireLog.IsEnabled;
         }
 
@@ -143,13 +143,13 @@ namespace LacertMCP.Tests.Tools
             {
                 // Write three lines: two matching WriteField for client/field,
                 // one mismatched field, one inner Bridge.WriteField mirror.
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = new[]
                 {
-                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***", dryRun: false, result: 0, durationMs: 12),
-                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***", dryRun: true,  result: 0, durationMs: 8),
-                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_99", "***", dryRun: false, result: 0, durationMs: 6),
-                    BuildWriteFieldLine(today, "Bridge.WriteField", "1001", "C1_3", "***", dryRun: false, result: 0, durationMs: 4),
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***", dryRun: false, result: 1, durationMs: 12),
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***", dryRun: true,  result: 1, durationMs: 8),
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_99", "***", dryRun: false, result: 1, durationMs: 6),
+                    BuildWriteFieldLine(today, "Bridge.WriteField", "1001", "C1_3", "***", dryRun: false, result: 1, durationMs: 4),
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
@@ -178,10 +178,10 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = Enumerable.Range(0, 5).Select(i =>
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                        dryRun: false, result: 1, durationMs: i)).ToArray();
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
                 WriteLogLinesWithRetry(lines);
@@ -211,7 +211,7 @@ namespace LacertMCP.Tests.Tools
                     BuildWriteFieldLine(
                         baseTime.AddHours(i).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                         "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                        dryRun: false, result: 1, durationMs: i)).ToArray();
                 WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
@@ -237,7 +237,7 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var errorLine = JsonSerializer.Serialize(new
                 {
                     ts = today,
@@ -253,7 +253,7 @@ namespace LacertMCP.Tests.Tools
                 var lines = new[]
                 {
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 5),
+                        dryRun: false, result: 1, durationMs: 5),
                     errorLine,
                 };
                 WriteLogLinesWithRetry(lines);
@@ -293,10 +293,10 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = Enumerable.Range(0, 3).Select(i =>
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                        dryRun: false, result: 1, durationMs: i)).ToArray();
                 WriteLogLinesWithRetry(lines);
 
                 var tools = new FieldHistoryTools();
@@ -317,10 +317,10 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = Enumerable.Range(0, 3).Select(i =>
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: i)).ToArray();
+                        dryRun: false, result: 1, durationMs: i)).ToArray();
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
                 WriteLogLinesWithRetry(lines);
@@ -342,14 +342,14 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = new[]
                 {
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 5),
+                        dryRun: false, result: 1, durationMs: 5),
                     "{ not valid json {{",
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 10),
+                        dryRun: false, result: 1, durationMs: 10),
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
@@ -371,17 +371,17 @@ namespace LacertMCP.Tests.Tools
             WireLog.EnableForTests(_tempDir);
             try
             {
-                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
                 var lines = new[]
                 {
                     BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 5),
+                        dryRun: false, result: 1, durationMs: 5),
                     BuildWriteFieldLine(today, "Bridge.WriteField", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 6),
+                        dryRun: false, result: 1, durationMs: 6),
                     BuildWriteFieldLine(today, "Bridge.UpdateTaxReturn", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 7),
+                        dryRun: false, result: 1, durationMs: 7),
                     BuildWriteFieldLine(today, "Bridge.WriteToDBFDatabase", "1001", "C1_3", "***",
-                        dryRun: false, result: 0, durationMs: 8),
+                        dryRun: false, result: 1, durationMs: 8),
                 };
                 // Flush any cached writer for our path before writing so
                 // a sibling test's stale handle can't block File.WriteAllLines.
@@ -411,6 +411,46 @@ namespace LacertMCP.Tests.Tools
         // ----------------------------------------------------------------
         // Helpers
         // ----------------------------------------------------------------
+
+        // R7 — a logged write whose numeric `result` is a non-Success
+        // TAPIStatus (older builds returned it instead of throwing, so no
+        // `error` object exists) must surface as succeeded=false with the
+        // status reported by name; result == StatusCodes.Success stays true.
+        [Fact]
+        public async Task FieldHistory_NonSuccessResult_SurfacesSucceededFalse_R7()
+        {
+            WireLog.EnableForTests(_tempDir);
+            try
+            {
+                var today = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+                var lines = new[]
+                {
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
+                        dryRun: false, result: LacertMCP.Server.Errors.StatusCodes.Success, durationMs: 5),
+                    BuildWriteFieldLine(today, "WriteField", "1001", "C1_3", "***",
+                        dryRun: false, result: LacertMCP.Server.Errors.StatusCodes.DBFNotAccessable, durationMs: 6),
+                };
+                WriteLogLinesWithRetry(lines);
+
+                var tools = new FieldHistoryTools();
+                var root = ToolTestHelpers.Parse(
+                    await tools.LacerteFieldHistory("1001", "C1_3"));
+                Assert.True(root.GetProperty("success").GetBoolean());
+                var rows = root.GetProperty("result").GetProperty("rows").EnumerateArray().ToArray();
+                Assert.Equal(2, rows.Length);
+
+                var ok = rows.Single(r => r.GetProperty("durationMs").GetInt64() == 5);
+                Assert.True(ok.GetProperty("succeeded").GetBoolean());
+                Assert.Equal("Success", ok.GetProperty("statusName").GetString());
+                Assert.Equal(JsonValueKind.Null, ok.GetProperty("error").ValueKind);
+
+                var rejected = rows.Single(r => r.GetProperty("durationMs").GetInt64() == 6);
+                Assert.False(rejected.GetProperty("succeeded").GetBoolean());
+                Assert.Equal("DBFNotAccessable", rejected.GetProperty("statusName").GetString());
+                Assert.Contains("DBFNotAccessable", rejected.GetProperty("error").GetString());
+            }
+            finally { WireLog.DisableForTests(); }
+        }
 
         private static string BuildWriteFieldLine(
             string ts, string op, string clientNumber, string field,

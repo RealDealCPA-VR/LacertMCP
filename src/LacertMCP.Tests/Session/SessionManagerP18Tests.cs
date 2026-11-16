@@ -71,7 +71,7 @@ namespace LacertMCP.Tests.Session
             using var mgr = await NewRegisteredSim();
             var before = (await mgr.ReadDetail("1001")).Count;
 
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 4242.0, "p18-dry-then-real");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 4242.0, "p18-dry-then-real");
 
             // Preview.
             var preview = await mgr.WriteDetail("1001", row, dryRun: true, idempotencyKey: "p18-001-poison");
@@ -107,7 +107,7 @@ namespace LacertMCP.Tests.Session
         public async Task WriteDetail_TwoDryRuns_SameKeyAndArgs_StillReplays()
         {
             using var mgr = await NewRegisteredSim();
-            var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 11.0, "p18-dry-twice");
+            var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 11.0, "p18-dry-twice");
 
             var a = await mgr.WriteDetail("1001", row, dryRun: true, idempotencyKey: "p18-dry-replay");
             var b = await mgr.WriteDetail("1001", row, dryRun: true, idempotencyKey: "p18-dry-replay");
@@ -355,7 +355,7 @@ namespace LacertMCP.Tests.Session
                 await mgr.Register();
                 mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
 
-                var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 99.0, "p18-replace");
+                var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 99.0, "p18-replace");
                 await mgr.WriteDetail("1001", row, idempotencyKey: "p18-replace-1");
                 Assert.True(File.Exists(canonical));
 
@@ -409,7 +409,7 @@ namespace LacertMCP.Tests.Session
 
             // Now WriteDetail with that key. The first GetOrAdd installs a
             // fresh semaphore (the disposed one is gone). Wait must succeed.
-            var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 1.0, "dispose-race");
+            var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 1.0, "dispose-race");
             var status = await mgr.WriteDetail("1001", row, idempotencyKey: key);
             Assert.Equal(StatusCodes.Success, status);
         }
@@ -439,7 +439,7 @@ namespace LacertMCP.Tests.Session
             disposed.Dispose();
             locks[key] = disposed;
 
-            var row = new DetailRow("S", "", "1", "", "", "", "", "", "", 2.0, "preinstall-disposed");
+            var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 2.0, "preinstall-disposed");
             // Must not throw ObjectDisposedException.
             var status = await mgr.WriteDetail("1001", row, idempotencyKey: key);
             Assert.Equal(StatusCodes.Success, status);
@@ -467,8 +467,8 @@ namespace LacertMCP.Tests.Session
             for (int i = 0; i < 16; i++)
             {
                 int idx = i;
-                var r1 = new DetailRow("S1", "", "1", "", "", "", "", "", "", idx + 100, $"t1-{idx}");
-                var r2 = new DetailRow("S2", "", "1", "", "", "", "", "", "", idx + 200, $"t2-{idx}");
+                var r1 = new DetailRow("1", "", "1", "", "", "", "", "", "", idx + 100, $"t1-{idx}");
+                var r2 = new DetailRow("2", "", "1", "", "", "", "", "", "", idx + 200, $"t2-{idx}");
                 tasks.Add(Task.Run(() => mgr.WriteDetail("1001", r1, dryRun: true, idempotencyKey: $"key-A-{idx}")));
                 tasks.Add(Task.Run(() => mgr.WriteDetail("1001", r2, dryRun: true, idempotencyKey: $"key-B-{idx}")));
             }
@@ -498,9 +498,9 @@ namespace LacertMCP.Tests.Session
 
             // Seed at least 2 rows so replaceIndex=0 is valid.
             await mgr.WriteDetail("1001",
-                new DetailRow("Seed1", "", "1", "", "", "", "", "", "", 1.0, "seed-A"));
+                new DetailRow("901", "", "1", "", "", "", "", "", "", 1.0, "seed-A"));
             await mgr.WriteDetail("1001",
-                new DetailRow("Seed2", "", "1", "", "", "", "", "", "", 2.0, "seed-B"));
+                new DetailRow("902", "", "1", "", "", "", "", "", "", 2.0, "seed-B"));
             var preRows = (await mgr.ReadDetail("1001")).ToList();
             var preRow0 = preRows[0];
 
@@ -509,8 +509,8 @@ namespace LacertMCP.Tests.Session
             for (int i = 0; i < 16; i++)
             {
                 int idx = i;
-                var r1 = new DetailRow("R1", "", "1", "", "", "", "", "", "", idx + 300, $"r1-{idx}");
-                var r2 = new DetailRow("R2", "", "1", "", "", "", "", "", "", idx + 400, $"r2-{idx}");
+                var r1 = new DetailRow("903", "", "1", "", "", "", "", "", "", idx + 300, $"r1-{idx}");
+                var r2 = new DetailRow("904", "", "1", "", "", "", "", "", "", idx + 400, $"r2-{idx}");
                 tasks.Add(Task.Run(() => mgr.WriteDetail("1001", r1, replaceIndex: 0, dryRun: true, idempotencyKey: $"r5-A-{idx}")));
                 tasks.Add(Task.Run(() => mgr.WriteDetail("1001", r2, replaceIndex: 0, dryRun: true, idempotencyKey: $"r5-B-{idx}")));
             }
@@ -543,7 +543,7 @@ namespace LacertMCP.Tests.Session
                 int idx = i;
                 var dryRun = (idx % 2 == 0);
                 if (!dryRun) Interlocked.Increment(ref realCount);
-                var row = new DetailRow($"Mix{idx}", "", "1", "", "", "", "", "", "", idx + 500, $"mix-{idx}");
+                var row = new DetailRow((1000 + idx).ToString(System.Globalization.CultureInfo.InvariantCulture), "", "1", "", "", "", "", "", "", idx + 500, $"mix-{idx}");
                 tasks[i] = Task.Run(() => mgr.WriteDetail("1001", row, dryRun: dryRun));
             }
             await Task.WhenAll(tasks);

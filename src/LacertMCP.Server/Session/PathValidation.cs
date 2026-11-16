@@ -111,6 +111,24 @@ namespace LacertMCP.Server.Session
                 throw Reject(dataPath, "dataPath must be absolute (e.g. C:\\Lacerte\\24Tax\\IData).");
             }
 
+            // R7-20 — Path.IsPathRooted is also true for two Windows forms
+            // that are NOT absolute and resolve against process state:
+            //   "C:Lacerte\24Tax"  — drive-relative (current dir on drive C)
+            //   "\Lacerte\24Tax"   — rooted without a drive (current drive)
+            // GetFullPath silently expanded those against the server's
+            // working directory, so the documented "reject relative paths"
+            // rule had two holes.
+            bool driveRelative = dataPath.Length >= 2
+                && char.IsLetter(dataPath[0]) && dataPath[1] == ':'
+                && (dataPath.Length == 2 || (dataPath[2] != '\\' && dataPath[2] != '/'));
+            bool rootedWithoutDrive = !isUnc
+                && Environment.OSVersion.Platform == PlatformID.Win32NT
+                && (dataPath[0] == '\\' || dataPath[0] == '/');
+            if (driveRelative || rootedWithoutDrive)
+            {
+                throw Reject(dataPath, "dataPath must be a fully-qualified absolute path including the drive (e.g. C:\\Lacerte\\24Tax\\IData) — drive-relative and drive-less rooted paths resolve against the server's working directory.");
+            }
+
             // Canonicalize. GetFullPath throws on malformed input (illegal
             // chars per Path.GetInvalidPathChars, mixed-quoted, etc) — we
             // surface as a structured rejection rather than letting the raw

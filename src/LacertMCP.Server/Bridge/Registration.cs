@@ -57,43 +57,22 @@ namespace LacertMCP.Server.Bridge
                     });
             }
 
-            // Live verification deferred to Windows + Lacerte box.
-            object? regInstance;
+            // R7-SRC — per the SDK Developer Instructions ("Steps to perform
+            // registration"): create ILacerteAccess, obtain ITPRegistration via
+            // CreateTPRegister(), then Register(ThirdPartyName, AppID, TaxYear)
+            // where all three parameters are String. The TPSDKStatus enum
+            // (ConsentDenied = 0, AccessGranted, VersionBlocked, NotSignedIn,
+            // LacerteTaxSetupRequired) is translated to the server's 200..204
+            // namespace (see SdkAccess.MapTpsdkStatus).
+            using var handle = SdkAccess.Acquire("Registration.Register", "CreateTPRegister");
             try
             {
-                var t = Type.GetTypeFromProgID("LacerteSDK_Access.TPRegistration");
-                if (t == null)
-                {
-                    throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                        new Dictionary<string, object?>
-                        {
-                            ["op"] = "Registration.Register",
-                            ["reason"] = "LacerteSDK_Access.TPRegistration ProgID not registered. Install the Lacerte SDK and run `lacerte-mcp doctor`.",
-                        });
-                }
-                regInstance = Activator.CreateInstance(t);
+                dynamic reg = handle.Target;
+                int raw = (int)reg.Register(
+                    appName, appId, taxYear.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return SdkAccess.MapTpsdkStatus(raw);
             }
-            catch (LacerteSDKError)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
-                    new Dictionary<string, object?>
-                    {
-                        ["op"] = "Registration.Register",
-                        ["reason"] = ex.Message,
-                    }, ex);
-            }
-
-            try
-            {
-                // Late-bound call against ITPRegistration.Register(AppName, AppID, TaxYear).
-                dynamic reg = regInstance!;
-                int status = (int)reg.Register(appName, appId, taxYear);
-                return status;
-            }
+            catch (LacerteSDKError) { throw; }
             catch (Exception ex)
             {
                 throw new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable,
@@ -104,25 +83,6 @@ namespace LacertMCP.Server.Bridge
                         ["taxYear"] = taxYear,
                         ["reason"] = ex.Message,
                     }, ex);
-            }
-            finally
-            {
-                // R6-14 / P14-004 — release the TPRegistration RCW per-call.
-                // AutoReconnect retries (up to 4 instantiations per register)
-                // plus the 24h re-register cadence multiplied the leak.
-                // Marshal.IsComObject guards against managed fakes substituted
-                // by tests/harnesses.
-                if (regInstance != null)
-                {
-                    try
-                    {
-                        if (System.Runtime.InteropServices.Marshal.IsComObject(regInstance))
-                        {
-                            System.Runtime.InteropServices.Marshal.ReleaseComObject(regInstance);
-                        }
-                    }
-                    catch (Exception) { /* best-effort */ }
-                }
             }
         }
 

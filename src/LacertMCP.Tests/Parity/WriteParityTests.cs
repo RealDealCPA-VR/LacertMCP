@@ -176,7 +176,7 @@ namespace LacertMCP.Tests.Parity
         public async Task WriteDetail_ReadOnlySession_ThrowsFieldIsReadOnly(SessionMode mode)
         {
             using var mgr = NewWithContext(mode, readOnly: true);
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "x");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "x");
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteDetail("1001", row));
             Assert.Equal(SyntheticStatusCodes.FieldIsReadOnly, err.StatusCode);
@@ -186,7 +186,7 @@ namespace LacertMCP.Tests.Parity
         public async Task WriteDetail_BadReplaceIndex_ThrowsOutOfIndex(SessionMode mode)
         {
             using var mgr = NewWithContext(mode);
-            var row = new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", 1.0, "x");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "x");
             var err = await Assert.ThrowsAsync<LacerteSDKError>(async () =>
                 await mgr.WriteDetail("1001", row, replaceIndex: 99999));
             Assert.Equal(StatusCodes.OutOfIndex, err.StatusCode);

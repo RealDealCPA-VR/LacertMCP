@@ -180,7 +180,7 @@ namespace LacertMCP.Tests.Session
         {
             var store = new SimulationStore();
             var ctx = new SimulationContext(SeedData.DataPathCData2024, 2024, 'C');
-            var rows = store.ProcessQuery("select * from [1001-StateClientInfo]", ctx);
+            var rows = store.ProcessQuery("select * from [1001-Detail-ClientStateInfo]", ctx);
             // ACME has CA + NY → 2 state rows.
             Assert.Equal(2, rows.Count);
         }

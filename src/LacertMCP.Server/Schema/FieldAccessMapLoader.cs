@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -275,6 +276,35 @@ namespace LacertMCP.Server.Schema
             }
         }
 
+        /// <summary>
+        /// R7-24 — every field name cataloged for (module, table) in the base
+        /// shard plus the taxYear overlay, from one snapshot generation.
+        /// <c>lacerte_field_access_map</c> previously probed only a fixed
+        /// C{t}_0..25 + _G1..G3 grid, so real codes such as C1_71 could never
+        /// appear — and the workflow prompts treat "absent from fields" as the
+        /// STOP signal. Returned names are upper-case, de-duplicated, sorted.
+        /// </summary>
+        public static IReadOnlyList<string> GetCatalogedFields(char module, int table, int taxYear)
+        {
+            var snap = Volatile.Read(ref _snapshot);
+            var prefix = module + "|" + TableString(table) + "|";
+            var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            void Collect(IEnumerable<string> keys)
+            {
+                foreach (var k in keys)
+                {
+                    if (k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && k.Length > prefix.Length)
+                    {
+                        names.Add(k.Substring(prefix.Length).ToUpperInvariant());
+                    }
+                }
+            }
+            Collect(LoadModule(snap, module).Keys);
+            var overlay = LoadOverlay(snap, taxYear);
+            if (overlay != null) Collect(overlay.Overrides.Keys);
+            return names.ToList();
+        }
+
         // ---- Internals ----
 
         private static IReadOnlyDictionary<string, FieldEntry> LoadModule(AccessMapSnapshot snap, char module)
@@ -319,8 +349,7 @@ namespace LacertMCP.Server.Schema
                 {
                     using (var stream = File.OpenRead(path))
                     {
-                        var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions);
-                        return (IReadOnlyDictionary<string, FieldEntry>)(map ?? new Dictionary<string, FieldEntry>());
+                        return ParseShard(stream);
                     }
                 }
                 catch (JsonException)
@@ -355,6 +384,86 @@ namespace LacertMCP.Server.Schema
         /// by manifest authoring discipline, not by the loader.
         /// </para>
         /// </summary>
+        /// <summary>
+        /// R7-40 — the ONE parse path for a base shard, shared by the loader and
+        /// <c>lacerte-mcp doctor</c> (via <see cref="ValidateShardFile"/>) so the
+        /// two can never disagree about what loads. Throws <see cref="JsonException"/>
+        /// for anything the loader must reject — including a <c>null</c> entry
+        /// value, which previously loaded as a null FieldEntry and would have
+        /// thrown NullReferenceException inside GetFieldAccess.
+        /// </summary>
+        internal static IReadOnlyDictionary<string, FieldEntry> ParseShard(Stream stream)
+        {
+            var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions)
+                      ?? new Dictionary<string, FieldEntry>();
+            foreach (var kv in map)
+            {
+                if (kv.Value == null) throw new JsonException($"entry '{kv.Key}' is null.");
+                // JsonStringEnumConverter accepts ANY integer (e.g. 99); an
+                // undefined FieldAccess would fall through AssertWritable's
+                // default branch as a generic Error. Reject it here so the
+                // loader (fail-closed) and doctor (Fail) agree.
+                if (!Enum.IsDefined(typeof(FieldAccess), kv.Value.Access))
+                    throw new JsonException($"entry '{kv.Key}' has undefined access value {(int)kv.Value.Access}.");
+            }
+            return map;
+        }
+
+        /// <summary>R7-40 — the ONE parse path for an overlay file (see <see cref="ParseShard"/>).</summary>
+        internal static TaxYearOverlay ParseOverlay(Stream stream, int year)
+        {
+            var raw = JsonSerializer.Deserialize<OverlayFile>(stream, _jsonOptions);
+            if (raw == null)
+            {
+                return new TaxYearOverlay(year, new Dictionary<string, OverlayEntry>());
+            }
+            var overrides = raw.Overrides ?? new Dictionary<string, OverlayEntry>();
+            foreach (var kv in overrides)
+            {
+                if (kv.Value == null) throw new JsonException($"override '{kv.Key}' is null.");
+                if (!Enum.IsDefined(typeof(FieldAccess), kv.Value.Access))
+                    throw new JsonException($"override '{kv.Key}' has undefined access value {(int)kv.Value.Access}.");
+            }
+            return new TaxYearOverlay(raw.TaxYear == 0 ? year : raw.TaxYear, overrides);
+        }
+
+        /// <summary>
+        /// R7-40 — validate a base shard file exactly as the loader would read
+        /// it. Returns the parsed entries, or null with <paramref name="error"/>
+        /// set when the loader would treat the shard as empty. A blank file is
+        /// valid (zero entries), matching the loader.
+        /// </summary>
+        public static IReadOnlyDictionary<string, FieldEntry>? ValidateShardFile(string path, out string? error)
+        {
+            error = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(File.ReadAllText(path))) return new Dictionary<string, FieldEntry>();
+                using (var stream = File.OpenRead(path)) return ParseShard(stream);
+            }
+            catch (JsonException ex) { error = ex.Message; return null; }
+        }
+
+        /// <summary>R7-40 — validate an overlay file exactly as the loader would read it.</summary>
+        public static TaxYearOverlay? ValidateOverlayFile(string path, out string? error)
+        {
+            error = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(File.ReadAllText(path))) return new TaxYearOverlay(0, new Dictionary<string, OverlayEntry>());
+                using (var stream = File.OpenRead(path)) return ParseOverlay(stream, 0);
+            }
+            catch (JsonException ex) { error = ex.Message; return null; }
+        }
+
+        /// <summary>
+        /// R7-40 — the overlay file naming the loader actually reads
+        /// (<c>ty{yy}-not-supported.json</c>). Any other file in overlays/ is ignored.
+        /// </summary>
+        public static bool IsLoadedOverlayFileName(string fileName)
+            => System.Text.RegularExpressions.Regex.IsMatch(fileName ?? string.Empty,
+                @"^ty[0-9]{2}-not-supported\.json\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
         private static TaxYearOverlay? LoadOverlay(AccessMapSnapshot snap, int taxYear)
         {
             return snap.Overlays.GetOrAdd(taxYear, year =>
@@ -382,13 +491,7 @@ namespace LacertMCP.Server.Schema
                 {
                     using (var stream = File.OpenRead(path))
                     {
-                        var raw = JsonSerializer.Deserialize<OverlayFile>(stream, _jsonOptions);
-                        if (raw == null)
-                        {
-                            return new TaxYearOverlay(year, new Dictionary<string, OverlayEntry>());
-                        }
-                        var overrides = raw.Overrides ?? new Dictionary<string, OverlayEntry>();
-                        return new TaxYearOverlay(raw.TaxYear == 0 ? year : raw.TaxYear, overrides);
+                        return ParseOverlay(stream, year);
                     }
                 }
                 catch (JsonException)
@@ -405,9 +508,44 @@ namespace LacertMCP.Server.Schema
         {
             // Schema/FieldAccessMap lives next to the running assembly. The
             // csproj copies the JSON tree to the build output.
-            var asmPath = typeof(FieldAccessMapLoader).Assembly.Location;
-            var asmDir = Path.GetDirectoryName(asmPath) ?? Directory.GetCurrentDirectory();
-            return Path.Combine(asmDir, "Schema", "FieldAccessMap");
+            //
+            // R7-36 — under a shadow-copying host (the net48 xUnit runner;
+            // any AppDomain with ShadowCopyFiles) Assembly.Location is a temp
+            // cache folder WITHOUT the content tree, so the loader silently saw
+            // an empty map — every lookup Unknown — which hid the shipped shards
+            // from the test suite. Probe several candidate folders (order below)
+            // and use the first that actually contains the tree.
+            // Order: the ORIGINAL assembly folder (CodeBase — the real
+            // install / bin folder even under shadow copy) first, then the
+            // AppDomain base directory, then Assembly.Location (the shadow
+            // cache, if any). A shadow cache must never win: test fixtures or
+            // tools may create a partial tree there.
+            var asm = typeof(FieldAccessMapLoader).Assembly;
+            var candidates = new List<string>();
+            try
+            {
+#pragma warning disable SYSLIB0012 // CodeBase is the pre-shadow-copy location on net48
+                var codeBase = asm.CodeBase;
+#pragma warning restore SYSLIB0012
+                if (!string.IsNullOrEmpty(codeBase) && Uri.TryCreate(codeBase, UriKind.Absolute, out var uri) && uri.IsFile)
+                {
+                    var cbDir = Path.GetDirectoryName(uri.LocalPath);
+                    if (!string.IsNullOrEmpty(cbDir)) candidates.Add(cbDir!);
+                }
+            }
+            catch (Exception) { /* CodeBase can throw for dynamic assemblies */ }
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (!string.IsNullOrEmpty(baseDir)) candidates.Add(baseDir);
+            var asmDir = Path.GetDirectoryName(asm.Location);
+            if (!string.IsNullOrEmpty(asmDir)) candidates.Add(asmDir!);
+
+            foreach (var dir in candidates)
+            {
+                var root = Path.Combine(dir, "Schema", "FieldAccessMap");
+                if (Directory.Exists(root)) return root;
+            }
+            return Path.Combine(candidates.Count > 0 ? candidates[0] : Directory.GetCurrentDirectory(),
+                "Schema", "FieldAccessMap");
         }
 
         /// <summary>

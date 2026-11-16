@@ -1,3 +1,5 @@
+> **R7 correction (2026-11-15):** the Intuit SDK Developer Instructions (primary source) use `DataDir=` (not `Datapath=`) and a **four-digit** `TaxYear=` in the connection string, and the TY21+ state tables are `[<client>-Detail-ClientStateInfo]` / `[<client>-Detail-SubClientStateInfo]`. See the corrections section at the end of `Lacerte_MCP_Structure_Spec.md`; the code follows the primary source.
+
 # 03 — ODBC / DBF Access Plan for Lacerte MCP
 
 Concrete plan for the ODBC layer of the Lacerte MCP server. Source spec:

@@ -323,10 +323,9 @@ namespace LacertMCP.Cli.Commands
             // 1. OS / Windows version
             if (onWindows)
             {
-                var v = Environment.OSVersion.Version;
                 results.Add(new ProbeResult("Windows version",
                     ProbeStatus.Pass,
-                    $"Windows NT {v.Major}.{v.Minor}.{v.Build}"));
+                    DescribeWindowsVersion()));
             }
             else
             {
@@ -350,11 +349,14 @@ namespace LacertMCP.Cli.Commands
 
             // 2b. P15-032: App.config runtime shim. The mixed-mode LacerteSDK_Access
             //     CLR requires the legacy v2 runtime activation policy + supportedRuntime
-            //     declaration in LacertMCP.Server.exe.config. Without it,
+            //     declaration in the HOST exe's config. Without it,
             //     `new LacerteSDK_Access.LacerteAccess()` throws on construction and
             //     the operator sees a raw COM HRESULT via BridgeUnavailable — NOT
-            //     "App.config missing." Probe ships with the .exe regardless of OS
-            //     (it's a build-output check, not Windows-only), so we always run it.
+            //     "App.config missing." Both LacertMCP.Server.exe.config (the MCP
+            //     server) and lacerte-mcp.exe.config (register/login activate
+            //     LacerteAccess → CreateTPRegister() in-process) need it. Probe ships with the .exe
+            //     regardless of OS (it's a build-output check, not Windows-only),
+            //     so we always run it.
             results.Add(ProbeAppConfigShim());
 
             // 3. .NET Framework 4.8 installed (Windows-only check)
@@ -470,16 +472,53 @@ namespace LacertMCP.Cli.Commands
         {
             try
             {
-                var configPath = ResolveServerConfigPath();
-                return ProbeAppConfigShimAt(configPath);
+                return ProbeAppConfigShims(ResolveServerConfigPath(), ResolveCliConfigPath());
             }
             catch (Exception ex)
             {
                 return new ProbeResult("App.config shim",
                     ProbeStatus.Fail,
                     "probe threw: " + ex.Message,
-                    "Verify LacertMCP.Server.exe.config is readable next to LacertMCP.Server.exe (see ARCHITECTURE.md \"Build & Runtime\").");
+                    "Verify LacertMCP.Server.exe.config and lacerte-mcp.exe.config are readable next to their executables (see ARCHITECTURE.md \"Build & Runtime\").");
             }
+        }
+
+        /// <summary>
+        /// Path to the CLI's OWN exe config (<c>lacerte-mcp.exe.config</c>) — the config
+        /// the runtime applies to this process, which is what matters when
+        /// <c>register</c>/<c>login</c> activate <c>LacerteSDK_Access.LacerteAccess</c> (→ <c>CreateTPRegister()</c>)
+        /// in-process. Resolved from the CLI assembly's location (equal to
+        /// <c>AppDomain.CurrentDomain.SetupInformation.ConfigurationFile</c> when running
+        /// as lacerte-mcp.exe, and still pointing at the CLI's config under a test host).
+        /// </summary>
+        public static string ResolveCliConfigPath()
+        {
+            // Shadow-copy-proof original path (see SchemaDirResolver.CliAssemblyPath).
+            var asmPath = SchemaDirResolver.CliAssemblyPath();
+            return string.IsNullOrEmpty(asmPath) ? string.Empty : asmPath + ".config";
+        }
+
+        /// <summary>
+        /// Combined shim probe: BOTH the server's and the CLI's exe configs must carry the
+        /// shim. Red if either fails; the detail names which file(s) are broken. Public +
+        /// path-injectable for tests.
+        /// </summary>
+        public static ProbeResult ProbeAppConfigShims(string serverConfigPath, string cliConfigPath)
+        {
+            var server = ProbeAppConfigShimAt(serverConfigPath);
+            var cli = ProbeAppConfigShimAt(cliConfigPath);
+            if (server.Status == ProbeStatus.Pass && cli.Status == ProbeStatus.Pass)
+            {
+                return new ProbeResult(server.Name, ProbeStatus.Pass,
+                    "runtime shim present in LacertMCP.Server.exe.config and lacerte-mcp.exe.config (useLegacyV2RuntimeActivationPolicy=true, supportedRuntime v4.0)");
+            }
+
+            var problems = new List<string>();
+            if (server.Status != ProbeStatus.Pass) problems.Add("server (LacertMCP.Server.exe.config): " + server.Detail);
+            if (cli.Status != ProbeStatus.Pass) problems.Add("CLI (lacerte-mcp.exe.config — register/login COM activation): " + cli.Detail);
+            return new ProbeResult(server.Name, ProbeStatus.Fail,
+                string.Join("; ", problems),
+                server.Status != ProbeStatus.Pass ? server.Remediation : cli.Remediation);
         }
 
         /// <summary>
@@ -524,9 +563,10 @@ namespace LacertMCP.Cli.Commands
             const string CanonicalRemediation =
                 "Restore App.config per ARCHITECTURE.md \"Build & Runtime\" — the file " +
                 "is load-bearing for the mixed-mode CLR shim and must ship next to " +
-                "LacertMCP.Server.exe with <startup useLegacyV2RuntimeActivationPolicy=\"true\"> " +
+                "LacertMCP.Server.exe AND lacerte-mcp.exe (as <exe>.config) with " +
+                "<startup useLegacyV2RuntimeActivationPolicy=\"true\"> " +
                 "and <supportedRuntime version=\"v4.0\" />. See src/LacertMCP.Server/App.config " +
-                "for the canonical 14-line file.";
+                "(and src/LacertMCP.Cli/App.config) for the canonical file.";
 
             if (string.IsNullOrEmpty(configPath))
             {
@@ -540,7 +580,7 @@ namespace LacertMCP.Cli.Commands
             {
                 return new ProbeResult(Name,
                     ProbeStatus.Fail,
-                    $"LacertMCP.Server.exe.config not found next to LacertMCP.Server.exe (looked at {configPath})",
+                    $"{Path.GetFileName(configPath)} not found (looked at {configPath})",
                     CanonicalRemediation);
             }
 
@@ -599,6 +639,82 @@ namespace LacertMCP.Cli.Commands
             return new ProbeResult(Name,
                 ProbeStatus.Pass,
                 "runtime shim present (useLegacyV2RuntimeActivationPolicy=true, supportedRuntime v4.0)");
+        }
+
+        /// <summary>
+        /// Real Windows version for the "Windows version" probe.
+        /// <see cref="Environment.OSVersion"/> is version-lied for processes without a
+        /// compatibility manifest (net48 exes report "6.2.9200" on Windows 8.1/10/11),
+        /// so read <c>HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion</c> instead and
+        /// fall back to OSVersion only if the registry read fails.
+        /// </summary>
+        private static string DescribeWindowsVersion()
+        {
+            var fallback = Environment.OSVersion.Version;
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    if (key != null)
+                    {
+                        return FormatWindowsVersion(
+                            key.GetValue("ProductName") as string,
+                            key.GetValue("DisplayVersion") as string ?? key.GetValue("ReleaseId") as string,
+                            key.GetValue("CurrentMajorVersionNumber") as int?,
+                            key.GetValue("CurrentMinorVersionNumber") as int?,
+                            key.GetValue("CurrentBuildNumber") as string ?? key.GetValue("CurrentBuild") as string,
+                            key.GetValue("UBR") as int?,
+                            fallback);
+                    }
+                }
+            }
+            catch
+            {
+                // Fall through to the OSVersion fallback.
+            }
+            return FormatWindowsVersion(null, null, null, null, null, null, fallback);
+        }
+
+        /// <summary>
+        /// Pure formatter for the Windows-version probe detail (public for tests).
+        /// Registry values win over <paramref name="fallback"/> (the version-lied
+        /// <see cref="Environment.OSVersion"/>). Corrects the well-known quirk where
+        /// Windows 11 still stores <c>ProductName = "Windows 10 ..."</c>: build &gt;= 22000
+        /// on major 10 is Windows 11.
+        /// </summary>
+        public static string FormatWindowsVersion(
+            string? productName,
+            string? displayVersion,
+            int? major,
+            int? minor,
+            string? buildNumber,
+            int? ubr,
+            Version fallback)
+        {
+            int build = 0;
+            var haveBuild = !string.IsNullOrWhiteSpace(buildNumber)
+                && int.TryParse(buildNumber!.Trim(), System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out build);
+
+            if (major == null || !haveBuild)
+            {
+                // Not enough registry data — report the (possibly version-lied) OSVersion.
+                return $"Windows NT {fallback.Major}.{fallback.Minor}.{fallback.Build} (from Environment.OSVersion; registry version unavailable)";
+            }
+
+            var version = $"{major}.{minor ?? 0}.{build}" + (ubr.HasValue ? "." + ubr.Value : string.Empty);
+
+            var name = string.IsNullOrWhiteSpace(productName) ? "Windows" : productName!.Trim();
+            if (major == 10 && build >= 22000 && name.StartsWith("Windows 10", StringComparison.OrdinalIgnoreCase))
+            {
+                name = "Windows 11" + name.Substring("Windows 10".Length);
+            }
+            if (!string.IsNullOrWhiteSpace(displayVersion))
+            {
+                name += " " + displayVersion!.Trim();
+            }
+            return $"{name} ({version})";
         }
 
         private static ProbeResult ProbeNetFx48()
@@ -711,24 +827,26 @@ namespace LacertMCP.Cli.Commands
         {
             try
             {
-                // Both ProgIDs from Bridge/LacerteAccessClient.cs + Bridge/Registration.cs.
-                var t1 = Type.GetTypeFromProgID("LacerteSDK_Access.TPRegistration");
-                var t2 = Type.GetTypeFromProgID("LacerteSDK_Access.LacerteAccess");
-                if (t1 != null && t2 != null)
+                // R7-SRC — per the SDK Developer Instructions the ONLY
+                // directly-creatable class is LacerteSDK_Access.LacerteAccess;
+                // ITPRegistration / IDBFReader / IDBFWriter come from its
+                // CreateTPRegister / CreateDBFReader / CreateDBFWriter
+                // factories (Bridge/SdkAccess.cs). The previous probe also
+                // required an undocumented "LacerteSDK_Access.TPRegistration"
+                // ProgID, which made doctor fail on a correctly-installed box.
+                var t = Type.GetTypeFromProgID("LacerteSDK_Access.LacerteAccess");
+                if (t != null)
                 {
                     return new ProbeResult("Lacerte COM ProgID",
                         ProbeStatus.Pass,
-                        "TPRegistration + LacerteAccess ProgIDs both resolve");
+                        "LacerteSDK_Access.LacerteAccess ProgID resolves");
                 }
 
-                var missing = new List<string>();
-                if (t1 == null) missing.Add("LacerteSDK_Access.TPRegistration");
-                if (t2 == null) missing.Add("LacerteSDK_Access.LacerteAccess");
                 return new ProbeResult("Lacerte COM ProgID",
                     ProbeStatus.Fail,
-                    "missing: " + string.Join(", ", missing),
-                    "SDK files present but COM not registered; re-run the 64-bit Lacerte SDK MSI as Administrator " +
-                    "(or `regsvr32 LacerteSDK_Access.dll` from the install dir).");
+                    "missing: LacerteSDK_Access.LacerteAccess",
+                    "SDK files present but its COM class is not registered; re-run the 64-bit Lacerte SDK MSI as Administrator " +
+                    "(the SDK is a .NET assembly — registration is done by the installer, not regsvr32).");
             }
             catch (Exception ex)
             {
@@ -847,41 +965,26 @@ namespace LacertMCP.Cli.Commands
         /// direct signal).
         ///
         /// <para>
-        /// P15-034 wired this probe through the schema-side helpers
-        /// (<see cref="FieldAccessMapLoader.GetShardCounts"/> +
-        /// <see cref="FieldAccessMapLoader.GetSchemaRoot"/>) so doctor and the loader
-        /// look at the exact same directory and use the exact same enumeration filter —
-        /// no more drift between "what doctor counts" and "what the loader can find."
+        /// The directory is resolved by <see cref="SchemaDirResolver"/> — the same tree
+        /// <c>field-access set/list</c> edit: in the release layout the server's
+        /// <c>..\server\Schema\FieldAccessMap</c> (what the MCP server actually reads),
+        /// in a dev checkout the server's build output (what the dev server reads).
+        /// Files are validated with the loader's own parse path (R7-40).
         /// </para>
         ///
         /// <para>
-        /// Severity is <b>Warn</b> (not Fail) at zero modules: the v1 base shards ship
-        /// empty by design (Phase-9 introspection pending per Todo.md), so Fail would
-        /// break the green doctor today. When Phase-9 lands and shards actually populate,
-        /// upgrade this to Fail at zero. The detail reports both module + overlay counts
-        /// AND the resolved root path so an operator can paste it into a bug report and
-        /// see at a glance whether the lookup directory is where they expect.
+        /// Severity is <b>Warn</b> when there are no shards, every shard is empty, or only
+        /// the shipped SDK-PDF baseline is present (most fields still 9012). A shard or
+        /// overlay the loader cannot load is <b>Fail</b> (see <see cref="ProbeFieldAccessMapShardsAt"/>).
+        /// The detail reports counts AND the resolved root path so an operator can paste
+        /// it into a bug report.
         /// </para>
         /// </summary>
         private static ProbeResult ProbeFieldAccessMapShards()
         {
             try
             {
-                var root = FieldAccessMapLoader.GetSchemaRoot();
-                var (modules, overlays) = FieldAccessMapLoader.GetShardCounts();
-
-                if (modules == 0)
-                {
-                    // Warn (not Fail) — see XML doc above. Surface the root path so the
-                    // operator can confirm the loader is looking where they expect.
-                    return new ProbeResult("FieldAccessMap shards",
-                        ProbeStatus.Warn,
-                        $"0 module shards under {root}\\base (every WriteField returns 9012 UnknownFieldAccess until populated); overlays={overlays}",
-                        null);
-                }
-                return new ProbeResult("FieldAccessMap shards",
-                    ProbeStatus.Pass,
-                    $"{modules} module(s), {overlays} overlay(s) under {root}");
+                return ProbeFieldAccessMapShardsAt(SchemaDirResolver.Resolve().Root);
             }
             catch (Exception ex)
             {
@@ -890,6 +993,132 @@ namespace LacertMCP.Cli.Commands
                     "probe threw: " + ex.Message,
                     "Investigate the Schema/FieldAccessMap/ directory accessibility.");
             }
+        }
+
+        /// <summary>
+        /// Pure, path-injectable shard probe (public for tests). Inspects
+        /// <c>{root}/base/*.json</c> + <c>{root}/overlays/ty*-not-supported.json</c> —
+        /// <paramref name="root"/> is the same <see cref="SchemaDirResolver"/>-resolved
+        /// tree <c>field-access set/list</c> edit (in the release layout, the server's
+        /// tree; in a dev checkout, the server's build output — see SchemaDirResolver).
+        ///
+        /// <para>Severity model (consistent with the rest of doctor: Fail = real defect,
+        /// Warn = known/advisory gap):</para>
+        /// <list type="bullet">
+        ///   <item><description><b>Fail</b> — any base shard is not parseable JSON. The
+        ///   loader silently degrades that module to "no entries", so every write to it
+        ///   returns 9012 with no other signal.</description></item>
+        ///   <item><description><b>Warn</b> — no shard files, OR every shard parses but
+        ///   holds zero entries (the v1 shipped-empty state: every WriteField returns
+        ///   9012 UnknownFieldAccess until populated).</description></item>
+        ///   <item><description><b>Warn</b> — (R7) only the shipped SDK-PDF baseline
+        ///   entries (source "sdk-pdf") are present; most fields still return 9012.</description></item>
+        ///   <item><description><b>Pass</b> — at least one entry beyond the SDK-PDF baseline.</description></item>
+        /// </list>
+        /// </summary>
+        public static ProbeResult ProbeFieldAccessMapShardsAt(string root)
+        {
+            const string Name = "FieldAccessMap shards";
+            var baseDir = Path.Combine(root, "base");
+            var overlayDir = Path.Combine(root, "overlays");
+
+            var shardFiles = Directory.Exists(baseDir)
+                ? Directory.GetFiles(baseDir, "*.json", SearchOption.TopDirectoryOnly)
+                : new string[0];
+            var overlays = Directory.Exists(overlayDir)
+                ? Directory.GetFiles(overlayDir, "ty*-not-supported.json", SearchOption.TopDirectoryOnly).Length
+                : 0;
+
+            if (shardFiles.Length == 0)
+            {
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"0 module shards under {baseDir} (every WriteField returns 9012 UnknownFieldAccess until populated); overlays={overlays}",
+                    null);
+            }
+
+            var malformed = new List<string>();
+            var totalEntries = 0;
+            // R7 — entries beyond the shipped SDK-PDF baseline (source != "sdk-pdf":
+            // operator `field-access set`, dumper introspection, manual edits).
+            var nonBaselineEntries = 0;
+            // R7-40 — validate with the LOADER's own parse path
+            // (FieldAccessMapLoader.ValidateShardFile / ValidateOverlayFile), so
+            // doctor and the server agree by construction: wrong-typed fields,
+            // null entries, bad / missing access, numeric enums — whatever the
+            // loader accepts is OK here and whatever it drops is a Fail.
+            foreach (var file in shardFiles.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                var map = LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateShardFile(file, out var err);
+                if (map == null)
+                {
+                    malformed.Add($"base/{Path.GetFileName(file)} ({err})");
+                    continue;
+                }
+                totalEntries += map.Count;
+                foreach (var kv in map)
+                {
+                    if (!string.Equals(kv.Value.Source, "sdk-pdf", StringComparison.OrdinalIgnoreCase)) nonBaselineEntries++;
+                }
+            }
+            var ignoredOverlays = new List<string>();
+            if (Directory.Exists(overlayDir))
+            {
+                foreach (var file in Directory.GetFiles(overlayDir, "*.json", SearchOption.TopDirectoryOnly)
+                             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                {
+                    var fname = Path.GetFileName(file);
+                    if (!LacertMCP.Server.Schema.FieldAccessMapLoader.IsLoadedOverlayFileName(fname))
+                    {
+                        ignoredOverlays.Add(fname);
+                        continue;
+                    }
+                    if (LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateOverlayFile(file, out var oerr) == null)
+                    {
+                        malformed.Add($"overlays/{fname} ({oerr})");
+                    }
+                }
+            }
+
+            if (malformed.Count > 0)
+            {
+                return new ProbeResult(Name,
+                    ProbeStatus.Fail,
+                    $"{malformed.Count} file(s) under {root} cannot be loaded — the server ignores each such shard / overlay entirely (base shard → every field of that module is Unknown; overlay → that year's overrides are dropped): {string.Join("; ", malformed)}",
+                    "Fix the reported entry (every entry needs a valid \"access\" value and correctly-typed fields) or restore the file from the release zip / git, then call lacerte_reload_schema on a running server.");
+            }
+
+            if (ignoredOverlays.Count > 0)
+            {
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"overlay file(s) the server never reads (only ty{{yy}}-not-supported.json is loaded): {string.Join(", ", ignoredOverlays)}",
+                    "Rename the overlay to ty<yy>-not-supported.json (one file per tax year) or remove it.");
+            }
+
+            if (totalEntries == 0)
+            {
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"{shardFiles.Length} module shard(s) under {root} but all are empty (0 entries) — every WriteField returns 9012 UnknownFieldAccess until populated; overlays={overlays}",
+                    null);
+            }
+
+            if (nonBaselineEntries == 0)
+            {
+                // R7 — only the documented SDK-PDF rows (a handful of globals +
+                // structural ReadOnly rows) are present: ordinary fields such as
+                // C1_15 still return 9012 UnknownFieldAccess. Green here would
+                // mislead the operator.
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"only the SDK-PDF baseline is present ({totalEntries} documented entries across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}) — most fields still return 9012 UnknownFieldAccess until catalogued",
+                    "Catalogue the fields you write with `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access <...>` after confirming each on the Lacerte box (the FieldAccessDumper's --live introspection is not implemented yet), then call lacerte_reload_schema.");
+            }
+
+            return new ProbeResult(Name,
+                ProbeStatus.Pass,
+                $"{totalEntries} entr{(totalEntries == 1 ? "y" : "ies")} ({nonBaselineEntries} beyond the SDK-PDF baseline) across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}");
         }
 
         /// <summary>

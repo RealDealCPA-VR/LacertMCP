@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
@@ -69,7 +70,11 @@ namespace LacertMCP.Server.Tools.Internal
             string? stateAbbrev,
             bool dryRun,
             string? idempotencyKey,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            // R7-19 — forward the calling TOOL's name to WrapToolHandler so
+            // lacerte_request_stats reports LacerteFieldWrite / LacerteUpdateReturn
+            // separately instead of merging both under "Run".
+            [CallerMemberName] string opName = "")
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -96,7 +101,7 @@ namespace LacertMCP.Server.Tools.Internal
                     verified = verification?.Verified,
                     verificationNote = verification?.Note,
                 };
-            });
+            }, opName);
         }
     }
 }

@@ -86,7 +86,8 @@ powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -Uninstall
 
 * Runs `LacertMCP.Server.exe --http` (live) at logon, restarts it if it stops, listens on `http://<Tailscale IP>:8767` and `http://localhost:8767` only, firewall open to `100.64.0.0/10` only.
 * **Control page** at `http://<Tailscale IP>:8767/`: health (live/sim, 24h sign-in countdown, ODBC driver, SDK, writable-field map, data folders, Tailscale), *Sign in to Lacerte* / *Reconnect*, **Access** (per tailnet device: No access / Read only / Read & write), connected agents with the client file each is working in, data-folder test reads, activity timeline, storage.
-* Agents: `claude mcp add --transport http lacerte http://<Tailscale IP>:8767/mcp` (give the device access on the Access tab first).
+* **Workstations (easy way):** on the workstation, in PowerShell: `irm http://<Tailscale IP>:8767/setup.ps1 | iex`. It registers the Lacerte MCP with Claude Desktop (classic + Store installs), Claude Code and Codex on that PC: no admin, no Node. Claude Code connects over HTTP directly; Claude Desktop and Codex go through a small stdio-to-HTTP bridge (`%LOCALAPPDATA%\LacerteMcpClient\bridge.ps1`, Windows PowerShell only) that reconnects by itself if the Lacerte PC restarts. The workstation then shows as **Ran setup** on the Access tab: grant it Read only or Read & write there. Re-run to update; `$env:LACERTE_MCP_UNINSTALL='1'; irm ... | iex` removes it. The control page's **Agents** tab shows the exact line with a Copy button.
+* Agents (manual): `claude mcp add --transport http lacerte http://<Tailscale IP>:8767/mcp` (give the device access on the Access tab first).
 * Each connection has its own active context, so two agents can't redirect each other's writes. Read-only devices can never write.
 * `GET /healthz` (loopback only) returns 200/503 with the same checks, for watchdogs.
 
@@ -165,7 +166,7 @@ env:
 | `LACERTE_SIMULATION` | one of LIVE / SIMULATION required | `1` off-Windows | `1` forces simulation regardless of platform. |
 | `LACERTE_DATA_PATH` | advisory only | unset | Quoted in ODBC-error remediations and probed by `lacerte-mcp doctor`. NOT auto-applied to session context — every session must still call `lacerte_set_context`. |
 | `LACERTE_DEFAULT_TAX_YEAR` | recommended | unset | Default year used when `lacerte_set_context` omits one. |
-| `LACERTE_APP_NAME` | recommended | `LacerteMCP` | Friendly name in the SDK consent dialog. |
+| `LACERTE_APP_NAME` | recommended | `Operator Lacerte MCP` | Friendly name in the SDK consent dialog. Also the default for `lacerte-mcp register/login --app-name`, so the CLI registers under the same name the server uses. |
 | `LACERTE_APP_ID` | runtime read-only | from Credential Manager | Source of truth is Windows Credential Manager (set via `lacerte-mcp register`). |
 | `LACERTE_DEBUG_WIRE` | optional | `0` | `1` logs COM + SQL to `logs/lacerte-YYYYMMDD.log`. Secrets redacted. |
 | `LACERTE_DEBUG_LOG_PATH` | optional | `./logs` | Override the log directory. |
@@ -236,7 +237,7 @@ The server registers **42 MCP tools**, grouped below by the same categories `lac
 | Tool | Params | What it does |
 | --- | --- | --- |
 | `lacerte_session_status` | none | Snapshot of mode, registration, 24h expiry, active context, `nextSteps[]` hints. Zero wire I/O — call first. |
-| `lacerte_set_context` | `dataPath`, `taxYear`, `module`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
+| `lacerte_set_context` | `dataPath`, `module`, `taxYear?`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
 | `lacerte_list_modules` | none | The 9-module catalog (I/C/P/S/F/R/T/N/B) with names + ODBC ReturnType strings. |
 | `lacerte_list_datapaths` | none | Discover `{YY}Tax\{Module}Data` folders under `LACERTE_DATA_ROOT` (fallback `C:\Lacerte`). |
 | `lacerte_can_use_new_apis` | `taxYear`, `module` | Whether (taxYear, module) supports TY21+ `UpdateTaxReturn`; cached per pair. |
@@ -455,9 +456,9 @@ lacerte_field_write
 
 Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<module>.json`).
 
-- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY]` — print every entry for a module/table at the requested year (overlays applied).
-- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable).
-- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a one-line pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe --module <X> --table <N>` (Windows + live SDK).
+- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY] [--schema-dir <dir>]` — print every entry for a module/table at the requested year (overlays applied).
+- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...] [--schema-dir <dir>]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable). Both commands target, in order: `--schema-dir`, the sibling `..\server\Schema\FieldAccessMap` (release-zip layout — the tree the server actually reads), else the CLI's own folder; the resolved path is printed.
+- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]` (it probes all known modules/tables itself — there are no `--module`/`--table` flags; `--live` needs Windows + the Lacerte SDK).
 
 ### `lacerte-mcp doctor`
 

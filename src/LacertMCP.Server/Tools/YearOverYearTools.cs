@@ -252,8 +252,8 @@ namespace LacertMCP.Server.Tools
                 if (normScope == "detailTotals" || normScope == "all")
                 {
                     detailTotalsDiff = BuildDetailTotalsDiff(
-                        fromResult?.SeriesTotals ?? new Dictionary<int, double>(),
-                        toResult?.SeriesTotals ?? new Dictionary<int, double>(),
+                        fromResult?.SeriesTotals ?? new Dictionary<int, decimal>(),
+                        toResult?.SeriesTotals ?? new Dictionary<int, decimal>(),
                         effectiveSeries);
                 }
 
@@ -363,7 +363,15 @@ namespace LacertMCP.Server.Tools
                         .ConfigureAwait(false);
                     // Group by Series, sum Amount; keep only the seriesIds
                     // the caller asked for so the response shape stays tight.
-                    var totals = new Dictionary<int, double>();
+                    //
+                    // R7 — sum in decimal, not double. Amounts are money:
+                    // 1200.10 + 300.20 + 45.33 in double is
+                    // 1545.6299999999999, which compared != 1545.63 and
+                    // surfaced a phantom "changed" row with delta 2.27e-13.
+                    // Each double Amount is converted via ToMoney (decimal,
+                    // <= 15 significant digits, i.e. the value the DBF cell
+                    // actually holds) and summed exactly.
+                    var totals = new Dictionary<int, decimal>();
                     var wanted = new HashSet<int>(seriesIds);
                     foreach (var r in detail)
                     {
@@ -371,9 +379,10 @@ namespace LacertMCP.Server.Tools
                             CultureInfo.InvariantCulture, out var sid)
                             && wanted.Contains(sid))
                         {
+                            var amount = ToMoney(r.Amount);
                             totals[sid] = totals.TryGetValue(sid, out var prior)
-                                ? prior + (r.Amount ?? 0.0)
-                                : (r.Amount ?? 0.0);
+                                ? prior + amount
+                                : amount;
                         }
                     }
                     result.SeriesTotals = totals;
@@ -421,8 +430,8 @@ namespace LacertMCP.Server.Tools
         }
 
         private static List<object> BuildDetailTotalsDiff(
-            IReadOnlyDictionary<int, double> fromTotals,
-            IReadOnlyDictionary<int, double> toTotals,
+            IReadOnlyDictionary<int, decimal> fromTotals,
+            IReadOnlyDictionary<int, decimal> toTotals,
             int[] seriesIds)
         {
             var diff = new List<object>();
@@ -437,7 +446,8 @@ namespace LacertMCP.Server.Tools
                 bool fromPresent = fromTotals.ContainsKey(sid);
                 bool toPresent = toTotals.ContainsKey(sid);
                 if (!fromPresent && !toPresent) continue;
-                if (delta == 0.0 && fromPresent && toPresent) continue;
+                // Exact decimal comparison — see ToMoney.
+                if (delta == 0m && fromPresent && toPresent) continue;
                 diff.Add(new
                 {
                     series = sid,
@@ -448,6 +458,23 @@ namespace LacertMCP.Server.Tools
                 });
             }
             return diff;
+        }
+
+        /// <summary>
+        /// R7 — convert a detail-row double Amount to decimal for exact
+        /// money arithmetic. <see cref="Convert.ToDecimal(double)"/> keeps at
+        /// most 15 significant digits, which recovers the literal the DBF
+        /// cell holds (1200.1 -> 1200.1m, not 1200.0999999999999). Null,
+        /// NaN, infinities and values outside decimal range contribute 0 —
+        /// none is a representable money amount. Internal for tests.
+        /// </summary>
+        internal static decimal ToMoney(double? amount)
+        {
+            if (!amount.HasValue) return 0m;
+            var v = amount.Value;
+            if (double.IsNaN(v) || double.IsInfinity(v)) return 0m;
+            if (v >= (double)decimal.MaxValue || v <= (double)decimal.MinValue) return 0m;
+            return Convert.ToDecimal(v, CultureInfo.InvariantCulture);
         }
 
         private static string SeriesName(int sid) => sid switch
@@ -494,7 +521,7 @@ namespace LacertMCP.Server.Tools
         private sealed class YearResult
         {
             public IReadOnlyDictionary<string, object?>? Client { get; set; }
-            public IReadOnlyDictionary<int, double>? SeriesTotals { get; set; }
+            public IReadOnlyDictionary<int, decimal>? SeriesTotals { get; set; }
         }
     }
 }

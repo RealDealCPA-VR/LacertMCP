@@ -176,3 +176,51 @@ Key validation rules the MCP should enforce client-side: ClientID ≤ 8 chars an
 ## 7. Bottom line
 
 The document fully specifies a **local Windows bridge MCP**: a .NET/COM + ODBC host, gated by an interactive register/login session, exposing read/write/create tools over a DBF table model (1–7 + detail files + EF status), with TY21+ query branching, a per-field access map, and a ~30-value status enum to map to errors. Nothing in the doc requires anything the QuickBooks Desktop MCP pattern can't accommodate — the main non-code unknowns are the interactive-auth handling and obtaining the complete field catalog.
+
+---
+
+## Corrections from the primary source (2026-11-15, round-7 review)
+
+The round-7 review re-checked this spec against the primary source, the Intuit *Lacerte Software Development Kit Developer Instructions* (https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf). Where anything above conflicts with the list below, **the list below wins**. The code follows it.
+
+- **COM object graph.** The only directly creatable class is `LacerteSDK_Access.LacerteAccess`. Every other object comes from its factory methods:
+  - `CreateTPRegister()` returns an ITPRegistration.
+  - `CreateDBFReader()` returns an IDBFReader.
+  - `CreateDBFWriter()` returns an IDBFWriter.
+  - `CreateClient()` returns a blank IClient.
+  - `CreateClientList()` returns an IClientList.
+
+  There are no `TPRegistration` / `DBFReader` / `DBFWriter` ProgIDs.
+- **Register.** `Register(String ThirdPartyName, String AppID, String TaxYear)` returns a `TPSDKStatus` enum: `ConsentDenied = 0`, then AccessGranted, VersionBlocked, NotSignedIn and LacerteTaxSetupRequired as 1–4. The server maps raw value *n* to `200 + n`.
+- **ReadFromDBFData.** `ReadFromDBFData(String AppID, String DataPath, String DBFName, ref String XML)` returns a TAPIStatus. The XML arrives in the `ref` parameter.
+- **WriteToDBFDatabase.** `WriteToDBFDatabase(String AppID, String DataPath, String DBFName, int RowNum, String Fieldname, String Value, ref String newValue)` returns a TAPIStatus.
+- **UpdateTaxReturn (TY21+).** `UpdateTaxReturn(String AppID, String DataPath, String DBFName, String ClientNumber, String Fieldname, String Value, Integer SubClientID, String StateAbbrev)`. Pass 0 / `""` when the call isn't for DATA2/DATA4 or DATA3/DATA4.
+- **Create client.**
+  1. Call `IClientList.SetDataPath(AppID, DataPath, TaxYear)`.
+  2. Set `IClient.TaxType` (the `TaxModule` enum; its ordinal is the documented module order Individual…Benefit, 1-based), `ClientID`, `EmailID`, `FirstName` and `LastName`.
+  3. Call `IClientList.CreateClient(client)`, which returns a TAPIStatus.
+
+  **No ClientNumber is returned.** Resolve it afterwards by ClientID.
+- **Detail files.** These are read and written through the **ODBC driver**. The COM library exposes no detail-write method. Column constraints:
+  - Series, Prefix, Code and Suffix are Integer. Suffix starts at 1000 for standard fields and at 1 for suffixed fields.
+  - StateAbbr has Length=2 and CityAbbr Length=3.
+  - Source must be blank, `Nonsource` or `Source`.
+  - TSJ must be `Joint` (or blank), `Taxpayer` or `Spouse`.
+  - ImportSrc is read-only.
+  - Amount is a Double between -999,999,999 and 999,999,999, with at most 12 decimal places.
+  - Description is a String whose length depends on the field.
+- **ODBC connection string.** `driver=LacerteDSIIDriver; DataDir=<path>; TaxYear=<4-digit year>; ReturnType=<Individual|Corporate|Partnership|SCorporate|Fiduciary|Exempt|Estate|Gift|Benefit>`. The key is `DataDir`, not `Datapath`.
+- **State columns.**
+  - DATA3: `C3_0` is the client number, `C3_1+` are the writable fields, `C3_G1` is the state abbreviation (read-only), and `C3_G2+` are hidden.
+  - DATA4: `C4_0` is the client number, `C4_1` is the subclient number, `C4_2+` are the writable fields, and `C4_G1` is the state abbreviation.
+- **TY21+ queries.**
+  - `[<client>-SubClientInfo]`
+  - `[<client>-Detail-ClientStateInfo] where C3_G1 = '<ST>'`
+  - `[<client>-Detail-SubClientStateInfo] where C4_G1 = '<ST>' and C4_1 = <n>`
+- **PDF-internal ambiguities (the code follows the parameter lists, and the live smoke test settles them):**
+  - The C# `UpdateTaxReturn` sample orders its arguments field, "TEST", value, but the parameter list orders them ClientNumber, Fieldname, Value.
+  - The C# `WriteToDBFDatabase` sample has 6 arguments, but the parameter list and the VB sample have 7.
+  - The TY21 DATA2 table is `ClientNumber-Detail-SubClientInfo` in the list but `[TEST-SubClientInfo]` in the sample. The code uses the sample.
+  - The pre-TY21 DATA4 sample says `[DATA4-Subclient State Info]`, but the table list says "State Subclient Info". The code uses the list.
+  - The `TaxModule` and TPSDKStatus 1–4 integers are not printed; they are positional.
+- **Field access (appendix).** The literal rows ship in `Schema/FieldAccessMap` with `source: "sdk-pdf"`. The range rules ("remaining non-global fields" etc.) are documented in that folder's README and stay fail-closed (9012) until a field has a literal entry.

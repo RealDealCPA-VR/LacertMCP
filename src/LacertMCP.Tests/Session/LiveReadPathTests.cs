@@ -199,7 +199,7 @@ namespace LacertMCP.Tests.Session
             var r = Assert.Single(rows);
             Assert.Equal("NY", r["stateAbbrev"]);
             Assert.Equal("ACME", r["clientNumber"]);
-            Assert.Contains("[ACME-StateClientInfo]", db.Sql.Single());
+            Assert.Contains("[ACME-Detail-ClientStateInfo]", db.Sql.Single()); // R7: TY21+ name per the SDK PDF
         }
 
         [Fact]

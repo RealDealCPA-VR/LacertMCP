@@ -53,6 +53,11 @@ namespace LacertMCP.Server.Web
   nav.tabs button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
   nav.tabs .count { background: var(--chip); border-radius: 999px; padding: 0 7px; font-size: 11.5px; margin-left: 4px; }
   main { padding: 18px 0 64px; }
+  .cmdrow { display: flex; gap: 8px; align-items: stretch; margin: 6px 0 10px; }
+  .cmdrow .lbl { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  .cmdrow code.cmd { flex: 1; min-width: 0; display: block; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 13px/1.45 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; user-select: all; }
+  ol.steps { margin: 4px 0 8px 18px; padding: 0; } ol.steps li { margin: 3px 0; }
+  .badge { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 11.5px; font-weight: 600; background: var(--warn-bg); color: var(--warn); margin-left: 6px; }
   section.tab { display: none; } section.tab.active { display: block; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow); min-width: 0; }
   .panel h2 { font-size: 15.5px; margin: 0 0 4px; }
@@ -174,6 +179,7 @@ namespace LacertMCP.Server.Web
     <div class="panel">
       <h2>Who can use Lacerte</h2>
       <p class="lead">This PC always has full access. Other tailnet devices can't use the Lacerte MCP until you give them access here. <b>Read only</b> devices can look at returns but every write is refused. Changes apply on the next tool call; removing access also disconnects that device's agents.</p>
+      <p class="muted small">Adding a workstation? Run the one-line setup from the <b>Agents</b> tab on it first; it then shows here as <b>Ran setup</b>.</p>
       <div class="scroll"><table><thead><tr><th>Device</th><th>Status</th><th>Access</th></tr></thead><tbody id="devices"></tbody></table></div>
       <div id="orphans"></div>
     </div>
@@ -185,13 +191,24 @@ namespace LacertMCP.Server.Web
       <p class="lead">Each agent connection has its own client file (the data folder, year and module it picked with lacerte_set_context), so two agents can't redirect each other's writes. Idle connections close after 60 minutes.</p>
       <div class="scroll"><table><thead><tr><th>Device</th><th>Agent</th><th>Working in</th><th>Last active</th><th></th></tr></thead><tbody id="conns"></tbody></table></div>
     </div>
+    <div class="panel" id="easySetup">
+      <h2>Set up a workstation (easy way)</h2>
+      <p class="lead">On the workstation (Windows, with Tailscale connected), open <b>PowerShell</b> and paste this line. It adds the Lacerte MCP to Claude Desktop, Claude Code and Codex on that PC. It needs no admin rights and no extra software.</p>
+      <div id="setupCmds"></div>
+      <ol class="steps">
+        <li>Run the line on the workstation.</li>
+        <li>Come back here, open the <b>Access</b> tab, and choose <b>Read only</b> or <b>Read &amp; write</b> for that workstation. It's marked <b>Ran setup</b>.</li>
+        <li>On the workstation, quit Claude Desktop from the tray icon and open it again.</li>
+      </ol>
+      <p class="muted small">Run the same line again to update. Agents on this PC need no setup: use the local address below.</p>
+    </div>
     <div class="panel">
-      <h2>Connect an agent</h2>
-      <p class="lead">Give the device access on the Access tab first. Then use one of these.</p>
+      <h2>Manual setup</h2>
+      <p class="lead">For other MCP apps, or if you'd rather edit settings yourself. Give the device access on the Access tab first.</p>
       <div class="kv">
         <div>Server address</div><div id="urls"></div>
         <div>Claude Code</div><div><pre id="cfgCode"></pre></div>
-        <div>Claude Desktop / Cursor / any MCP client (JSON)</div><div><pre id="cfgJson"></pre></div>
+        <div>Cursor, VS Code and other apps that connect over HTTP (JSON). Claude Desktop can't: use the easy setup above.</div><div><pre id="cfgJson"></pre></div>
       </div>
     </div>
   </section>
@@ -346,7 +363,9 @@ namespace LacertMCP.Server.Web
     }
     s.devices.forEach(function (d) {
       var tr = el("tr");
-      var n = el("td"); n.appendChild(el("div", null, d.name)); n.appendChild(el("div", "muted small", (d.os || "") + (d.address ? " · " + d.address : "") + (d.sameOwner ? "" : " · different Tailscale login")));
+      var n = el("td"); var nm = el("div", null, d.name);
+      if (d.setupAt && d.level === "none") { var bd = el("span", "badge", "Ran setup " + ago(d.setupAt)); bd.title = "This workstation ran the setup line and is waiting for access."; nm.appendChild(bd); }
+      n.appendChild(nm); n.appendChild(el("div", "muted small", (d.os || "") + (d.address ? " · " + d.address : "") + (d.sameOwner ? "" : " · different Tailscale login")));
       tr.appendChild(n);
       tr.appendChild(el("td", null, d.online ? "Online" : "Offline"));
       var c = el("td"); c.appendChild(levelControl(d.stableId, d.name, d.level)); tr.appendChild(c);
@@ -362,6 +381,27 @@ namespace LacertMCP.Server.Web
         r.appendChild(b); o.appendChild(r);
       });
     }
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    // Plain http over the tailnet isn't a "secure context", so the Clipboard API is missing there.
+    var t = document.createElement("textarea"); t.value = text; t.setAttribute("readonly", ""); t.style.position = "fixed"; t.style.opacity = "0";
+    document.body.appendChild(t); t.select();
+    var ok = false; try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(t);
+    return ok ? Promise.resolve() : Promise.reject(new Error("Copy blocked by the browser; select the line and press Ctrl+C."));
+  }
+
+  function cmdRow(label, text) {
+    var wrap = el("div");
+    wrap.appendChild(el("div", "lbl muted small", label));
+    var r = el("div", "cmdrow");
+    r.appendChild(el("code", "cmd", text));
+    var b = el("button", null, "Copy");
+    b.addEventListener("click", function () { copyText(text).then(function () { flash("ok", "Copied. Paste it into PowerShell on the workstation."); }).catch(function (e) { flash("err", e.message); }); });
+    r.appendChild(b); wrap.appendChild(r);
+    return wrap;
   }
 
   function renderAgents(s) {
@@ -380,6 +420,14 @@ namespace LacertMCP.Server.Web
     var url = s.mcpUrls[0] || s.localUrl;
     var u = $("urls"); clear(u);
     (s.mcpUrls.length ? s.mcpUrls : [s.localUrl]).forEach(function (x) { u.appendChild(el("code", null, x)); u.appendChild(document.createTextNode(" ")); });
+    var sc = $("setupCmds"); clear(sc);
+    if (!s.setupUrls || !s.setupUrls.length) {
+      sc.appendChild(el("p", "fix", "Workstations can't reach this PC yet: Tailscale isn't connected here. Fix it (see Overview) and the setup line appears."));
+    } else {
+      var su = s.setupUrls[0];
+      sc.appendChild(cmdRow("Set up / update", "irm " + su + " | iex"));
+      sc.appendChild(cmdRow("Remove", "$env:LACERTE_MCP_UNINSTALL='1'; irm " + su + " | iex"));
+    }
     $("cfgCode").textContent = "claude mcp add --transport http lacerte " + url;
     $("cfgJson").textContent = JSON.stringify({ mcpServers: { lacerte: { type: "http", url: url } } }, null, 2);
   }

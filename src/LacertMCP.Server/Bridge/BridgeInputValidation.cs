@@ -34,13 +34,13 @@ namespace LacertMCP.Server.Bridge
         // Odbc/SqlTemplates.ClientIdentifierPattern verbatim. The 8-char cap
         // is per StatusCodes.LengthExceeded remediation.
         private static readonly Regex ClientNumberPattern = new Regex(
-            "^[A-Z0-9]{1,8}$",
+            "^[A-Z0-9]{1,8}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // State abbreviation: 2 uppercase ASCII letters. Mirrors
         // Odbc/SqlTemplates.StatePattern.
         private static readonly Regex StateAbbrevPattern = new Regex(
-            "^[A-Z]{2}$",
+            "^[A-Z]{2}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // DBF filename per spec §2 / agent 03 §3: DATA{n}{moduleChar}{YY}.DBF
@@ -49,7 +49,7 @@ namespace LacertMCP.Server.Bridge
         // the SDK. Empty rejected; max 16 chars (DATA + digit + char + 2 +
         // .DBF = 11 typical, 16 covers any future variant).
         private static readonly Regex DbfNamePattern = new Regex(
-            "^[A-Z0-9]{1,12}\\.[A-Z0-9]{1,4}$",
+            "^[A-Z0-9]{1,12}\\.[A-Z0-9]{1,4}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // SDK field identifier: C{table}_{ordinal-or-Gn}. Mirrors
@@ -60,7 +60,7 @@ namespace LacertMCP.Server.Bridge
         // / semicolons, wide enough that the access-map gate is the source of
         // truth for "is this an actual field".
         private static readonly Regex FieldNamePattern = new Regex(
-            "^[A-Z0-9_]{2,16}$",
+            "^[A-Z0-9_]{2,16}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // appId is normally a registered AppID GUID rendered 36 chars (D
@@ -292,11 +292,11 @@ namespace LacertMCP.Server.Bridge
         /// <see cref="ValidateWriteDetailArgs"/>). JsonElement arrays/objects
         /// are rejected — bridge expects scalar values only (P15-061).
         /// </summary>
-        public static void ValidateValue(object? value, string op, int maxLength = StringValueMaxLength)
+        public static void ValidateValue(object? value, string op, int maxLength = StringValueMaxLength, int errorCode = SyntheticStatusCodes.FieldWriteInvalid)
         {
             if (value is string s)
             {
-                EnsureSafeText(s, op, fieldName: "value", maxLength: maxLength);
+                EnsureSafeText(s, op, fieldName: "value", maxLength: maxLength, errorCode: errorCode);
                 return;
             }
             // P15-061: numeric NaN/Infinity guard for the generic WriteField /
@@ -307,7 +307,7 @@ namespace LacertMCP.Server.Bridge
             if (value is double d && (double.IsNaN(d) || double.IsInfinity(d)))
             {
                 throw new LacerteSDKError(
-                    SyntheticStatusCodes.DetailWriteInvalid,
+                    errorCode,
                     new Dictionary<string, object?>
                     {
                         ["op"] = op,
@@ -319,7 +319,7 @@ namespace LacertMCP.Server.Bridge
             if (value is float f && (float.IsNaN(f) || float.IsInfinity(f)))
             {
                 throw new LacerteSDKError(
-                    SyntheticStatusCodes.DetailWriteInvalid,
+                    errorCode,
                     new Dictionary<string, object?>
                     {
                         ["op"] = op,
@@ -338,7 +338,7 @@ namespace LacertMCP.Server.Bridge
                 if (je.ValueKind == JsonValueKind.Array || je.ValueKind == JsonValueKind.Object)
                 {
                     throw new LacerteSDKError(
-                        SyntheticStatusCodes.DetailWriteInvalid,
+                        errorCode,
                         new Dictionary<string, object?>
                         {
                             ["op"] = op,
@@ -350,14 +350,14 @@ namespace LacertMCP.Server.Bridge
                 // Recurse for string/number scalars to apply the same checks.
                 if (je.ValueKind == JsonValueKind.String)
                 {
-                    EnsureSafeText(je.GetString(), op, fieldName: "value", maxLength: maxLength);
+                    EnsureSafeText(je.GetString(), op, fieldName: "value", maxLength: maxLength, errorCode: errorCode);
                 }
                 else if (je.ValueKind == JsonValueKind.Number)
                 {
                     if (je.TryGetDouble(out var jd) && (double.IsNaN(jd) || double.IsInfinity(jd)))
                     {
                         throw new LacerteSDKError(
-                            SyntheticStatusCodes.DetailWriteInvalid,
+                            errorCode,
                             new Dictionary<string, object?>
                             {
                                 ["op"] = op,
@@ -380,10 +380,18 @@ namespace LacertMCP.Server.Bridge
         {
             if (value == null) return; // optional/empty handled at higher layers
             if (value.Length == 0) return;
+            // R7-SRC — the SDK types these columns Integer: require ASCII
+            // digits with an optional leading minus AND a value that fits an
+            // int (a lone "-" or a 30-digit string used to pass).
+            bool shapeOk = true;
             for (int i = 0; i < value.Length; i++)
             {
                 char c = value[i];
-                bool ok = (c >= '0' && c <= '9') || (i == 0 && c == '-');
+                if (!((c >= '0' && c <= '9') || (i == 0 && c == '-'))) { shapeOk = false; break; }
+            }
+            bool ok = shapeOk && int.TryParse(value, System.Globalization.NumberStyles.AllowLeadingSign,
+                System.Globalization.CultureInfo.InvariantCulture, out _);
+            {
                 if (!ok)
                 {
                     throw new LacerteSDKError(
@@ -405,13 +413,14 @@ namespace LacertMCP.Server.Bridge
         /// longer than <paramref name="maxLength"/>.
         /// </summary>
         public static void EnsureSafeText(
-            string? value, string op, string fieldName, int maxLength)
+            string? value, string op, string fieldName, int maxLength,
+            int errorCode = SyntheticStatusCodes.DetailWriteInvalid)
         {
             if (value == null) return;
             if (value.Length > maxLength)
             {
                 throw new LacerteSDKError(
-                    SyntheticStatusCodes.DetailWriteInvalid,
+                    errorCode,
                     new Dictionary<string, object?>
                     {
                         ["op"] = op,
@@ -433,7 +442,7 @@ namespace LacertMCP.Server.Bridge
                 if (isControl)
                 {
                     throw new LacerteSDKError(
-                        SyntheticStatusCodes.DetailWriteInvalid,
+                        errorCode,
                         new Dictionary<string, object?>
                         {
                             ["op"] = op,
@@ -524,20 +533,76 @@ namespace LacertMCP.Server.Bridge
             ValidateAppId(appId, op);
             ValidateDataPath(dataPath, op);
             ValidateClientNumber(clientNumber, op);
+            ValidateDetailRowContent(row, op);
+        }
 
+        /// <summary>
+        /// R7-12 — the row-content half of <see cref="ValidateWriteDetailArgs"/>
+        /// (length caps, control characters, numeric Code, NaN/Infinity
+        /// Amount). Split out so the session chokepoint can apply the exact
+        /// same rules in BOTH modes — previously simulation accepted a
+        /// 300-char Description or a \u0001 that live rejected.
+        /// </summary>
+        public static void ValidateDetailRowContent(DetailRow row, string op)
+        {
             // Detail-row strings. Series + StateAbbr + TSJ have shape rules
             // already enforced at DetailsTools; bridge re-checks the alphabet
             // floor (no control chars / NULs) and lengths only.
+            // R7-SRC — column constraints per the SDK Developer Instructions
+            // ("Working with Detail Files"): Series / Prefix / Code / Suffix
+            // are Integer; StateAbbr Length=2; CityAbbr Length=3; Source
+            // "Must be equal to blank, Nonsource, Source"; ImportSrc is
+            // "Read Only"; Amount within >= -999,999,999 and <= 999,999,999
+            // with max decimal precision 12. "There is currently no
+            // validation for the data that is written to the detail file" —
+            // so the MCP enforces it, in BOTH modes.
             EnsureSafeText(row.Series, op, "row.Series", ShortStringMaxLength);
+            ValidateNumericString(row.Series, op, "row.Series");
             EnsureSafeText(row.Prefix, op, "row.Prefix", ShortStringMaxLength);
+            ValidateNumericString(row.Prefix, op, "row.Prefix");
             // Code is a numeric integer string in the v1 schema.
             ValidateNumericString(row.Code, op, "row.Code");
             EnsureSafeText(row.Suffix, op, "row.Suffix", ShortStringMaxLength);
+            ValidateNumericString(row.Suffix, op, "row.Suffix");
             ValidateStateAbbrev(row.StateAbbr, op);
-            EnsureSafeText(row.CityAbbr, op, "row.CityAbbr", ShortStringMaxLength);
+            EnsureSafeText(row.CityAbbr, op, "row.CityAbbr", CityAbbrMaxLength);
             EnsureSafeText(row.Source, op, "row.Source", ShortStringMaxLength);
-            EnsureSafeText(row.TSJ, op, "row.TSJ", 1);
-            EnsureSafeText(row.ImportSrc, op, "row.ImportSrc", ShortStringMaxLength);
+            if (NormalizeDetailSource(row.Source) == null)
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["field"] = "row.Source",
+                        ["value"] = row.Source,
+                        ["reason"] = "row.Source must be blank, \"Nonsource\" or \"Source\" (SDK detail-file constraint).",
+                    });
+            }
+            EnsureSafeText(row.TSJ, op, "row.TSJ", ShortStringMaxLength);
+            if (NormalizeTsj(row.TSJ) == null)
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["field"] = "row.TSJ",
+                        ["value"] = row.TSJ,
+                        ["reason"] = "row.TSJ must be blank, Taxpayer (T), Spouse (S) or Joint (J) (SDK detail-file constraint).",
+                    });
+            }
+            if (!string.IsNullOrEmpty(row.ImportSrc))
+            {
+                throw new LacerteSDKError(
+                    SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["field"] = "row.ImportSrc",
+                        ["reason"] = "row.ImportSrc is Read Only per the SDK detail-file schema; leave it blank.",
+                    });
+            }
             EnsureSafeText(row.Description, op, "row.Description", DescriptionMaxLength);
             // Amount is double? — no string content to gate. NaN / Infinity
             // would marshal cleanly but blow up downstream; reject them.
@@ -556,8 +621,70 @@ namespace LacertMCP.Server.Bridge
                             ["reason"] = "row.Amount must be a finite real number (no NaN / Infinity).",
                         });
                 }
+                // R7-SRC — documented range and precision.
+                if (a < -AmountMaxMagnitude || a > AmountMaxMagnitude)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.DetailWriteInvalid,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = op,
+                            ["field"] = "row.Amount",
+                            ["value"] = a,
+                            ["reason"] = "row.Amount must be >= -999,999,999 and <= 999,999,999 (SDK detail-file constraint).",
+                        });
+                }
+                var dec = (decimal)a;
+                if (decimal.Round(dec, AmountMaxDecimals) != dec)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.DetailWriteInvalid,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = op,
+                            ["field"] = "row.Amount",
+                            ["value"] = a,
+                            ["reason"] = "row.Amount allows at most 12 decimal places (SDK detail-file constraint).",
+                        });
+                }
             }
         }
+
+        /// <summary>
+        /// R7-SRC — the SDK detail-file schema says TSJ "Must be equal to
+        /// Joint (or blank), Taxpayer, Spouse". The single-letter aliases
+        /// T / S / J (what operators type) are accepted and normalized to the
+        /// documented values. Returns null when the input is not a valid TSJ.
+        /// </summary>
+        internal static string? NormalizeTsj(string? tsj)
+        {
+            var t = tsj?.Trim();
+            if (string.IsNullOrEmpty(t)) return string.Empty;
+            switch (t!.ToUpperInvariant())
+            {
+                case "T": case "TAXPAYER": return "Taxpayer";
+                case "S": case "SPOUSE": return "Spouse";
+                case "J": case "JOINT": return "Joint";
+                default: return null;
+            }
+        }
+
+        /// <summary>
+        /// R7-SRC — the SDK detail-file schema says Source "Must be equal to
+        /// blank, Nonsource, Source". Case-normalizes; null when invalid.
+        /// </summary>
+        internal static string? NormalizeDetailSource(string? source)
+        {
+            var s = source?.Trim();
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            if (string.Equals(s, "Source", StringComparison.OrdinalIgnoreCase)) return "Source";
+            if (string.Equals(s, "Nonsource", StringComparison.OrdinalIgnoreCase)) return "Nonsource";
+            return null;
+        }
+
+        internal const int CityAbbrMaxLength = 3;
+        internal const double AmountMaxMagnitude = 999_999_999d;
+        internal const int AmountMaxDecimals = 12;
 
         /// <summary>
         /// Pre-flight for <see cref="Reader.ReadFromDBFData"/>: appId,
@@ -596,10 +723,23 @@ namespace LacertMCP.Server.Bridge
             ValidateAppId(appId, op);
             ValidateDataPath(dataPath, op);
             ValidateClientNumber(clientId, op);
-            EnsureSafeText(taxType, op, "taxType", ShortStringMaxLength);
-            EnsureSafeText(firstName, op, "firstName", ShortStringMaxLength);
-            EnsureSafeText(lastName, op, "lastName", ShortStringMaxLength);
-            EnsureSafeText(emailId, op, "emailId", EmailMaxLength);
+            ValidateCreateClientText(taxType, firstName, lastName, emailId, op);
+        }
+
+        /// <summary>
+        /// R7-12 — free-text half of <see cref="ValidateCreateClientArgs"/>,
+        /// callable from the session in both modes. Reports
+        /// <see cref="StatusCodes.InValidClientName"/> (24) — the same code
+        /// the tool layer uses for missing names — instead of 9008, whose
+        /// message is about detail-row Series/Code/Amount shape.
+        /// </summary>
+        public static void ValidateCreateClientText(
+            string? taxType, string? firstName, string? lastName, string? emailId, string op)
+        {
+            EnsureSafeText(taxType, op, "taxType", ShortStringMaxLength, StatusCodes.InValidClientName);
+            EnsureSafeText(firstName, op, "firstName", ShortStringMaxLength, StatusCodes.InValidClientName);
+            EnsureSafeText(lastName, op, "lastName", ShortStringMaxLength, StatusCodes.InValidClientName);
+            EnsureSafeText(emailId, op, "emailId", EmailMaxLength, StatusCodes.InValidClientName);
         }
     }
 }

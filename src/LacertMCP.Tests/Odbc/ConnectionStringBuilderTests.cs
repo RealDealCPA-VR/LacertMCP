@@ -13,7 +13,7 @@ namespace LacertMCP.Tests.Odbc
             // so the parser can't be confused by any delimiter the path might contain.
             var connStr = ConnectionStringBuilder.Build(@"C:\Lacerte\24data", "Individual", 2024);
             Assert.Equal(
-                @"Driver={LacerteDSIIDriver};Datapath={C:\Lacerte\24data};ReturnType=Individual;TaxYear=24",
+                @"Driver={LacerteDSIIDriver};DataDir={C:\Lacerte\24data};TaxYear=2024;ReturnType=Individual",
                 connStr);
         }
 
@@ -32,15 +32,17 @@ namespace LacertMCP.Tests.Odbc
             Assert.Contains($"ReturnType={returnType}", connStr);
         }
 
+        // R7-SRC — the SDK Developer Instructions' connection-string example
+        // uses the DataDir key and a FOUR-digit year ("TaxYear=2019").
         [Theory]
-        [InlineData(2018, "18")]
-        [InlineData(2021, "21")]
-        [InlineData(2024, "24")]
-        [InlineData(2099, "99")]
-        public void Build_Renders_TaxYear_As_Two_Digits(int year, string expectedTwoDigit)
+        [InlineData(2018, "2018")]
+        [InlineData(2021, "2021")]
+        [InlineData(2024, "2024")]
+        [InlineData(2099, "2099")]
+        public void Build_Renders_TaxYear_As_Four_Digits(int year, string expected)
         {
             var connStr = ConnectionStringBuilder.Build(@"C:\Lacerte\YYdata", "Individual", year);
-            Assert.EndsWith($"TaxYear={expectedTwoDigit}", connStr);
+            Assert.Contains($";TaxYear={expected};", connStr);
         }
 
         [Fact]
@@ -49,7 +51,7 @@ namespace LacertMCP.Tests.Odbc
             // Pathological input — a path with a semicolon in it — must be brace-wrapped
             // or the ODBC provider treats everything after ';' as a new key.
             var connStr = ConnectionStringBuilder.Build(@"C:\Weird;Path\24data", "Individual", 2024);
-            Assert.Contains(@"Datapath={C:\Weird;Path\24data}", connStr);
+            Assert.Contains(@"DataDir={C:\Weird;Path\24data}", connStr);
         }
 
         [Fact]
@@ -58,13 +60,13 @@ namespace LacertMCP.Tests.Odbc
             // Brace-wrap-always policy: even a totally plain path is brace-wrapped so
             // there is no parser-confusion attack surface from the bracing heuristic.
             var connStr = ConnectionStringBuilder.Build(@"C:\Lacerte\24data", "Individual", 2024);
-            Assert.Contains(@"Datapath={C:\Lacerte\24data}", connStr);
+            Assert.Contains(@"DataDir={C:\Lacerte\24data}", connStr);
         }
 
         [Theory]
-        [InlineData(@"C:\foo}bar\24data", @"Datapath={C:\foo}}bar\24data}")]
-        [InlineData(@"C:\foo}; Driver={OtherDriver}\24data", @"Datapath={C:\foo}}; Driver={OtherDriver}}\24data}")]
-        [InlineData(@"C:\already}}doubled\24data", @"Datapath={C:\already}}}}doubled\24data}")]
+        [InlineData(@"C:\foo}bar\24data", @"DataDir={C:\foo}}bar\24data}")]
+        [InlineData(@"C:\foo}; Driver={OtherDriver}\24data", @"DataDir={C:\foo}}; Driver={OtherDriver}}\24data}")]
+        [InlineData(@"C:\already}}doubled\24data", @"DataDir={C:\already}}}}doubled\24data}")]
         public void Build_Escapes_Embedded_CloseBrace_By_Doubling(string dataPath, string expectedDatapathSegment)
         {
             // Embedded '}' must be doubled inside the brace-quoted value per ODBC
@@ -84,7 +86,7 @@ namespace LacertMCP.Tests.Odbc
             // '{', '=', and whitespace are all safe inside the brace-quoted Datapath value
             // per ODBC grammar — no escaping needed. Build must accept them as-is.
             var connStr = ConnectionStringBuilder.Build(dataPath, "Individual", 2024);
-            Assert.Contains("Datapath={" + dataPath + "}", connStr);
+            Assert.Contains("DataDir={" + dataPath + "}", connStr);
         }
 
         [Fact]

@@ -90,7 +90,7 @@ namespace LacertMCP.Server.Tools
         // Same clientId shape gate as CreateClientTools (private there, so
         // mirrored here — the regex IS the contract per spec §4).
         private static readonly Regex _rxClientId = new Regex(
-            @"^[A-Z0-9]+$",
+            @"^[A-Z0-9]+\z",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
@@ -126,7 +126,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Bulk-create N clients in the active datapath/taxYear/module from one MCP call — the canonical tool for REQUIREMENTS.md #3 (bootstrap clients from a CSV roster) instead of looping lacerte_client_create per row. Each entry mirrors the single-create args ({clientId, taxType, firstName, lastName, emailId} — all required) and runs the identical validation + TaxType canonicalization before hitting the session chokepoint (registration gate, read-only rejection, dry-run undo, and idempotency cache all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status (e.g. to surface ALL duplicate clientIds in one pass). dryRun=true validates and simulates every row then rolls back: dry-run rows report wouldCreate=true with clientNumber=null (a dry run cannot mint a real ClientNumber — both sim and live agree per R6-22). When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientId}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-created rows from cache with their original clientNumbers instead of minting duplicates. entries.Length is capped at 100 by default (creates are heavier than field writes; override via LACERTE_BULK_CREATE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
+        [Description("Bulk-create N clients in the active datapath/taxYear/module from one MCP call — the canonical tool for REQUIREMENTS.md #3 (bootstrap clients from a CSV roster) instead of looping lacerte_client_create per row. Each entry mirrors the single-create args ({clientId, taxType, firstName, lastName, emailId} — all required) and runs the identical validation + TaxType canonicalization before hitting the session chokepoint (registration gate, read-only rejection, dry-run undo, and idempotency cache all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status (e.g. to surface ALL duplicate clientIds in one pass). dryRun=true validates and simulates every row then rolls back: dry-run rows report wouldCreate=true with clientNumber=null (a dry run cannot mint a real ClientNumber — both sim and live agree per R6-22). When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientId}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-created rows from cache with their original clientNumbers instead of minting duplicates. entries.Length is capped at 100 by default (creates are heavier than field writes; override via LACERTE_BULK_CREATE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. An entries[] that repeats a clientId (case-insensitive) is rejected with 9017 InvalidArgument (context.duplicates lists each index) before any row runs, in dry-run and commit alike. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
         public Task<string> LacerteClientCreateBulk(
             [Description("Array of per-row creates. Each entry: {clientId, taxType, firstName, lastName, emailId} — all five required, mirroring lacerte_client_create. Empty array returns a no-op envelope with requestedCount=0. Capped at 100 entries by default (override via LACERTE_BULK_CREATE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkCreateEntry[] entries,
             [Description("If true, validate + simulate every create then roll back without persisting. Each dry-run row reports wouldCreate=true and clientNumber=null — a dry run cannot mint a real ClientNumber, so never treat a dry-run row as having allocated one.")] bool dryRun = false,
@@ -191,6 +191,42 @@ namespace LacertMCP.Server.Tools
                             ["entryCount"] = entries.Length,
                             ["maxAllowed"] = maxAllowed,
                             ["envOverride"] = BulkCreateMaxEnvName,
+                        });
+                }
+
+                // R7-26 — in-batch duplicate ClientId pre-flight. Each dry-run
+                // row is applied then immediately undone, so a later row never
+                // sees an earlier row's create: [SMITH, smith] previewed as
+                // two wouldCreate:true rows, then the commit created row 0 and
+                // failed row 1 with DuplicateClient — leaving the batch
+                // partially applied under the default stop-on-error. Reject
+                // the whole batch up front (before any row runs, in both
+                // dry-run and commit) so the preview and the commit agree.
+                var firstIndexById = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var duplicates = new List<object>();
+                for (int d = 0; d < entries.Length; d++)
+                {
+                    var id = entries[d]?.ClientId?.Trim();
+                    if (string.IsNullOrEmpty(id)) continue;
+                    if (firstIndexById.TryGetValue(id!, out var firstIdx))
+                    {
+                        duplicates.Add(new { index = d, firstIndex = firstIdx, clientId = id!.ToUpperInvariant() });
+                    }
+                    else
+                    {
+                        firstIndexById[id!] = d;
+                    }
+                }
+                if (duplicates.Count > 0)
+                {
+                    throw new LacerteSDKError(
+                        SyntheticStatusCodes.InvalidArgument,
+                        new Dictionary<string, object?>
+                        {
+                            ["op"] = "ClientCreateBulk",
+                            ["argument"] = "entries",
+                            ["reason"] = "entries[] contains the same clientId more than once (case-insensitive). Lacerte ClientIDs are unique per data folder, so the second create would fail with DuplicateClient mid-batch. Remove the duplicates and resubmit.",
+                            ["duplicates"] = duplicates,
                         });
                 }
 
@@ -274,7 +310,9 @@ namespace LacertMCP.Server.Tools
                             EmailId: entry.EmailId);
 
                         var result = await _session.CreateClient(
-                            args, dryRun, rowKey, cancellationToken).ConfigureAwait(false);
+                            args, dryRun, rowKey, cancellationToken,
+                            // R7-25 — pin every row to the context validated above.
+                            expectedContext: ctx).ConfigureAwait(false);
 
                         // Translate non-Success into a structured per-row
                         // error so a row never reads succeeded=true with a
@@ -293,6 +331,23 @@ namespace LacertMCP.Server.Tools
 
                         var info = StatusCodes.GetStatusInfo(result.Status);
                         succeededCount++;
+                        if (!dryRun && result.ClientNumber == null)
+                        {
+                            // R7-28b — committed live create whose number the
+                            // SDK did not return (see lacerte_client_create).
+                            rows.Add(new
+                            {
+                                index = i,
+                                clientId = normalizedClientId,
+                                succeeded = true,
+                                statusCode = result.Status,
+                                statusName = info.Name,
+                                clientNumber = (string?)null,
+                                wouldCreate = false,
+                                clientNumberHint = "Created, but the SDK did not return the ClientNumber — resolve it via lacerte_client_find / lacerte_client_list by clientId. Do not re-run this row.",
+                            });
+                            continue;
+                        }
                         rows.Add(new
                         {
                             index = i,

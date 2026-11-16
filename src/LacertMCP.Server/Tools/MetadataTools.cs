@@ -88,36 +88,18 @@ namespace LacertMCP.Server.Tools
                 var universal = "C" + table + "_0";
                 entries[universal] = FieldAccess.ReadOnly.ToString();
 
-                // Enumerate every cataloged field by walking a small canonical
-                // probe set + the loader's resolved access for each. The
-                // loader's per-shard internals aren't public, so we probe
-                // GetFieldAccess for a documented field grid; that covers v1
-                // surface (empty shards) and grows naturally as shards land.
-                //
-                // Probe grid: C{table}_0..C{table}_25 covers the standard
-                // numeric-suffix space; add common letter-suffix variants used
-                // in DATA3/4 group fields (e.g. C4_G3).
-                for (int i = 0; i <= 25; i++)
+                // R7-24 — enumerate EVERY cataloged field (base shard + the
+                // taxYear overlay) instead of probing a fixed C{t}_0..25 +
+                // _G1..G3 grid. The grid could never surface real codes like
+                // C1_71, and the BulkFieldUpdate / CsvIntake prompts treat a
+                // field ABSENT from `fields` as the STOP signal. Access is
+                // resolved through GetFieldAccess so overlay precedence and
+                // the universal C{t}_0 rule apply exactly as AssertWritable
+                // applies them.
+                foreach (var f in FieldAccessMapLoader.GetCatalogedFields(moduleChar, table, taxYear))
                 {
-                    var f = "C" + table + "_" + i;
                     var access = FieldAccessMapLoader.GetFieldAccess(moduleChar, table, f, taxYear);
-                    // Skip Unknown (the empty shards return Unknown for every
-                    // probe except the universal C{t}_0 rule) — surfacing all
-                    // 26 Unknown rows would just be noise. Callers who want
-                    // raw per-field probing have GetFieldAccess via the
-                    // session manager.
                     if (access == FieldAccess.Unknown && f != universal) continue;
-                    entries[f] = access.ToString();
-                }
-
-                // Also probe a few common group-suffix fields for DATA3/4 so
-                // callers see at least one cataloged group entry in shards
-                // that ship them; harmless when absent (Unknown skipped).
-                foreach (var suffix in new[] { "_G1", "_G2", "_G3" })
-                {
-                    var f = "C" + table + suffix;
-                    var access = FieldAccessMapLoader.GetFieldAccess(moduleChar, table, f, taxYear);
-                    if (access == FieldAccess.Unknown) continue;
                     entries[f] = access.ToString();
                 }
 

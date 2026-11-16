@@ -177,14 +177,33 @@ namespace LacertMCP.FieldAccessDumper
             // in LoadModule for P18-007 keeps the loader safe; this atomic
             // write keeps the on-disk shard correct too).
             //
-            // Pattern mirrors LacerteSessionManager.PersistIdempotencyCacheToDisk
-            // — the project convention for create-or-replace on net48 where
-            // File.Replace requires the destination to exist on first write.
+            // Promotion: File.Replace when the canonical exists (a single
+            // ReplaceFile call — there is no window where the canonical is
+            // gone), File.Move on first write (File.Replace requires the
+            // destination to exist). The former Delete-then-Move had a window
+            // where a kill left NO canonical shard, and the next run's
+            // SweepOrphanTmps then deleted the only surviving copy (the tmp).
             var tmp = path + ".tmp";
             File.WriteAllText(tmp, json);
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(tmp, path);
+            PromoteTmp(tmp, path);
             Console.WriteLine($"[dumper] {Path.GetFileName(path)}: +{added} new, ~{overwritten} overwritten, ={kept} preserved");
+        }
+
+        /// <summary>
+        /// Atomically promote <paramref name="tmp"/> to <paramref name="path"/>:
+        /// <see cref="File.Replace(string, string, string)"/> when the destination
+        /// exists (no backup), else <see cref="File.Move(string, string)"/>.
+        /// </summary>
+        internal static void PromoteTmp(string tmp, string path)
+        {
+            if (File.Exists(path))
+            {
+                File.Replace(tmp, path, null);
+            }
+            else
+            {
+                File.Move(tmp, path);
+            }
         }
 
         /// <summary>
@@ -302,39 +321,37 @@ namespace LacertMCP.FieldAccessDumper
         private static Dictionary<string, FieldEntry> LoadExisting(string path)
         {
             if (!File.Exists(path)) return new Dictionary<string, FieldEntry>();
-            try
+            // R7-41 — parse with the loader's own path and REFUSE on failure.
+            // The old code logged a warning and "started fresh", so the next
+            // rewrite silently dropped every existing row of an unparseable
+            // shard (now also triggered by an entry missing "access").
+            var map = LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateShardFile(path, out var err);
+            if (map == null)
             {
-                var json = File.ReadAllText(path);
-                if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}")
-                {
-                    return new Dictionary<string, FieldEntry>();
-                }
-                var opts = new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    AllowTrailingCommas = true,
-                    ReadCommentHandling = JsonCommentHandling.Skip,
-                };
-                opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
-                var parsed = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(json, opts);
-                return parsed ?? new Dictionary<string, FieldEntry>();
+                throw new InvalidOperationException(
+                    $"refusing to rewrite {path}: it does not parse ({err}). Fix or restore the shard first — rewriting it would drop its existing entries.");
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[dumper] WARN: failed to parse {path}, starting fresh: {ex.Message}");
-                return new Dictionary<string, FieldEntry>();
-            }
+            return new Dictionary<string, FieldEntry>(map.ToDictionary(kv => kv.Key, kv => kv.Value));
         }
 
         private static string ResolveBaseDir(Options opts)
         {
             if (!string.IsNullOrEmpty(opts.OutputDir)) return opts.OutputDir!;
 
-            // Default: write into the source tree (not the build output) so the
-            // dumper's output ships into the next build. Walk up from the
-            // running assembly to find the LacertMCP.Server project.
             var asmDir = Path.GetDirectoryName(typeof(Program).Assembly.Location)
                          ?? Directory.GetCurrentDirectory();
+
+            // Release layout (scripts/release.ps1 stages server/ and cli/ side by
+            // side): if a sibling ..\server\Schema\FieldAccessMap exists, write
+            // there — that is the tree LacertMCP.Server.exe's FieldAccessMapLoader
+            // reads. Writing next to this exe would edit a copy the server never
+            // sees. Same resolution idea as the CLI's SchemaDirResolver.
+            var sibling = Path.GetFullPath(Path.Combine(asmDir, "..", "server", "Schema", "FieldAccessMap"));
+            if (Directory.Exists(sibling)) return Path.Combine(sibling, "base");
+
+            // Dev: write into the source tree (not the build output) so the
+            // dumper's output ships into the next build. Walk up from the
+            // running assembly to find the LacertMCP.Server project.
             var probe = new DirectoryInfo(asmDir);
             for (int hop = 0; hop < 8 && probe != null; hop++)
             {
@@ -417,7 +434,10 @@ namespace LacertMCP.FieldAccessDumper
             Console.WriteLine("  --overwrite   Replace existing entries (default: preserve).");
             Console.WriteLine("  --live        Probe via the live COM bridge (Windows + Lacerte SDK only).");
             Console.WriteLine("  --year <yyyy> Tax year to probe (default: current year).");
-            Console.WriteLine("  --out <dir>   Override the FieldAccessMap/base output directory.");
+            Console.WriteLine("  --out <dir>   Override the FieldAccessMap/base output directory. Default: a sibling");
+            Console.WriteLine("                ..\\server\\Schema\\FieldAccessMap\\base when present (release layout),");
+            Console.WriteLine("                else src/LacertMCP.Server/Schema/FieldAccessMap/base in a source checkout,");
+            Console.WriteLine("                else Schema/FieldAccessMap/base next to this exe.");
             Console.WriteLine("  -h, --help    Show this message.");
         }
 

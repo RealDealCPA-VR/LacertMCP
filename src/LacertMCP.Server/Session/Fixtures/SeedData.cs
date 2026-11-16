@@ -130,33 +130,33 @@ namespace LacertMCP.Server.Session.Fixtures
 
         public static List<DetailRow> SmithDetails() => new List<DetailRow>
         {
-            new DetailRow(SeriesIds.Wages, "",  "1",  "", "", "", "W2",      "T", "", 75000.00, "ACME Industries W-2"),
-            new DetailRow(SeriesIds.Int,   "",  "1",  "", "", "", "1099INT", "T", "",   320.50, "First Bank interest"),
+            new DetailRow(SeriesIds.Wages, "",  "1",  "", "", "", "Source",      "Taxpayer", "", 75000.00, "ACME Industries W-2"),
+            new DetailRow(SeriesIds.Int,   "",  "1",  "", "", "", "Source", "Taxpayer", "",   320.50, "First Bank interest"),
         };
 
         public static List<DetailRow> JonesDetails() => new List<DetailRow>
         {
-            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",      "J", "", 120000.00, "Joint household wages"),
-            new DetailRow(SeriesIds.Div,   "", "1", "", "", "", "1099DIV", "J", "",   1850.75, "Brokerage dividends"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "Source",      "Joint", "", 120000.00, "Joint household wages"),
+            new DetailRow(SeriesIds.Div,   "", "1", "", "", "", "Source", "Joint", "",   1850.75, "Brokerage dividends"),
             new DetailRow(SeriesIds.Dep,   "", "1", "", "", "", "",        "",  "",      0.00, "Dependent: Susan Jones, age 8"),
         };
 
         public static List<DetailRow> RejectedDetails() => new List<DetailRow>
         {
-            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2", "T", "", 45000.00, "Single wages — return rejected"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "Source", "Taxpayer", "", 45000.00, "Single wages — return rejected"),
         };
 
         public static List<DetailRow> BrownDetails() => new List<DetailRow>
         {
-            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",      "T", "", 95000.00, "Bill primary wages"),
-            new DetailRow(SeriesIds.Wages, "", "2", "", "", "", "W2",      "S", "", 82000.00, "Spouse wages"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "Source",      "Taxpayer", "", 95000.00, "Bill primary wages"),
+            new DetailRow(SeriesIds.Wages, "", "2", "", "", "", "Source",      "Spouse", "", 82000.00, "Spouse wages"),
             new DetailRow(SeriesIds.Dep,   "", "1", "", "", "", "",        "",  "",     0.00, "Dependent: Tim Brown, age 12"),
         };
 
         public static List<DetailRow> PendDetails() => new List<DetailRow>
         {
-            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "W2",  "J", "", 210000.00, "Joint EF in-flight"),
-            new DetailRow(SeriesIds.Int,   "", "1", "", "", "", "1099INT", "J", "", 1200.00, "EF in-flight interest"),
+            new DetailRow(SeriesIds.Wages, "", "1", "", "", "", "Source",  "Joint", "", 210000.00, "Joint EF in-flight"),
+            new DetailRow(SeriesIds.Int,   "", "1", "", "", "", "Source", "Joint", "", 1200.00, "EF in-flight interest"),
         };
 
         public static List<DetailRow> AcmeDetails() => new List<DetailRow>

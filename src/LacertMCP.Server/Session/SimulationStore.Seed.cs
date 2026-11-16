@@ -176,7 +176,13 @@ namespace LacertMCP.Server.Session
                     Fields =
                     {
                         ["C3_0"] = c.ClientNumber,
-                        ["C3_1"] = state,
+                        // R7-L1 — the state abbreviation lives in the global
+                        // group column C3_G1, the column the live SQL filters
+                        // on (SqlTemplates.Data3OldFormByState) per
+                        // docs/research/agents/03-odbc-dbf-access.md §3. The
+                        // seed used C3_1, so sim rows lacked the column live
+                        // rows carry.
+                        ["C3_G1"] = state,
                     },
                 };
             }

@@ -296,31 +296,35 @@ namespace LacertMCP.Tests.Tools
                 r.TryGetValue("clientId", out var v) && v is string s && s == "COE2");
         }
 
-        // (i) Duplicate clientId WITHIN one batch — the first row creates,
-        //     the second hits the session's DuplicateClient gate (12).
+        // (i) Duplicate clientId WITHIN one batch — R7-26: rejected up front
+        //     with 9017 InvalidArgument BEFORE any row runs (dry-run and commit
+        //     alike), so the preview can't pass a batch the commit would
+        //     half-apply. Case-insensitive: DUPB and dupb collide.
         [Fact]
-        public async Task CreateBulk_DuplicateClientIdInBatch_SecondRowFailsDuplicateClient()
+        public async Task CreateBulk_DuplicateClientIdInBatch_RejectedBeforeAnyRow()
         {
             var (mgr, tool) = NewToolWithContext();
+            var before = (await mgr.ListClients(null, int.MaxValue)).Count;
 
-            var json = await tool.LacerteClientCreateBulk(new[]
-                {
-                    Entry("DUPB"),
-                    Entry("DUPB"),
-                },
-                continueOnError: true);
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = await tool.LacerteClientCreateBulk(new[]
+                    {
+                        Entry("DUPB"),
+                        Entry("dupb"),
+                    },
+                    continueOnError: true,
+                    dryRun: dryRun);
 
-            var root = Parse(json);
-            Assert.True(root.GetProperty("success").GetBoolean(), json);
-            var result = root.GetProperty("result");
-            Assert.Equal(1, result.GetProperty("succeededCount").GetInt32());
-            Assert.Equal(1, result.GetProperty("failedCount").GetInt32());
+                var root = Parse(json);
+                Assert.False(root.GetProperty("success").GetBoolean(), json);
+                Assert.Equal(SyntheticStatusCodes.InvalidArgument, root.GetProperty("statusCode").GetInt32());
+                var dup = root.GetProperty("context").GetProperty("duplicates").EnumerateArray().Single();
+                Assert.Equal(1, dup.GetProperty("index").GetInt32());
+                Assert.Equal(0, dup.GetProperty("firstIndex").GetInt32());
+            }
 
-            var rows = result.GetProperty("rows").EnumerateArray().ToArray();
-            Assert.True(rows[0].GetProperty("succeeded").GetBoolean());
-            Assert.False(rows[1].GetProperty("succeeded").GetBoolean());
-            Assert.Equal(StatusCodes.DuplicateClient,
-                rows[1].GetProperty("statusCode").GetInt32());
+            Assert.Equal(before, (await mgr.ListClients(null, int.MaxValue)).Count);
         }
 
         // (j) Seeded duplicate — BROW exists in TY24 IData; a bulk row with

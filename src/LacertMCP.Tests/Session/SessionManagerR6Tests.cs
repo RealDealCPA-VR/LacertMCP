@@ -82,7 +82,9 @@ namespace LacertMCP.Tests.Session
         }
 
         private static DetailRow NewRow(double amount, string description)
-            => new DetailRow("Wages", "", "1", "", "", "", "W2", "T", "", amount, description);
+            // R7-SRC — TSJ in the SDK vocabulary (the session normalizes T → Taxpayer
+            // before fingerprinting, so a hand-computed fingerprint must use it too).
+            => new DetailRow("11", "", "1", "", "", "", "Source", "Taxpayer", "", amount, description);
 
         // Replicates LacerteSessionManager.BuildPayload's canonical form so a
         // test can compute the fingerprint a DIFFERENT process would have
@@ -94,9 +96,13 @@ namespace LacertMCP.Tests.Session
         // persisted on operator machines.
         private static string ComputeFingerprint(string op, params object?[] args)
         {
+            // R7-02 — the backend mode is part of the canonical payload
+            // (between op and args, same key order as BuildPayload). The
+            // tests that use this helper run in simulation.
             var canon = new Dictionary<string, object?>
             {
                 ["op"] = op,
+                ["mode"] = "Simulation",
                 ["args"] = args,
             };
             var json = JsonSerializer.Serialize(canon);
@@ -261,13 +267,12 @@ namespace LacertMCP.Tests.Session
 
             var row = NewRow(50.0, "r6-04-wd");
             // Attempt 1: the live bridge RETURNS the failure int (return is
-            // open in the Lacerte UI). It must NOT be cached under the key.
-            // A non-Success live status is a failed write and now surfaces as a
-            // structured error (sim parity) instead of a return value callers
-            // could mistake for success.
-            var e1 = await Assert.ThrowsAsync<LacerteSDKError>(() =>
-                mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
-            Assert.Equal(StatusCodes.DBFNotAccessable, e1.StatusCode);
+            // open in the Lacerte UI). R7-01 — the session now raises it as a
+            // structured LacerteSDKError (sim/live parity: the sim throws on
+            // failure). It must NOT be cached under the key.
+            var ex1 = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
+            Assert.Equal(StatusCodes.DBFNotAccessable, ex1.StatusCode);
             Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
                 "R6-04: a non-Success result must not be cached — pre-fix the failure was sticky for 24h");
 

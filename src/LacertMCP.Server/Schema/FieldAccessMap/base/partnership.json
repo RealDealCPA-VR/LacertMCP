@@ -1,1 +1,272 @@
-{}
+{
+  "P|1|C1_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G10": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G12": {
+    "access": "ReadWrite",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G13": {
+    "access": "ReadWrite",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G14": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G20": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G21": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G23": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G28": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G30": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G31": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G32": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G37": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G39": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G4": {
+    "access": "ReadWrite",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G41": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G49": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G5": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G52": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G53": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G56": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G57": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G59": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G64": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G65": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G8": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G83": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|1|C1_G9": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented access)",
+    "addedAt": "2026-11-15"
+  },
+  "P|2|C2_1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Subclient Number",
+    "addedAt": "2026-11-15"
+  },
+  "P|2|C2_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Global field (documented ReadOnly)",
+    "addedAt": "2026-11-15"
+  },
+  "P|3|C3_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "State Abbreviation",
+    "addedAt": "2026-11-15"
+  },
+  "P|4|C4_1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "Subclient Number",
+    "addedAt": "2026-11-15"
+  },
+  "P|4|C4_G1": {
+    "access": "ReadOnly",
+    "source": "sdk-pdf",
+    "description": "State Abbreviation",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G48": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G49": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G5": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G52": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G53": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G54": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G56": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G57": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G58": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G59": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G60": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  },
+  "P|5|C5_G61": {
+    "access": "Hidden",
+    "source": "sdk-pdf",
+    "description": "Global field (documented Hidden)",
+    "addedAt": "2026-11-15"
+  }
+}

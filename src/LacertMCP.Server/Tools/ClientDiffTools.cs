@@ -26,9 +26,11 @@ namespace LacertMCP.Server.Tools
     /// <c>{ added, removed, changed }</c> buckets matched on stable composite
     /// keys (SubClientId / StateAbbrev / (Series, Code, StateAbbrev, Description)
     /// respectively). The same WireLog Wire-scope redaction pass that runs
-    /// over the final envelope masks SSN/EIN/bank symmetrically — if both
-    /// sides hold the same redacted-shape value the equality check still
-    /// fires and no row is emitted.
+    /// over the final envelope masks SSN/DOB/email/bank symmetrically: for a
+    /// true-secret field code, both the <c>a</c> and <c>b</c> slots of a
+    /// <c>{ field, a, b }</c> row become <c>"***"</c> (R7). Equality is
+    /// computed on the raw values before redaction, so agreeing fields
+    /// emit no row at all.
     /// </para>
     /// </summary>
     [McpServerToolType]
@@ -45,21 +47,35 @@ namespace LacertMCP.Server.Tools
         /// (which they always do — that's the precondition for calling
         /// the tool). Operators can extend via the <c>ignoreFields</c>
         /// parameter.
+        ///
+        /// <para>
+        /// R7 — the raw <c>C{t}_0</c> ClientNumber column rides along in
+        /// every row of each diffed table (DATA1 <c>C1_0</c>, DATA2
+        /// <c>C2_0</c>, DATA3 <c>C3_0</c> — see SimulationStore.Seed and
+        /// SimulateCreateClient). It is the same identifier as
+        /// <c>clientNumber</c> under its DBF column name, so without these
+        /// entries every diff reported it (and every matched subclient /
+        /// state row landed in <c>changed</c>), making
+        /// <c>differingFieldsCount</c> never 0.
+        /// </para>
         /// </summary>
         public static readonly IReadOnlyList<string> DefaultIgnoreFields = new[]
         {
             "clientNumber",
+            "C1_0",
+            "C2_0",
+            "C3_0",
         };
 
         [McpServerTool]
-        [Description("Compare two clients in the active (datapath, year, module) field-by-field across DATA1 (identity), DATA2 (subclients), DATA3 (states), and optionally DATA6 (detail rows). Returns ONLY the rows where they differ — { field, a, b } per DATA1 column; { added[], removed[], changed[] } buckets per row-collection. Same-context only in v1 (cross-context diff is rejected with 9017 InvalidArgument). Use cases: 'did I import the right one?', 'spot-check a proforma rollover', 'how does this couple differ from their parents?'. The wire-scope WireLog redaction pass masks SSN/EIN/bank symmetrically — fields that agree under redaction are suppressed, so the envelope does not leak PII on agreement. Rejects A==B with 9017.")]
+        [Description("Compare two clients in the active (datapath, year, module) field-by-field across DATA1 (identity), DATA2 (subclients), DATA3 (states), and optionally DATA6 (detail rows). Returns ONLY the rows where they differ — { field, a, b } per DATA1 column; { added[], removed[], changed[] } buckets per row-collection. Same-context only in v1 (cross-context diff is rejected with 9017 InvalidArgument). Use cases: 'did I import the right one?', 'spot-check a proforma rollover', 'how does this couple differ from their parents?'. PII columns (SSN / DOB / email / phone / bank) are masked symmetrically: a differing PII field still appears by field code, but both its a and b values are the redacted '***' sentinel; fields that agree are suppressed entirely. The ClientNumber columns (clientNumber, C1_0/C2_0/C3_0) are always ignored, so two clients identical apart from their number report 0 differing fields. Rejects A==B with 9017.")]
         public Task<string> LacerteDiffClients(
             [Description("First ClientNumber to compare (sim-assigned monotonic identifier; e.g. \"1001\").")] string client1Number,
             [Description("Second ClientNumber to compare. Must differ from client1Number.")] string client2Number,
             [Description("When true, also diff DATA2 subclient rows (partners / dependents / shareholders). Default true.")] bool includeSubclients = true,
             [Description("When true, also diff DATA3 state rows (per-state overrides). Default true.")] bool includeStates = true,
             [Description("When true, also diff DATA6 detail rows (W-2 / 1099 / state apportionment line items). Default false — detail-row reads can be heavy.")] bool includeDetail = false,
-            [Description("Optional additional field-name list to suppress from the DATA1 diff (case-sensitive on the wire key). Useful for hiding audit timestamps the operator does not care about. The built-in ignore-set (clientNumber) is always applied.")] string[]? ignoreFields = null,
+            [Description("Optional additional field-name list to suppress from the DATA1 diff (case-sensitive on the wire key). Useful for hiding audit timestamps the operator does not care about. The built-in ignore-set (clientNumber, C1_0, C2_0, C3_0) is always applied.")] string[]? ignoreFields = null,
             CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {

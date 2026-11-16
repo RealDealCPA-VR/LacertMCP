@@ -252,5 +252,114 @@ namespace LacertMCP.Tests.Cli
                 FieldAccessMapLoader.ResetCacheForTests();
             }
         }
+
+        // ----- --schema-dir: write where the server reads, and say where -----
+
+        private static string NewTempSchemaRoot()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "lacerte-mcp-fa-" + Guid.NewGuid().ToString("N"), "FieldAccessMap");
+            Directory.CreateDirectory(Path.Combine(root, "base"));
+            Directory.CreateDirectory(Path.Combine(root, "overlays"));
+            return root;
+        }
+
+        private static void DeleteTempSchemaRoot(string root)
+        {
+            try { Directory.Delete(Path.GetDirectoryName(root)!, recursive: true); } catch { /* best-effort */ }
+        }
+
+        [Fact]
+        public void RunSet_WithSchemaDir_WritesThereAndPrintsResolvedPath()
+        {
+            var root = NewTempSchemaRoot();
+            try
+            {
+                var defaultShard = FieldAccessCommand.ShardPath(Modules.FileBasenameFor('I')!);
+                var defaultBefore = File.Exists(defaultShard) ? File.ReadAllText(defaultShard) : null;
+
+                var stdout = new StringWriter();
+                var stderr = new StringWriter();
+                var exit = FieldAccessCommand.RunSet(
+                    module: 'I', table: 1, field: "C1_42", accessRaw: "ReadWrite",
+                    dataType: null, maxLength: null, source: "manual", note: null,
+                    force: false, schemaDir: root, stdout, stderr);
+
+                Assert.Equal(0, exit);
+                var written = Path.Combine(root, "base", "individual.json");
+                Assert.True(File.Exists(written));
+                Assert.Contains("I|1|C1_42", File.ReadAllText(written));
+                var output = stdout.ToString();
+                Assert.Contains("# Schema dir: " + root, output);
+                Assert.Contains("--schema-dir", output);
+                Assert.Contains(written, output);
+                // The default (test-bin) shard must be untouched.
+                var defaultAfter = File.Exists(defaultShard) ? File.ReadAllText(defaultShard) : null;
+                Assert.Equal(defaultBefore, defaultAfter);
+            }
+            finally
+            {
+                DeleteTempSchemaRoot(root);
+            }
+        }
+
+        [Fact]
+        public void RunSet_MalformedShard_RefusesWithoutClobbering()
+        {
+            var root = NewTempSchemaRoot();
+            try
+            {
+                var shard = Path.Combine(root, "base", "individual.json");
+                const string garbage = "{ \"I|1|C1_1\": { \"access\": \"ReadWrite\" }, oops";
+                File.WriteAllText(shard, garbage);
+
+                var stdout = new StringWriter();
+                var stderr = new StringWriter();
+                var exit = FieldAccessCommand.RunSet(
+                    module: 'I', table: 1, field: "C1_42", accessRaw: "ReadOnly",
+                    dataType: null, maxLength: null, source: "manual", note: null,
+                    force: false, schemaDir: root, stdout, stderr);
+
+                Assert.Equal(1, exit);
+                Assert.Contains("not valid JSON", stderr.ToString());
+                Assert.Equal(garbage, File.ReadAllText(shard));
+            }
+            finally
+            {
+                DeleteTempSchemaRoot(root);
+            }
+        }
+
+        [Fact]
+        public void RunList_WithSchemaDir_ReadsThatTree_AndAppliesItsOverlay()
+        {
+            var root = NewTempSchemaRoot();
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "base", "individual.json"),
+                    "{ \"I|1|C1_7\": { \"access\": \"ReadWrite\", \"source\": \"manual\" }, " +
+                    "  \"I|1|C1_8\": { \"access\": \"ReadWrite\", \"source\": \"manual\" } }");
+                File.WriteAllText(Path.Combine(root, "overlays", "ty21-not-supported.json"),
+                    "{ \"taxYear\": 2021, \"overrides\": { \"I|1|C1_8\": { \"access\": \"NotSupported\", \"source\": \"spec\" } } }");
+
+                var stdout = new StringWriter();
+                var stderr = new StringWriter();
+                var exit = FieldAccessCommand.RunList('I', 1, 2021, root, stdout, stderr);
+
+                Assert.Equal(0, exit);
+                var lines = stdout.ToString().Split('\n');
+                Assert.Contains(lines, l => l.StartsWith("# Schema dir: " + root));
+                var c17 = Array.Find(lines, l => l.TrimStart().StartsWith("C1_7 "));
+                var c18 = Array.Find(lines, l => l.TrimStart().StartsWith("C1_8 "));
+                Assert.NotNull(c17);
+                Assert.NotNull(c18);
+                Assert.Contains("effective=ReadWrite", c17);
+                // Overlay from the RESOLVED tree (not the loader's test-bin tree) applies.
+                Assert.Contains("effective=NotSupported", c18);
+            }
+            finally
+            {
+                DeleteTempSchemaRoot(root);
+            }
+        }
     }
 }

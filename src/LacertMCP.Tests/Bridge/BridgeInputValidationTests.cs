@@ -90,7 +90,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: "OK\0; DROP TABLE"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -103,7 +103,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: oversize));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -216,7 +216,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
                     value: "data\0evil", subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -235,23 +235,25 @@ namespace LacertMCP.Tests.Bridge
         // WriteDetail — detail file path
         // -----------------------------------------------------------------
 
+        // R7-SRC — the SDK COM library has no detail-write method (detail files
+        // are written via the ODBC driver), so valid input fails CLOSED with 9202.
         [Fact]
-        public void WriteDetail_GoodInputs_ReachesBridgeUnavailable()
+        public void WriteDetail_GoodInputs_ReachFailClosedSimulationOnly()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
-                StateAbbr: "CA", CityAbbr: "", Source: "W2", TSJ: "T",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
+                StateAbbr: "CA", CityAbbr: "", Source: "Source", TSJ: "T",
                 ImportSrc: "", Amount: 1234.56, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
                 Writer.WriteDetail(GoodAppId, GoodDataPath, GoodClient, row));
-            Assert.Equal(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
         }
 
         [Fact]
         public void WriteDetail_NullByteInDescription_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0,
                 Description: "innocent\0; SELECT *");
@@ -266,7 +268,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_OversizeDescription_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0,
                 Description: new string('x', 256));
@@ -282,7 +284,7 @@ namespace LacertMCP.Tests.Bridge
         {
             // Prefix cap is the tighter 50-char ShortStringMaxLength.
             var row = new DetailRow(
-                Series: "Wages", Prefix: new string('x', 51), Code: "1", Suffix: "",
+                Series: "11", Prefix: new string('x', 51), Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -296,7 +298,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_NonNumericCode_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1; DROP", Suffix: "",
+                Series: "11", Prefix: "", Code: "1; DROP", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -310,7 +312,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_BadStateAbbrInRow_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "California", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -323,7 +325,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_NaNAmount_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: double.NaN, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -337,7 +339,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_InfinityAmount_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: double.PositiveInfinity, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -350,7 +352,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_BadClientNumber_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -363,7 +365,7 @@ namespace LacertMCP.Tests.Bridge
         public void WriteDetail_BadDataPath_ThrowsBeforeBridge()
         {
             var row = new DetailRow(
-                Series: "Wages", Prefix: "", Code: "1", Suffix: "",
+                Series: "11", Prefix: "", Code: "1", Suffix: "",
                 StateAbbr: "", CityAbbr: "", Source: "", TSJ: "",
                 ImportSrc: "", Amount: 100.0, Description: "ok");
             var ex = Assert.Throws<LacerteSDKError>(() =>
@@ -500,7 +502,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: double.NaN));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -512,7 +514,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: double.PositiveInfinity));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -523,7 +525,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: float.NegativeInfinity));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -534,7 +536,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
                     value: double.NaN, subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -549,7 +551,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: arr));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -563,7 +565,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: obj));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -578,7 +580,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: s));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         // -----------------------------------------------------------------
@@ -600,7 +602,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "bob\0", "Doe", "jane@example.com"));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             Assert.Equal("firstName", ex.Context["field"]);
         }
 
@@ -611,7 +613,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "Jane", "Doe\0; DROP", "jane@example.com"));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             Assert.Equal("lastName", ex.Context["field"]);
         }
 
@@ -625,7 +627,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "Jane", "Doe", bigEmail));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             // P16-054/P16-080 — bridge-side field name renamed to `emailId`
             // to match the wire form.
             Assert.Equal("emailId", ex.Context["field"]);

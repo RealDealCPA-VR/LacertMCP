@@ -14,8 +14,9 @@
   "overlays": [
     "ty21-not-supported"
   ],
-  "lastUpdated": "2026-05-30",
+  "lastUpdated": "2026-11-15",
   "sources": [
+    "Intuit Lacerte SDK Developer Instructions (https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf) \u2014 Appendix: Database Field Access + Not Supported Fields in TY21",
     "Lacerte_MCP_Structure_Spec.md",
     "docs/research/agents/04-field-access-map.md"
   ]

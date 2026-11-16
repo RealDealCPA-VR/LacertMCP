@@ -89,7 +89,7 @@ namespace LacertMCP.Tests.Session
         public async Task WriteDetail_PreCancelledToken_Throws()
         {
             using var mgr = NewRegisteredSimWithContext();
-            var row = new DetailRow("11", "", "1", "", "", "", "W2", "T", "", 1.0, "ct-test");
+            var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 1.0, "ct-test");
             await Assert.ThrowsAnyAsync<System.OperationCanceledException>(
                 async () => await mgr.WriteDetail("1001", row, cancellationToken: Cancelled()));
         }

@@ -555,7 +555,7 @@ This entry documents the policy that three code comments have cited since P18 (`
 3. The alternative — never retrying writes — converts every transient COM blip into an operator-visible failure on exactly the highest-stakes ops, and the operator's natural reaction (manually re-running the tool) carries the SAME double-commit risk with less telemetry.
 4. The idempotency layer (P14-005/P17-004) absorbs the operator-level retry path: a keyed retry of an already-Succeeded write replays from cache instead of touching the wire again.
 
-**Operator guidance (the load-bearing part):** when a retry-exhausted error (`Exception.Data["AutoReconnect.Exhausted"]=true`) — or any `AutoReconnect.retry` log line — follows a `WriteDetail` or `CreateClient`, do NOT blindly re-issue the write. Verify with a read-after-write first: `lacerte_detail_read` (count + inspect the target rows) after `WriteDetail`; `lacerte_list_clients` / `lacerte_read_client` (look for the ClientID) after `CreateClient`. Re-issue only if the write demonstrably did not land; if a duplicate landed, the recovery is `replaceIndex` row correction in sim (live row correction is still gated by 9019 LiveReplaceIndexUnsupported — see the missing-tools list).
+**Operator guidance (the load-bearing part):** when a retry-exhausted error (`Exception.Data["AutoReconnect.Exhausted"]=true`) — or any `AutoReconnect.retry` log line — follows a `WriteDetail` or `CreateClient`, do NOT blindly re-issue the write. Verify with a read-after-write first: `lacerte_detail_read` (count + inspect the target rows) after `WriteDetail`; `lacerte_client_list` / `lacerte_client_read` (look for the ClientID) after `CreateClient`. Re-issue only if the write demonstrably did not land; if a duplicate landed, the recovery is `replaceIndex` row correction in sim (live row correction is still gated by 9019 LiveReplaceIndexUnsupported — see the missing-tools list).
 
 **Downstream:** any NEW append-only bridge op wrapped in `AutoReconnect.WithRetry` MUST pass `opName` so its retries are greppable, and its tool docs should repeat the read-after-write guidance. If live verification (Phase 9+) shows post-commit transients are more common than assumed, revisit with a write-specific policy (e.g. retry only `RPC_E_SERVERCALL_RETRYLATER` for writes).
 
@@ -598,3 +598,82 @@ This entry documents the policy that three code comments have cited since P18 (`
 ## 2026-11-11 — HTTP transport + control page on the Lacerte PC
 
 The SDK is local-only, so the shared office deployment is the server itself on the Lacerte PC (`--http`), not a hub. HttpListener + the SDK's `StreamableHttpServerTransport` (netstandard2.0; ModelContextProtocol.AspNetCore needs net8). Bound to loopback + the PC's Tailscale IPv4 (re-resolved every 30s); callers identified by `tailscale whois`; a whois failure is a 503 that names the cause and is never cached (lesson from the QuickBooks hub outage of 2026-11-11). Per-device access pinned to StableID. Per-connection context via `SessionScope` (AsyncLocal, flowed by `FlowExecutionContextFromRequests`) — stdio behaviour unchanged. Runs as a Startup-folder launcher in the user's session (not a service) because the SDK and Intuit sign-in need the desktop.
+
+## 2026-11-15 — Round-7 deep review: live write failures raise; content rules run in both modes
+
+**Chosen:** `LacerteSessionManager.WriteField` / `WriteDetail` convert a non-Success TAPIStatus **returned** by the live bridge into a structured `LacerteSDKError` (after the Success-only idempotency store, so failures are still never cached). The bridge's content rules (`BridgeInputValidation.ValidateValue` / `ValidateDetailRowContent` / `ValidateCreateClientText`: 255/50-char caps, C0 control characters, NaN/Infinity, non-scalar) now run at the session chokepoint in **both** modes. Field-write content violations report `9015 FieldWriteInvalid`, create-client text violations report `24 InValidClientName` (was `9008 DetailWriteInvalid`, whose message is about detail-row shape). A live `dryRun` applies the same pre-TY21 refusal (`9202`) and identifier-shape checks as the commit.
+
+**Why:** the `ILacerteBridge` contract says "failures throw" and the sim throws, but `Bridge.Writer` returned raw ints. The single-write tools and `lacerte_field_write_bulk` reported `success:true, statusCode:2` (DBFNotAccessable) for a rejected live write, which an LLM reads as a landed write. That broke the two-mode rule in the most dangerous direction. Sim also accepted values live rejected, and a live preview passed writes the commit would refuse.
+
+**Source:** round-7 review (Todo.md Phase 21 R7-01/R7-12/R7-13).
+
+## 2026-11-15 — Idempotency fingerprint includes the backend mode; sim cache file is separate
+
+**Chosen:** `BuildPayload` canonicalizes `{op, mode, args}` (mode between op and args), and the default persisted cache for simulation is `idempotency-cache.sim.json`; live keeps `idempotency-cache.json`. An explicit `LACERTE_IDEMPOTENCY_PERSIST_PATH` shared by both modes now yields `9102 IdempotencyConflict` on cross-mode reuse instead of a silent replay.
+
+**Why:** sim seeds use the real install datapaths (`C:\Lacerte\24Tax\IData`). A sim session on the operator's box could cache `CreateClient(..., key)` → `(Success, "1003")`, and a live process within 24h replayed it. The wire never fired, and the returned number could name a different real client.
+
+**Consequence:** fingerprints persisted before this change no longer match. Within their 24h TTL, a byte-identical retry surfaces 9102 instead of replaying. This is accepted because live mode has not run against a real Lacerte box yet, and the sim file moved anyway. The R6-01 cross-process test helper mirrors the new canonical form.
+
+## 2026-11-15 — Error-envelope mapping: ArgumentException → 9017; cancellation propagates
+
+**Chosen:** `WrapToolHandler.Run` maps `ArgumentException` (incl. `ArgumentOutOfRangeException`) to `9017 InvalidArgument` with `{argument, reason[, value]}`, and **rethrows** `OperationCanceledException` instead of wrapping it.
+
+**Why:** Pagination's negative-limit guard, `lacerte_client_find`'s blank-name / limit checks, ClientResourceTools and ConnectionStringBuilder all throw `ArgumentException`. These are caller errors, but they reached the LLM as `9203 InternalServerError` ("set LACERTE_DEBUG_WIRE=1 and file an issue"). A host cancellation (`notifications/cancelled`) is not a server fault; the MCP SDK owns cancellation semantics. Bulk tools still catch per-row cancellation themselves and return their partial `stoppedEarly` envelope.
+
+## 2026-11-15 — LACERTE_DEFAULT_TAX_YEAR: honored by set_context; invalid values ignored
+
+**Chosen:** `lacerte_set_context`'s `taxYear` is optional (`int? taxYear = null`, placed after `module`; MCP binds by name) and falls back to `LACERTE_DEFAULT_TAX_YEAR`, else `9017`. An invalid value (non-integer, < 2018, > UtcNow.Year+1) is **ignored** (treated as unset), matching EnvValidator's "… — ignored" warning. Previously it was a fail-loud throw.
+
+**Why:** the docs, HelpTools and the code 11/25 remediation all promised the fallback, but nothing read it. The fail-loud throw ran inside the singleton HeartbeatWriter resolves at host start, so a typo killed the server before the MCP handshake. That happened right after stderr had told the operator the value was ignored.
+
+## 2026-11-15 — Wire redaction: PII value slots in diff/audit shapes; FieldAccess labels exempt
+
+**Chosen:** when an object's `field` is a true-secret code (`_piiFieldCodes`), every value-slot sibling is masked. Value slots are `a`/`b`, before/after, old/new, from/to, prior/current, original/updated, `delta`, and any `*Value` / `*Values`; addressing keys like `clientNumber` and `reason` are left alone. Separately, a PII-code **key** whose value is exactly a `FieldAccess` enum name (`ReadWrite`, `ReadOnly`, …) is not masked.
+
+**Why:** `lacerte_diff_clients` (`{field, a, b}`) and `lacerte_year_over_year` (`{field, fromValue, toValue}`) returned SSN/DOB/email/bank values unmasked, because only a sibling literally named `value` was scrubbed. Conversely, `lacerte_field_access_map` is keyed by field code, so the LLM saw `"C1_15":"***"`. That hid writability for exactly the fields where it matters most. No SSN/DOB/email/bank value can equal an access-enum literal.
+
+## 2026-11-15 — Bulk batches: context pinned per row; in-batch duplicate clientIds rejected up front
+
+**Chosen:** the three bulk write tools pass the context they validated as `expectedContext` to every per-row session call, and the chokepoint throws `9016 ContextMismatch` if the active context changed (value equality, so re-setting the identical tuple is fine). `lacerte_client_create_bulk` rejects an `entries[]` that repeats a clientId (case-insensitive) with `9017` (`context.duplicates`) before any row runs, in dry-run and commit alike.
+
+**Why:** a mid-batch `lacerte_set_context` silently retargeted the remaining rows. Dry-run rows are applied then undone one at a time, so `[SMITH, smith]` previewed as two successes, and the commit then half-applied and stopped on DuplicateClient.
+
+## 2026-11-15 — AutoReconnect sees through the bridge's 9201 wrapper
+
+**Chosen:** `AutoReconnect.IsTransient` treats `LacerteSDKError(BridgeUnavailable 9201)` as transient iff its `InnerException` is (non-SDK and) one of the four whitelisted HRESULTs. Every other TAPIStatus-bearing error is still never retried.
+
+**Why:** every live Bridge method wraps all exceptions as 9201, so the retry policy chosen on 2026-05-30 (and R6-41, retry-then-verify for append-only ops) never ran against the real bridge, only against test fakes. Companion fix: `LacerteAccessClient.CreateClient` reads the assigned `ClientNumber` best-effort *after* the commit. A failed property read now returns Success with a null number instead of 9201, which a retry would have turned into DuplicateClient.
+
+## 2026-11-15 — Simulation visibility gate (reader/writer) replaces the per-op dry-run locking
+
+**Chosen:** a single `ReaderWriterLockSlim _simGate` (SupportsRecursion). It is taken **exclusive** for sim client creation and for every sim dry-run (field / detail / create), and **shared** for every sim read core (ListClients, ReadClient, ReadTable, ReadDetail, ReadEFStatus). Real field/detail writes do not take it; they keep the per-client lock. Lock order: `_simGate` → per-client write lock → `lock(list)`. The gate is entered and exited only around synchronous bodies, never across an `await`.
+
+**Why:** sim dry-run is "apply, then undo". The per-client lock serialized dry-runs against writers, but readers never took it, so a concurrent read could return a dry-run value, a phantom detail row, or a phantom client. Live has no such window. A shared/exclusive gate makes every read see either before or after a dry-run, never the middle, without serializing reads against each other.
+
+**Also (second pass):** `WrapToolHandler` maps `ArgumentException` to 9017 **only** when this server's own code threw it (`TargetSite` namespace `LacertMCP.Server*`). BCL-thrown ones are in-server bugs and stay 9203. The idempotency lock acquirer re-checks that it holds the semaphore still registered for the key.
+
+## 2026-11-15 — The Intuit SDK Developer Instructions PDF is the primary source; the bridge follows it
+
+**Chosen:** the live bridge, the ODBC builder and the detail-row validation now follow the public Intuit *Lacerte Software Development Kit Developer Instructions* (https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf). Where `Lacerte_MCP_Structure_Spec.md` or the `docs/research` notes disagree, the PDF wins; the spec now carries a "Corrections from the primary source" section. Specifically:
+- Objects come from `LacerteAccess` factories, not undocumented ProgIDs.
+- TPSDKStatus raw values 0..4 map to 200..204.
+- The documented `ReadFromDBFData` / `WriteToDBFDatabase` / `UpdateTaxReturn` / `CreateClient` signatures are used, with String values.
+- The connection string uses `DataDir` and a 4-digit `TaxYear`.
+- TY21+ state tables are named `-Detail-ClientStateInfo` / `-Detail-SubClientStateInfo`.
+- Detail-file column constraints are enforced in both modes. TSJ is stored as Taxpayer/Spouse/Joint.
+
+**Fail-closed where the PDF documents no COM API:** live detail-row writes return `9202 SimulationOnly`. The SDK writes detail files through its ODBC driver, whose write path is not wired yet. A live create returns Success with a null ClientNumber because the SDK returns none.
+
+**Inference flagged:** the `TaxModule` enum's integer values are not printed. The .NET sample's `(TaxModule)(SelectedIndex + 1)`, together with the documented module order (Individual … Benefit), gives ordinal = index + 1 (`Modules.TaxModuleOrdinal`). TPSDKStatus 1..4 follow the same C# enum-position rule from the documented `ConsentDenied = 0`.
+
+## 2026-11-15 — PDF field-access rows: literal entries only, I/P scope, no fail-open across years
+
+**Chosen:** the PDF appendix's literal access rows ship as `source: "sdk-pdf"` entries. The documented DATA1/DATA5 global-field rows go in the Individual and Partnership shards. The structural DATA2–DATA4 rows go in all nine. The TY21 not-supported lists form the exact-year TY21 overlay. Range rules ("remaining non-global fields") are not encoded, so the 2026-05-30 fail-closed default stands. **No base entry may be ReadWrite when the PDF removes that field in a later year without a per-year overlay**: `C1_G38` is omitted for this reason. Doctor Warns until entries beyond the `sdk-pdf` baseline exist.
+
+**Why:** the 2026-05-30 decision said the map ships with the spec's hard-coded entries, but the shards had shipped empty. Encoding ranges or other modules from a non-module-scoped table would widen the write surface beyond what the source states literally.
+
+## 2026-11-16 — Workstations connect through a PowerShell bridge, not mcp-remote
+
+Claude Desktop's config file only starts local (stdio) programs, and its remote "connectors" go through Anthropic's cloud, which can't reach a tailnet IP. The usual fix (`npx mcp-remote`) needs Node on every workstation. Instead, the Lacerte PC serves `bridge.ps1`, a ~100-line relay that runs on the Windows PowerShell 5.1 every Windows PC already has. It opens a new connection per message (a pooled one hung after a server restart in testing), replays `initialize` when the server says the session is gone, and answers every request even on failure so the app never waits forever. Claude Code skips the bridge (it speaks HTTP). Setup and bridge are served by the server itself, so they always match its version and address, and they carry no data, so any identified tailnet device may fetch them; access is still decided per device on `/mcp`.
+

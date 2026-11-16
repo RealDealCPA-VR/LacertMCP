@@ -17,7 +17,8 @@
 #
 # Usage:
 #   ./scripts/release.ps1                 # uses the version from Directory.Build.props
-#   ./scripts/release.ps1 -Version 0.1.0  # explicit override
+#   ./scripts/release.ps1 -Version 0.1.0  # explicit override — names the zip AND stamps the
+#                                         # binaries (-p:Version / AssemblyVersion / FileVersion)
 #   ./scripts/release.ps1 -OutputDir C:/builds/lacerte -Force
 
 [CmdletBinding()]
@@ -47,20 +48,30 @@ try {
     $gitSha = ''
 }
 
-Write-Host "==> Building Release x64..." -ForegroundColor Cyan
-$buildArgs = @('build', $script:Solution, '-c', 'Release', '-p:Platform=x64', '-nologo')
-if ($gitSha) {
-    $buildArgs += "-p:SourceRevisionId=$gitSha"
-    Write-Host "    (stamping SourceRevisionId=$gitSha)" -ForegroundColor DarkGray
-}
-& $script:Dotnet @buildArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
-    exit $LASTEXITCODE
-}
-
-# ---- 2. Resolve the version -------------------------------------------
-if (-not $Version) {
+# ---- 1a. Resolve the version (BEFORE the build so it can be stamped) ----
+# An explicit -Version (the release workflow passes the tag, e.g. v0.2.0 ->
+# 0.2.0) is passed to MSBuild as -p:Version plus numeric AssemblyVersion /
+# FileVersion, overriding Directory.Build.props, so the binaries inside the
+# zip carry the same version as the zip name / git tag. (Previously -Version
+# only named the zip and every binary still said the props version.)
+# Without -Version the props value is used and nothing is overridden.
+$versionOverrideArgs = @()
+if ($Version) {
+    $Version = $Version.Trim().TrimStart('v', 'V')
+    # SemVer-ish: x.y.z with optional -prerelease / +build suffix.
+    if ($Version -notmatch '^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.\-+]*)?$') {
+        Write-Host "Invalid -Version '$Version' — expected x.y.z (optionally -prerelease), e.g. 0.2.0 or 0.2.0-rc.1." -ForegroundColor Red
+        exit 1
+    }
+    # AssemblyVersion/FileVersion must be purely numeric (each part <= 65535).
+    $parts = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+    if (@($parts | Where-Object { $_ -gt 65535 }).Count -gt 0) {
+        Write-Host "Invalid -Version '$Version' — each numeric part must be <= 65535 for AssemblyVersion/FileVersion." -ForegroundColor Red
+        exit 1
+    }
+    $numeric = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+    $versionOverrideArgs = @("-p:Version=$Version", "-p:AssemblyVersion=$numeric", "-p:FileVersion=$numeric")
+} else {
     # Pull from Directory.Build.props so version stays in one source-of-truth.
     $props = [xml](Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Directory.Build.props') -Raw)
     $node = $props.SelectSingleNode("//Version")
@@ -70,6 +81,24 @@ if (-not $Version) {
         $Version = '0.0.0'
     }
 }
+
+Write-Host "==> Building Release x64..." -ForegroundColor Cyan
+$buildArgs = @('build', $script:Solution, '-c', 'Release', '-p:Platform=x64', '-nologo')
+if ($gitSha) {
+    $buildArgs += "-p:SourceRevisionId=$gitSha"
+    Write-Host "    (stamping SourceRevisionId=$gitSha)" -ForegroundColor DarkGray
+}
+if ($versionOverrideArgs.Count -gt 0) {
+    $buildArgs += $versionOverrideArgs
+    Write-Host "    (stamping $($versionOverrideArgs -join ' '))" -ForegroundColor DarkGray
+}
+& $script:Dotnet @buildArgs
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+# ---- 2. Report the version ---------------------------------------------
 Write-Host "==> Releasing v$Version" -ForegroundColor Cyan
 
 # ---- 3. Stage Server + verify Schema/FieldAccessMap tree --------------

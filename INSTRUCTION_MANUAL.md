@@ -364,8 +364,8 @@ Returns mode, registration state, 24h expiry, active context, debug-log state, a
 
 Sets the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates `taxYear >= 2018` and `module` in `I/C/P/S/F/R/T/N/B`.
 
-- Required: `dataPath: string` (absolute path), `taxYear: int`, `module: string` (length 1).
-- Optional: `readOnly: bool = false` — when true, every write tool short-circuits to 9001 (`FieldIsReadOnly`) before any side effect.
+- Required: `dataPath: string` (fully-qualified absolute path incl. drive; trailing separators and `/` are normalized; drive-relative `C:foo` / drive-less `\foo` are rejected with 9013), `module: string` (length 1).
+- Optional: `taxYear: int` — defaults to the server's `LACERTE_DEFAULT_TAX_YEAR`; omitted with no default configured → 9017. `readOnly: bool = false` — when true, every write tool short-circuits to 9001 (`FieldIsReadOnly`) before any side effect.
 - Response: `{ dataPath, taxYear, module, readOnly }`.
 - Example:
   ```json
@@ -533,7 +533,7 @@ Alias for `lacerte_field_write`, kept to mirror Intuit's TY21+ `UpdateTaxReturn`
 Appends a detail row, or replaces the row at `replaceIndex` if supplied. Runs **mandatory client-side validation** before the session call — the SDK does not validate detail-row shape, and a malformed row silently corrupts the return.
 
 - Required: `clientNumber: string`, `series: string` (numeric, e.g. `"11"` = W-2), `code: string` (numeric, leading minus allowed), `amount: double?`, `description: string`.
-- Optional row-key segments (all default to empty): `prefix`, `suffix`, `stateAbbrev` (validated as `^[A-Z]{2}$` when non-empty), `cityAbbr`, `source`, `tsj` (one of T/S/J or empty), `importSrc`.
+- Optional row-key segments (all default to empty): `prefix`, `suffix`, `stateAbbrev` (validated as `^[A-Z]{2}$` when non-empty), `cityAbbr` (≤ 3 chars), `source` (SDK Source flag: blank, `Nonsource` or `Source` — not a form tag), `tsj` (one of T/S/J or empty), `importSrc` (read-only per the SDK — must be blank). `prefix`/`suffix` are SDK Integers (blank or a whole number); `amount` is within ±999,999,999 with ≤ 12 decimals (SDK detail-file constraints, enforced in both modes).
 - Optional: `replaceIndex: int?`, `dryRun: bool = false`, `idempotencyKey: string?`.
 - Response: `{ statusCode, statusName, clientNumber, replaceIndex, dryRun }`.
 
@@ -1139,7 +1139,7 @@ Source: `src/LacertMCP.Server/Errors/SyntheticStatusCodes.cs`.
 | 9102 | IdempotencyConflict | auth | Same idempotency key reused with a different payload fingerprint — different args, a flipped `dryRun`, or a `lacerte_set_context` switch of dataPath/taxYear/module (the context triple is part of the fingerprint). | Pick a fresh key (e.g. the `-preview`/commit prefix convention), or replay the original payload byte-for-byte in the original context. |
 | 9103 | InvalidAppId | auth | Supplied AppID failed bridge-boundary shape check. | Re-run `lacerte-mcp unregister` then `lacerte-mcp register`; or fix the `LACERTE_APPID` env var. |
 | 9201 | BridgeUnavailable | bridge | Live mode requested but the .NET/COM bridge process didn't start or crashed. | Confirm Windows + SDK installed. Enable `LACERTE_DEBUG_WIRE=1`, restart, reproduce; grep the log for `cid`. |
-| 9202 | SimulationOnly | bridge | Live-only op (e.g. `lacerte_client_create`) called in simulation mode. | Set `LACERTE_LIVE=1` on Windows + Lacerte; or stub the op in sim. |
+| 9202 | SimulationOnly | bridge | Op available in simulation mode only; its live path is not wired yet (pre-TY21 row-number writes; detail-row writes, which the SDK performs only via its ODBC driver). | Run in simulation mode, or do the step in Lacerte; `context.reason` names the gap. |
 | 9203 | InternalServerError | bridge | MCP server raised an unexpected exception — not an SDK error. | Capture `exceptionType` from context. Enable `LACERTE_DEBUG_WIRE=1`, reproduce, file an issue with the log block. |
 
 ### "When you see X, do Y" mapping
