@@ -41,7 +41,7 @@ namespace LacertMCP.Tests.Diagnostics
         {
             // Loose match — pins the current release line (0.1.x). Bump this when
             // Directory.Build.props is bumped, so the assertion stays accurate.
-            Assert.StartsWith("0.1.", BuildInfo.Version);
+            Assert.StartsWith("0.2.", BuildInfo.Version);
         }
 
         // ----- P17-009: SourceRevisionId git-SHA stamping ------------------
@@ -98,7 +98,7 @@ namespace LacertMCP.Tests.Diagnostics
             // And the bit before the `+` must still be the bare version
             // (e.g. "0.1.0") — the SHA never replaces the version, only appends.
             var bareVersion = version.Substring(0, plusIndex);
-            Assert.StartsWith("0.1.", bareVersion);
+            Assert.StartsWith("0.2.", bareVersion);
         }
 
         /// <summary>
