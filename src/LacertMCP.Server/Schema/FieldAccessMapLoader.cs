@@ -399,6 +399,12 @@ namespace LacertMCP.Server.Schema
             foreach (var kv in map)
             {
                 if (kv.Value == null) throw new JsonException($"entry '{kv.Key}' is null.");
+                // JsonStringEnumConverter accepts ANY integer (e.g. 99); an
+                // undefined FieldAccess would fall through AssertWritable's
+                // default branch as a generic Error. Reject it here so the
+                // loader (fail-closed) and doctor (Fail) agree.
+                if (!Enum.IsDefined(typeof(FieldAccess), kv.Value.Access))
+                    throw new JsonException($"entry '{kv.Key}' has undefined access value {(int)kv.Value.Access}.");
             }
             return map;
         }
@@ -415,6 +421,8 @@ namespace LacertMCP.Server.Schema
             foreach (var kv in overrides)
             {
                 if (kv.Value == null) throw new JsonException($"override '{kv.Key}' is null.");
+                if (!Enum.IsDefined(typeof(FieldAccess), kv.Value.Access))
+                    throw new JsonException($"override '{kv.Key}' has undefined access value {(int)kv.Value.Access}.");
             }
             return new TaxYearOverlay(raw.TaxYear == 0 ? year : raw.TaxYear, overrides);
         }

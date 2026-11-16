@@ -373,6 +373,7 @@ namespace LacertMCP.Tests.Cli
         [InlineData("{ \"I|1|C1_15\": { \"access\": \"ReadWrite\", \"maxLength\": \"abc\" } }")] // wrong-typed field
         [InlineData("{ \"I|1|C1_15\": { \"access\": \"ReadWrite\", \"source\": 5 } }")]
         [InlineData("{ \"I|1|C1_15\": null }")]                                                  // null entry
+        [InlineData("{ \"I|1|C1_15\": { \"access\": 99, \"source\": \"manual\" } }")]             // undefined numeric enum
         public void Doctor_Shards_LoaderRejectedShapes_Fail(string json)
         {
             var root = NewShardTree(("individual.json", json));

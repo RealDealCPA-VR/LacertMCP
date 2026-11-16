@@ -10,7 +10,7 @@ Goal: a deep review of the whole project, checked against source and `Lacerte_MC
 - bulk and aggregate tools, plus logging
 - CLI, startup and build
 
-Each finding was re-verified against source before it was fixed. Net: **1506 → 1677 tests passing, 11 skipped, 0 failed (3 consecutive full-suite runs), build 0 warnings / 0 errors.** All work is on branch `review/r7-deep-review`. The full per-finding list is in `Todo.md` Phase 21, and the policy choices are in `DECISIONS.md` (the 10 2026-11-15 entries).
+Each finding was re-verified against source before it was fixed. Net: **1506 → 1678 tests passing, 11 skipped, 0 failed (3 consecutive full-suite runs), build 0 warnings / 0 errors.** All work is on branch `review/r7-deep-review`. The full per-finding list is in `Todo.md` Phase 21, and the policy choices are in `DECISIONS.md` (the 10 2026-11-15 entries).
 
 ### What changed (read these to understand the diff)
 
@@ -55,7 +55,7 @@ Each finding was re-verified against source before it was fixed. Net: **1506 →
 ## Verify Before Continuing
 
 - [ ] **Build:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" build C:/Users/VR/Projects/LacertMCP/LacertMCP.sln -c Debug -p:Platform=x64` → **0 warnings, 0 errors**.
-- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` → **1677 passed, 11 skipped, 0 failed**.
+- [ ] **Tests:** `& "$env:USERPROFILE\.dotnet\dotnet.exe" test C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Tests/LacertMCP.Tests.csproj --no-build -c Debug -p:Platform=x64` → **1678 passed, 11 skipped, 0 failed**.
 - [ ] **CLI smoke:** `src/LacertMCP.Cli/bin/x64/Debug/lacerte-mcp.exe status` → exit 0; `tools --names-only` → **42 names**; `doctor` → exit 1 on this box (no Lacerte installed). Note: since `0776766` there is **no `net48` subfolder** under `bin/x64/<Config>/`.
 - [ ] **MCP server smoke:** `src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` boots (`[startup] LacertMCP 0.1.0 mode=simulation ...`) and exits 0 on stdin EOF, including with `LACERTE_DEFAULT_TAX_YEAR=abc` (banner shows `defaultTaxYear=<ignored>`).
 
