@@ -484,19 +484,31 @@ namespace LacertMCP.Tests.Session
             Assert.Equal(2024, snap.DefaultTaxYear);
         }
 
+        // R7-21 — invalid values are IGNORED (null), matching EnvValidator's
+        // "ignored" stderr warning; the old throw killed the server at host
+        // start (HeartbeatWriter resolves the singleton) before the handshake.
         [Fact]
-        public void Ctor_DefaultTaxYearEnv_NonNumeric_FailsFast()
+        public void Ctor_DefaultTaxYearEnv_NonNumeric_IgnoredAsUnset()
         {
             var env = new Dictionary<string, string?> { ["LACERTE_DEFAULT_TAX_YEAR"] = "abc" };
-            var ex = Assert.Throws<InvalidOperationException>(() => new LacerteSessionManager(env));
-            Assert.Contains("LACERTE_DEFAULT_TAX_YEAR", ex.Message);
+            using var mgr = new LacerteSessionManager(env);
+            Assert.Null(mgr.DefaultTaxYear);
         }
 
         [Fact]
-        public void Ctor_DefaultTaxYearEnv_BelowFloor_FailsFast()
+        public void Ctor_DefaultTaxYearEnv_BelowFloor_IgnoredAsUnset()
         {
             var env = new Dictionary<string, string?> { ["LACERTE_DEFAULT_TAX_YEAR"] = "2017" };
-            Assert.Throws<InvalidOperationException>(() => new LacerteSessionManager(env));
+            using var mgr = new LacerteSessionManager(env);
+            Assert.Null(mgr.DefaultTaxYear);
+        }
+
+        [Fact]
+        public void Ctor_DefaultTaxYearEnv_AboveCeiling_IgnoredAsUnset()
+        {
+            var env = new Dictionary<string, string?> { ["LACERTE_DEFAULT_TAX_YEAR"] = "2099" };
+            using var mgr = new LacerteSessionManager(env);
+            Assert.Null(mgr.DefaultTaxYear);
         }
 
         [Fact]

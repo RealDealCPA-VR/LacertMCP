@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -273,6 +274,35 @@ namespace LacertMCP.Server.Schema
                     context["access"] = access.ToString();
                     throw new LacerteSDKError(StatusCodes.Error, context);
             }
+        }
+
+        /// <summary>
+        /// R7-24 — every field name cataloged for (module, table) in the base
+        /// shard plus the taxYear overlay, from one snapshot generation.
+        /// <c>lacerte_field_access_map</c> previously probed only a fixed
+        /// C{t}_0..25 + _G1..G3 grid, so real codes such as C1_71 could never
+        /// appear — and the workflow prompts treat "absent from fields" as the
+        /// STOP signal. Returned names are upper-case, de-duplicated, sorted.
+        /// </summary>
+        public static IReadOnlyList<string> GetCatalogedFields(char module, int table, int taxYear)
+        {
+            var snap = Volatile.Read(ref _snapshot);
+            var prefix = module + "|" + TableString(table) + "|";
+            var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            void Collect(IEnumerable<string> keys)
+            {
+                foreach (var k in keys)
+                {
+                    if (k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && k.Length > prefix.Length)
+                    {
+                        names.Add(k.Substring(prefix.Length).ToUpperInvariant());
+                    }
+                }
+            }
+            Collect(LoadModule(snap, module).Keys);
+            var overlay = LoadOverlay(snap, taxYear);
+            if (overlay != null) Collect(overlay.Overrides.Keys);
+            return names.ToList();
         }
 
         // ---- Internals ----

@@ -35,7 +35,8 @@ namespace LacertMCP.Server.Tools
             CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
-                var rows = await _session.ReadTable(3, clientNumber, stateAbbrev, cancellationToken).ConfigureAwait(false);
+                // R7-14 — "one client" tool: blank clientNumber must not mean "all clients".
+                var rows = await _session.ReadTable(3, LacerteSessionManager.RequireClientNumber(clientNumber, "ReadStates"), stateAbbrev, cancellationToken).ConfigureAwait(false);
                 var page = Pagination.Pagination.Page(rows, limit, offset);
                 // P16-024 — canonical `rows` key for cross-tool consistency.
                 // `states` retained as a v0.1 alias (removed in v0.2).
@@ -68,7 +69,8 @@ namespace LacertMCP.Server.Tools
             CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
             {
-                var rows = await _session.ReadTable(4, clientNumber, stateAbbrev, cancellationToken).ConfigureAwait(false);
+                // R7-14 — "one client" tool: blank clientNumber must not mean "all clients".
+                var rows = await _session.ReadTable(4, LacerteSessionManager.RequireClientNumber(clientNumber, "ReadStateSubclients"), stateAbbrev, cancellationToken).ConfigureAwait(false);
                 var page = Pagination.Pagination.Page(rows, limit, offset);
                 // P16-024 — canonical `rows` key for cross-tool consistency.
                 // `stateSubclients` retained as a v0.1 alias (removed in v0.2).

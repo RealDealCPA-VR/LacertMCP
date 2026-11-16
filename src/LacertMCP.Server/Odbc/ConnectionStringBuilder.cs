@@ -72,6 +72,17 @@ namespace LacertMCP.Server.Odbc
                 throw new ArgumentException("returnType must be a non-empty module name (Individual, Corporate, ...).", nameof(returnType));
             }
 
+            // R7-31 — returnType is inlined UNBRACED (unlike Datapath), so a
+            // value containing ';' could append extra connection-string keys.
+            // Today it only comes from Modules, but enforce the closed set at
+            // the boundary that builds the string.
+            if (Schema.Modules.GetByReturnType(returnType) == null)
+            {
+                throw new ArgumentException(
+                    $"returnType '{returnType}' is not a known Lacerte module ReturnType (Individual, Corporate, Partnership, SCorporate, Fiduciary, Exempt, Estate, Gift, Benefit).",
+                    nameof(returnType));
+            }
+
             // SDK floor per StatusCodes.InValidTaxYear remediation (>= 2018); upper bound is a
             // sanity guard so the two-digit truncation below never produces a non-sensical year.
             if (taxYear < 2018 || taxYear > 2099)

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Schema;
@@ -30,7 +31,7 @@ namespace LacertMCP.Server.Tools
     public class CreateClientTools
     {
         private static readonly Regex _rxClientId = new Regex(
-            @"^[A-Z0-9]+$",
+            @"^[A-Z0-9]+\z",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         // Per-module accepted TaxType strings now live on
@@ -58,7 +59,8 @@ namespace LacertMCP.Server.Tools
             [Description("Last name (individual). Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string lastName,
             [Description("EmailId. Required per Lacerte spec §4 - pass an empty string only if you have explicit live-SDK evidence the field is dispensable for this module.")] string emailId,
             [Description("If true, validate + simulate the create then roll back without persisting.")] bool dryRun = false,
-            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null)
+            [Description("Optional idempotency key. Same key + same payload returns the cached result for up to 24h after the first call; replays after the TTL re-execute (treated as a new key). Same key + different payload throws 9102.")] string? idempotencyKey = null,
+            CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
             {
@@ -236,7 +238,9 @@ namespace LacertMCP.Server.Tools
                     LastName: lastName,
                     EmailId: emailId);
 
-                var result = await _session.CreateClient(args, dryRun, idempotencyKey);
+                // R7-23 — forward the MCP cancellation token (the session honors it
+                // before the mutation, like lacerte_detail_write).
+                var result = await _session.CreateClient(args, dryRun, idempotencyKey, cancellationToken);
 
                 // The session returns CreateClientResult { Status, ClientNumber? }.
                 // Translate non-Success into a structured error so the tool

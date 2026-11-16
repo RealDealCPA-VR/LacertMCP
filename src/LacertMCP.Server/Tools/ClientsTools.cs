@@ -152,7 +152,7 @@ namespace LacertMCP.Server.Tools
                         clientNumber,
                         found = false,
                         client = (object?)null,
-                        hint = $"ClientNumber '{clientNumber}' not present in the active (datapath, year, module). Call lacerte_client_list to enumerate available ClientNumbers, or lacerte_create_client to create one. Note: ClientNumber is the SDK-minted identifier (sim's monotonic counter, e.g. \"1001\"), distinct from the operator-chosen ClientID (e.g. \"BROW\") — these are not interchangeable.",
+                        hint = $"ClientNumber '{clientNumber}' not present in the active (datapath, year, module). Call lacerte_client_list to enumerate available ClientNumbers, or lacerte_client_create to create one. Note: ClientNumber is the SDK-minted identifier (sim's monotonic counter, e.g. \"1001\"), distinct from the operator-chosen ClientID (e.g. \"BROW\") — these are not interchangeable.",
                     };
                 }
                 return new { clientNumber, found = true, client = row };
@@ -192,7 +192,7 @@ namespace LacertMCP.Server.Tools
         [McpServerTool]
         [Description("Resolve a plain-English client name to ClientNumber(s) in the active (datapath, year, module). Call BEFORE lacerte_client_read / lacerte_field_write when the operator gave you a name instead of a ClientNumber. Matches case-insensitive SUBSTRING on BOTH first name (C1_1) AND last name (C1_2) for Individual modules — 'john' hits 'John Smith', 'smith' hits the same row — or on the entity name (C1_1) for non-Individual modules. Returns { matches: [{clientNumber, clientId, firstName, lastName, email}], total, didYouMean? }. When total==1 the LLM proceeds straight to the next call; when total>1 it surfaces the disambiguators to the operator (\"did you mean John Smith or John Smyth?\"); when total==0 the `didYouMean` field carries up to 3 Levenshtein-closest names so the LLM can recover from a typo without bouncing back to the user.")]
         public Task<string> LacerteClientFind(
-            [Description("Plain-English client name — first OR last for Individual modules, full or partial entity name for non-Individual. Case-insensitive substring match.")] string name,
+            [Description("Plain-English client name — first, last, or both (\"John Smith\" / \"Smith, John\": every word must appear in the first or last name) for Individual modules; full or partial entity name for non-Individual. Case-insensitive substring match.")] string name,
             [Description("Maximum matches to return. Omit (null) for the default 20 (enough for an LLM picker without overwhelming the context). Pass a positive int up to 100; values <= 0 are rejected. NOTE: the total field always reflects the unfiltered match count even when truncated, so the LLM can detect overflow.")] int? limit = null,
             CancellationToken cancellationToken = default)
             => WrapToolHandler.Run(async () =>
@@ -312,8 +312,27 @@ namespace LacertMCP.Server.Tools
             {
                 return true;
             }
+            // R7-16 — multi-word input ("John Smith", "Smith, John"). First and
+            // last names live in separate columns, so the whole string never
+            // matched either column and the canonical SKILL.md recipe
+            // lacerte_client_find(name: "John Smith") always returned 0. Match
+            // when EVERY whitespace/comma-separated token is a substring of
+            // the first or last name column (or of the entity name).
+            var tokens = substring.Split(NameTokenSeparators, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length > 1)
+            {
+                foreach (var token in tokens)
+                {
+                    bool hit = (first.Length > 0 && first.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                            || (last.Length > 0 && last.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (!hit) return false;
+                }
+                return true;
+            }
             return false;
         }
+
+        private static readonly char[] NameTokenSeparators = { ' ', '\t', ',' };
 
         private static bool TryGetStringField(
             IReadOnlyDictionary<string, object?> row, string key, out string value)

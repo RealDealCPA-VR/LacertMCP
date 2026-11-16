@@ -98,7 +98,7 @@ namespace LacertMCP.Server.Session
         // {count: 0} which is indistinguishable from "no rows match" —
         // a real footgun the LLM cannot self-correct from.
         private static readonly Regex _rxStateAbbr = new Regex(
-            @"^[A-Z]{2}$",
+            @"^[A-Z]{2}\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly string? _appName;
@@ -107,7 +107,8 @@ namespace LacertMCP.Server.Session
         // Preferred over DateTimeOffset.UtcNow.Year at every fallback site so
         // a Lacerte install pinned to TY24 doesn't silently file 2026 returns
         // once the calendar rolls. Validated >= 2018 + <= year ceiling in
-        // the ctor (fail-loud on bad config).
+        // the ctor; R7-21 — out-of-range / non-integer values are ignored
+        // (null), matching EnvValidator's "ignored" warning.
         private readonly int? _defaultTaxYear;
 
         /// <summary>
@@ -187,6 +188,9 @@ namespace LacertMCP.Server.Session
         // successful Store after the in-flight one finishes will pick up
         // any missed entries because we always serialize the full cache.
         private int _persistingIdempotency;
+        // R7-04 — set by every persist request; cleared by the persisting
+        // thread at the top of each pass. See PersistIdempotencyCacheToDisk.
+        private int _persistRequested;
 
         // Per-key semaphores to serialize concurrent same-key writes so the
         // TryReplay → execute → StoreIdempotent triple is atomic per key.
@@ -262,6 +266,12 @@ namespace LacertMCP.Server.Session
         private object GetClientWriteLock(string clientNumber)
             => _clientWriteLocks.GetOrAdd(clientNumber, _ => new object());
 
+        // R7-10 — serializes sim client creation (real + dry-run) and the
+        // client-roster reads, so (a) the duplicate-ClientId check and the
+        // mint are atomic and (b) a dry-run's mint→undo window is never
+        // observable. Lock order: _simCreateLock → client write lock.
+        private readonly object _simCreateLock = new object();
+
         // ===================================================================
         // Construction
         // ===================================================================
@@ -332,15 +342,21 @@ namespace LacertMCP.Server.Session
             // calendar-year fallback at every site that needed UtcNow.Year
             // before. The README + .env.example have advertised this env var
             // since Phase-1 docs; before P15-004 the code never read it.
+            // R7-21 — an invalid value is IGNORED (treated as unset), matching
+            // what EnvValidator tells the operator on stderr ("… — ignored").
+            // The old fail-loud throw ran inside the DI singleton that
+            // HeartbeatWriter resolves at host start, so a typo killed the
+            // server before the MCP handshake (the client just saw a dead
+            // process) right after being told the value was ignored. The
+            // range now also has the same ceiling as SetContext / the
+            // validator ([2018, UtcNow.Year + 1]) — 2099 used to be accepted
+            // here while the validator said it was ignored.
             var rawYear = TryGet(resolved, "LACERTE_DEFAULT_TAX_YEAR");
-            if (!string.IsNullOrEmpty(rawYear))
+            if (!string.IsNullOrEmpty(rawYear)
+                && int.TryParse(rawYear, NumberStyles.Integer, CultureInfo.InvariantCulture, out var y)
+                && y >= 2018
+                && y <= DateTime.UtcNow.Year + 1)
             {
-                if (!int.TryParse(rawYear, NumberStyles.Integer, CultureInfo.InvariantCulture, out var y)
-                    || y < 2018)
-                {
-                    throw new InvalidOperationException(
-                        $"LACERTE_DEFAULT_TAX_YEAR='{rawYear}' invalid — must be an integer >= 2018.");
-                }
                 _defaultTaxYear = y;
             }
 
@@ -703,8 +719,25 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public void SetContext(string dataPath, int taxYear, char module, bool readOnly = false)
         {
-            ValidateContextTuple(dataPath, taxYear, module);
-            Context = new SessionContext(dataPath, taxYear, module, readOnly);
+            var canonical = ValidateContextTuple(dataPath, taxYear, module);
+            Context = new SessionContext(canonical, taxYear, module, readOnly);
+        }
+
+        /// <summary>
+        /// R7-20 — the stored dataPath is the canonical form
+        /// (Path.GetFullPath, forward slashes → backslashes, trailing
+        /// separators trimmed except on a drive root). Previously the raw
+        /// operator string was kept, so "C:\Lacerte\24Tax\IData\" or
+        /// "C:/Lacerte/24Tax/IData" silently opened an EMPTY sim cell (0
+        /// clients, writes → OutOfIndex) while live treats them as the same
+        /// folder, and the idempotency fingerprint changed with the spelling.
+        /// </summary>
+        internal static string CanonicalizeDataPath(string fullPath)
+        {
+            var trimmed = fullPath.TrimEnd('\\', '/');
+            // Keep "C:\" (a drive root) intact — "C:" alone is drive-relative.
+            if (trimmed.Length == 2 && trimmed[1] == ':') return trimmed + "\\";
+            return trimmed.Length == 0 ? fullPath : trimmed;
         }
 
         /// <summary>
@@ -714,7 +747,7 @@ namespace LacertMCP.Server.Session
         /// error regardless of whether it arrives via <c>lacerte_set_context</c>
         /// or a per-call context parameter.
         /// </summary>
-        private void ValidateContextTuple(string dataPath, int taxYear, char module)
+        private string ValidateContextTuple(string dataPath, int taxYear, char module)
         {
             if (string.IsNullOrWhiteSpace(dataPath))
             {
@@ -729,8 +762,19 @@ namespace LacertMCP.Server.Session
             // LacerteSDKError(9013 InvalidDataPath) with {dataPath, reason}
             // — preserves the structured-error invariant so the tool layer
             // surfaces a precise rejection.
-            PathValidation.ValidateDataPath(dataPath);
+            var canonical = CanonicalizeDataPath(PathValidation.ValidateDataPath(dataPath));
+            ValidateYearAndModule(taxYear, module);
+            return canonical;
+        }
 
+        /// <summary>
+        /// R7-22 — the (taxYear, module) half of <see cref="ValidateContextTuple"/>,
+        /// shared with <c>lacerte_can_use_new_apis</c> so that tool rejects the
+        /// same out-of-range years / unknown modules (it used to answer
+        /// canUseNewApis=true for (2030, "z")).
+        /// </summary>
+        internal void ValidateYearAndModule(int taxYear, char module)
+        {
             if (taxYear < 2018)
             {
                 var ctx = new Dictionary<string, object?>
@@ -784,9 +828,9 @@ namespace LacertMCP.Server.Session
         /// </summary>
         private SessionContext ResolveExplicitContext(string dataPath, int taxYear, char module)
         {
-            ValidateContextTuple(dataPath, taxYear, module);
+            var canonical = ValidateContextTuple(dataPath, taxYear, module);
             ThrowIfAuthExpired();
-            return new SessionContext(dataPath, taxYear, module, ReadOnly: true);
+            return new SessionContext(canonical, taxYear, module, ReadOnly: true);
         }
 
         // ===================================================================
@@ -896,10 +940,21 @@ namespace LacertMCP.Server.Session
                     s.StartsWith(f, StringComparison.OrdinalIgnoreCase));
             }
 
-            var result = rows
-                .Take(Math.Max(0, limit))
-                .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
-                .ToList();
+            // R7-11 — deterministic ClientNumber order (ConcurrentDictionary
+            // enumeration order is unspecified and can change when a create
+            // resizes the map between two offset pages, skipping/repeating
+            // rows). Live SQL orders by ClientNumber too.
+            // R7-10 — materialize under _simCreateLock so a dry-run create's
+            // phantom row is never listed.
+            List<IReadOnlyDictionary<string, object?>> result;
+            lock (_simCreateLock)
+            {
+                result = rows
+                    .OrderBy(r => r.ClientNumber, StringComparer.OrdinalIgnoreCase)
+                    .Take(Math.Max(0, limit))
+                    .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
+                    .ToList();
+            }
             return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
         }
 
@@ -945,12 +1000,55 @@ namespace LacertMCP.Server.Session
             RequireRegistered();
             ThrowIfLiveUnwired();
             var module = RequireSimModule(ctx);
+            // R7-06 — trim like ReadTable (P16-039) so "1001 " finds the row
+            // in both read tools, and reject blank with a structured 9017
+            // instead of an ArgumentNullException → 9203.
+            var key = RequireClientNumber(clientNumber, "ReadClient");
             IReadOnlyDictionary<string, object?>? result = null;
-            if (module.Clients.TryGetValue(clientNumber, out var row))
+            // R7-07 — take the per-client write lock while cloning so a
+            // concurrent dry-run (which holds it across write → undo) is
+            // never observed mid-flight.
+            lock (_simCreateLock)
+            lock (GetClientWriteLock(key))
             {
-                result = CloneRow(row);
+                if (module.Clients.TryGetValue(key, out var row))
+                {
+                    result = CloneRow(row);
+                }
             }
             return Task.FromResult(result);
+        }
+
+        /// <summary>
+        /// R7-06 — shared clientNumber guard for single-client reads:
+        /// trims surrounding whitespace and rejects null/blank with
+        /// <see cref="SyntheticStatusCodes.InvalidArgument"/> (9017).
+        /// </summary>
+        /// <summary>
+        /// R7-08 — trims and upper-cases a state abbreviation; blank → null
+        /// (so the existing StateAbbrevRequired gates still fire).
+        /// </summary>
+        internal static string? NormalizeStateAbbrev(string? stateAbbrev)
+        {
+            var t = stateAbbrev?.Trim();
+            return string.IsNullOrEmpty(t) ? null : t!.ToUpperInvariant();
+        }
+
+        internal static string RequireClientNumber(string? clientNumber, string op)
+        {
+            var trimmed = clientNumber?.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.InvalidArgument,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = op,
+                        ["argument"] = "clientNumber",
+                        ["value"] = clientNumber,
+                        ["reason"] = "clientNumber is required and must not be blank.",
+                    });
+            }
+            return trimmed!;
         }
 
         /// <summary>
@@ -999,7 +1097,9 @@ namespace LacertMCP.Server.Session
             // P16-039 — trim clientNumber so a trailing-whitespace typo
             // ('1001 ') doesn't silently match zero rows. Free-form ID
             // (no shape regex enforced at this layer), so trim-only.
-            if (!string.IsNullOrEmpty(clientNumber))
+            // R7-14 — whitespace-only is "no filter" (same as null/empty)
+            // rather than a filter that matches nothing.
+            if (!string.IsNullOrWhiteSpace(clientNumber))
             {
                 var clientTrimmed = clientNumber!.Trim();
                 rows = rows.Where(r => string.Equals(r.ClientNumber, clientTrimmed, StringComparison.OrdinalIgnoreCase));
@@ -1036,29 +1136,33 @@ namespace LacertMCP.Server.Session
             return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
         }
 
+        // R7-14 — the four single-client wrappers REQUIRE a non-blank
+        // clientNumber. ReadTableCore treats null/empty as "no filter", so
+        // lacerte_subclient_read(clientNumber: "") used to return every
+        // client's rows while the envelope echoed clientNumber "".
         /// <summary>DATA2 subclient rows for a given client.</summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadSubclients(
             string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadSubclients", new { clientNumber }, () => ReadTableCore(2, clientNumber, null, cancellationToken));
+                "ReadSubclients", new { clientNumber }, () => ReadTableCore(2, RequireClientNumber(clientNumber, "ReadSubclients"), null, cancellationToken));
 
         /// <summary>DATA3 state rows for a given client.</summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStates(
             string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadStates", new { clientNumber }, () => ReadTableCore(3, clientNumber, null, cancellationToken));
+                "ReadStates", new { clientNumber }, () => ReadTableCore(3, RequireClientNumber(clientNumber, "ReadStates"), null, cancellationToken));
 
         /// <summary>DATA5 F4-status rows for a given client.</summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadStatuses(
             string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadStatuses", new { clientNumber }, () => ReadTableCore(5, clientNumber, null, cancellationToken));
+                "ReadStatuses", new { clientNumber }, () => ReadTableCore(5, RequireClientNumber(clientNumber, "ReadStatuses"), null, cancellationToken));
 
         /// <summary>DATA7 forms rows for a given client.</summary>
         public Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadForms(
             string clientNumber, CancellationToken cancellationToken = default)
             => WireLog.Record<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(
-                "ReadForms", new { clientNumber }, () => ReadTableCore(7, clientNumber, null, cancellationToken));
+                "ReadForms", new { clientNumber }, () => ReadTableCore(7, RequireClientNumber(clientNumber, "ReadForms"), null, cancellationToken));
 
         /// <summary>
         /// Per-client detail rows from the simulated <c>[CLIENT-Detail]</c> file.
@@ -1131,11 +1235,25 @@ namespace LacertMCP.Server.Session
             RequireRegistered();
             ThrowIfLiveUnwired();
             var module = RequireSimModule(ctx);
-            if (!module.Details.TryGetValue(clientNumber, out var list))
+            var key = RequireClientNumber(clientNumber, "ReadDetail");
+            if (!module.Details.TryGetValue(key, out var list))
             {
                 return Task.FromResult<IReadOnlyList<DetailRow>>(Array.Empty<DetailRow>());
             }
-            IEnumerable<DetailRow> rows = list;
+            // R7-07 — snapshot the shared List<DetailRow> under the same
+            // locks the writers hold (client write lock → list lock, the
+            // writer's order). The unlocked ToList threw "Destination array
+            // was not long enough" / "Collection was modified" under a
+            // concurrent append, and could expose an in-flight dry-run row.
+            DetailRow[] snapshotRows;
+            lock (GetClientWriteLock(key))
+            {
+                lock (list)
+                {
+                    snapshotRows = list.ToArray();
+                }
+            }
+            IEnumerable<DetailRow> rows = snapshotRows;
             if (seriesFilter.HasValue)
             {
                 int wanted = seriesFilter.Value;
@@ -1266,13 +1384,24 @@ namespace LacertMCP.Server.Session
             IEnumerable<IReadOnlyDictionary<string, object?>> result;
             if (sinceUtc.HasValue)
             {
-                var since = sinceUtc.Value.Date;
+                // R7-15 — honor the full timestamp. The tool contract
+                // (EFileTools sinceUtc description) promises each poll
+                // "resumes from the exact last-StatusDate watermark instead
+                // of rounding to the day"; truncating both sides to .Date
+                // re-delivered the whole day on every poll. Date-only input
+                // is already normalized to 00:00 UTC by the tool, so it keeps
+                // the whole-day semantics. (Live: SqlTemplates.EfStatusJoinSince
+                // stays a day-granular push-down — LacerteDSII's {ts} parsing
+                // is unverified — and this same exact filter runs on its rows.)
+                var since = sinceUtc.Value.Kind == DateTimeKind.Local
+                    ? sinceUtc.Value.ToUniversalTime()
+                    : sinceUtc.Value;
                 result = joined
                     .Where(x => x.StatusDate != null
                                 && DateTime.TryParse(x.StatusDate, CultureInfo.InvariantCulture,
                                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                                     out var dt)
-                                && dt.Date >= since)
+                                && dt >= since)
                     .Select(x => x.Row);
             }
             else
@@ -1309,12 +1438,23 @@ namespace LacertMCP.Server.Session
             // subClientID) — matches the wire form.
             int? subClientId = null, string? stateAbbrev = null,
             bool dryRun = false, string? idempotencyKey = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            SessionContext? expectedContext = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireExpectedContext(ctx, expectedContext, "WriteField");
             RequireRegistered();
-            RejectIfReadOnly("WriteField", table: table, fieldName: field);
+            RejectIfReadOnly(ctx, "WriteField", table: table, fieldName: field);
+
+            // R7-06 / R7-08 — normalize identifiers at the chokepoint so both
+            // modes agree with the read path: clientNumber is trimmed (reads
+            // trim per P16-039) and stateAbbrev is trimmed + upper-cased
+            // (reads match OrdinalIgnoreCase; the sim's tuple-keyed state maps
+            // and the live bridge's ^[A-Z]{2}$ check are case-sensitive, so
+            // "ca" used to read fine but fail every write).
+            clientNumber = RequireClientNumber(clientNumber, "WriteField");
+            stateAbbrev = NormalizeStateAbbrev(stateAbbrev);
 
             // Spec §2 table-access invariant: DATA6 (Display) and DATA7
             // (Forms) are read-only at the TABLE level. We gate here in the
@@ -1340,6 +1480,14 @@ namespace LacertMCP.Server.Session
             // CLR objects) with FieldWriteInvalid (9015) before any wire
             // marshalling could silently corrupt a numeric DBF cell.
             value = NormalizeFieldWriteValue(value, field);
+
+            // R7-12 — apply the bridge's value/state content rules in BOTH
+            // modes (255-char cap, control characters, NaN/Infinity,
+            // non-scalar → 9015; state shape → InValidStateAbbrev). These ran
+            // only inside Bridge.Writer, so sim accepted what live rejected
+            // and a live dry-run previewed Success for a doomed commit.
+            BridgeInputValidation.ValidateValue(value, "WriteField");
+            BridgeInputValidation.ValidateStateAbbrev(stateAbbrev, "WriteField");
 
             // P17-002 — hoist the per-table discriminator gates out of
             // ApplySimFieldWriteWithUndo so they fire in BOTH modes before
@@ -1439,6 +1587,18 @@ namespace LacertMCP.Server.Session
                         }
                         if (dryRun)
                         {
+                            // R7-13 — a live preview must fail exactly where
+                            // the commit would: same pre-TY21 refusal and the
+                            // same identifier shape checks Bridge.Writer
+                            // applies before the COM dispatch. Previously a
+                            // pre-TY21 or "1001 "/"ca" write previewed
+                            // Success and then failed on commit.
+                            if (!useNew)
+                            {
+                                throw PreTy21LiveWriteRefusal(ctx, clientNumber);
+                            }
+                            BridgeInputValidation.ValidateClientNumber(clientNumber, "WriteField");
+                            BridgeInputValidation.ValidateFieldName(field, "WriteField");
                             inner = StatusCodes.Success;
                         }
                         else
@@ -1469,15 +1629,7 @@ namespace LacertMCP.Server.Session
                                 // overwrite a sentinel row). Use SimulationOnly
                                 // (9202) since the operator's remediation is the
                                 // same: stick to TY21+ for now or run in sim.
-                                throw new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
-                                    new Dictionary<string, object?>
-                                    {
-                                        ["op"] = "WriteField",
-                                        ["reason"] = "Pre-TY21 live writes require a ClientNumber → row-number lookup that is not yet implemented (Todo task #51 follow-up). Use TY21+ or run in simulation mode.",
-                                        ["year"] = ctx.Year,
-                                        ["module"] = ctx.Module.ToString(),
-                                        ["clientNumber"] = clientNumber,
-                                    });
+                                throw PreTy21LiveWriteRefusal(ctx, clientNumber);
                             }
                         }
                     }
@@ -1541,8 +1693,70 @@ namespace LacertMCP.Server.Session
                 {
                     StoreIdempotent(idempotencyKey, payload, result);
                 }
+                // R7-01 — the live bridge RETURNS non-Success TAPIStatus ints
+                // instead of throwing (the sim throws). Raise them here so
+                // every caller (single + bulk write tools) sees the same
+                // structured failure in both modes instead of
+                // success:true + statusCode:2.
+                ThrowIfWriteFailed(result, "WriteField", new Dictionary<string, object?>
+                {
+                    ["table"] = table,
+                    ["clientNumber"] = clientNumber,
+                    ["field"] = field,
+                });
                 return result;
             }).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// R7-01 — converts a non-Success TAPIStatus returned by the live
+        /// bridge into a structured <see cref="LacerteSDKError"/>, matching the
+        /// <see cref="ILacerteBridge"/> contract ("failures throw") and the
+        /// simulation backend (which throws on failure). Called AFTER the
+        /// Success-only idempotency store so failures are never cached.
+        /// </summary>
+        /// <summary>
+        /// R7-25 — bulk-write context pin. The bulk tools capture the active
+        /// context once (and assert taxYear/readOnly against it) but each row
+        /// re-reads <see cref="Context"/>; a <c>lacerte_set_context</c>
+        /// landing mid-batch sent the remaining rows to a different
+        /// datapath / year / module. Passing the captured context makes the
+        /// row fail with 9016 ContextMismatch instead. Value equality: a
+        /// re-set of the identical tuple is not a mismatch.
+        /// </summary>
+        private static void RequireExpectedContext(SessionContext actual, SessionContext? expected, string op)
+        {
+            if (expected == null || actual == expected) return;
+            throw new LacerteSDKError(SyntheticStatusCodes.ContextMismatch,
+                new Dictionary<string, object?>
+                {
+                    ["op"] = op,
+                    ["reason"] = "The active session context changed after this batch started (a concurrent lacerte_set_context). The row was not written; re-run the batch against the intended context.",
+                    ["expectedDataPath"] = expected.DataPath,
+                    ["expectedTaxYear"] = expected.Year,
+                    ["expectedModule"] = expected.Module.ToString(),
+                    ["actualDataPath"] = actual.DataPath,
+                    ["actualTaxYear"] = actual.Year,
+                    ["actualModule"] = actual.Module.ToString(),
+                });
+        }
+
+        private static LacerteSDKError PreTy21LiveWriteRefusal(SessionContext ctx, string clientNumber)
+            => new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
+                new Dictionary<string, object?>
+                {
+                    ["op"] = "WriteField",
+                    ["reason"] = "Pre-TY21 live writes require a ClientNumber → row-number lookup that is not yet implemented (Todo task #51 follow-up). Use TY21+ or run in simulation mode.",
+                    ["year"] = ctx.Year,
+                    ["module"] = ctx.Module.ToString(),
+                    ["clientNumber"] = clientNumber,
+                });
+
+        private static void ThrowIfWriteFailed(int status, string op, Dictionary<string, object?> context)
+        {
+            if (status == StatusCodes.Success) return;
+            context["op"] = op;
+            throw new LacerteSDKError(status, context);
         }
 
         /// <summary>
@@ -1552,10 +1766,12 @@ namespace LacertMCP.Server.Session
         public async Task<int> WriteDetail(
             string clientNumber, DetailRow row, int? replaceIndex = null,
             bool dryRun = false, string? idempotencyKey = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            SessionContext? expectedContext = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireExpectedContext(ctx, expectedContext, "WriteDetail");
             RequireRegistered();
             // Detail-row writes target a whole row (Series/Code/Amount) — no
             // single "field" to name, so we surface just the operation +
@@ -1565,7 +1781,13 @@ namespace LacertMCP.Server.Session
             // (module|table|field) key shape can't address detail rows.
             // Safety net: DetailsTools.ValidateDetailWrite handles row-shape
             // validation before this method is invoked.
-            RejectIfReadOnly("WriteDetail");
+            RejectIfReadOnly(ctx, "WriteDetail");
+            // R7-06 — trim like the read path.
+            clientNumber = RequireClientNumber(clientNumber, "WriteDetail");
+            // R7-12 — bridge row-content rules (length caps, control chars,
+            // numeric Code, finite Amount) in BOTH modes.
+            if (row is null) throw new ArgumentNullException(nameof(row));
+            BridgeInputValidation.ValidateDetailRowContent(row, "WriteDetail");
 
             return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
@@ -1627,6 +1849,9 @@ namespace LacertMCP.Server.Session
                         {
                             // Detail-file writes have no SDK-level snapshot path;
                             // honor dryRun by short-circuiting before the wire call.
+                            // R7-13 — but apply the commit's identifier check
+                            // first so the preview fails where the commit would.
+                            BridgeInputValidation.ValidateClientNumber(clientNumber, "WriteDetail");
                             inner = StatusCodes.Success;
                         }
                         else
@@ -1694,6 +1919,13 @@ namespace LacertMCP.Server.Session
                 {
                     StoreIdempotent(idempotencyKey, payload, result);
                 }
+                // R7-01 — see WriteField.
+                ThrowIfWriteFailed(result, "WriteDetail", new Dictionary<string, object?>
+                {
+                    ["clientNumber"] = clientNumber,
+                    ["series"] = row.Series,
+                    ["code"] = row.Code,
+                });
                 return result;
             }).ConfigureAwait(false);
         }
@@ -1704,10 +1936,12 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public async Task<CreateClientResult> CreateClient(
             CreateClientArgs args, bool dryRun = false, string? idempotencyKey = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            SessionContext? expectedContext = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
+            RequireExpectedContext(ctx, expectedContext, "CreateClient");
             // R6-22 — registration gate at the chokepoint, matching
             // WriteField/WriteDetail. Previously only the sim path enforced
             // NotSignedIn (via SimulationStore.SimulateCreateClient), so a
@@ -1724,8 +1958,12 @@ namespace LacertMCP.Server.Session
             // writes an entire row whose fields aren't enumerable until after
             // the SDK assigns the row; client-side safety is ClientID length
             // (here) + SimulateCreateClient's full TAPIStatus gate chain.
-            RejectIfReadOnly("CreateClient");
+            RejectIfReadOnly(ctx, "CreateClient");
             if (args == null) throw new ArgumentNullException(nameof(args));
+            // R7-12 — bridge free-text rules (50-char name caps, control
+            // chars) in BOTH modes; previously live-only.
+            BridgeInputValidation.ValidateCreateClientText(
+                args.TaxType, args.FirstName, args.LastName, args.EmailId, "CreateClient");
 
             return await ExecuteWithIdempotencyLock<CreateClientResult>(idempotencyKey, async () =>
             {
@@ -1831,14 +2069,21 @@ namespace LacertMCP.Server.Session
                         // P14-043 — per-operation undo. CreateClient mints a
                         // ClientNumber + adds one Clients entry; undo decrements
                         // NextClientNumber + removes the entry.
+                        // R7-10 — under _simCreateLock so the phantom client
+                        // is never visible to ListClients/ReadClient and a
+                        // concurrent real create of the same ClientId can't
+                        // see it as a duplicate.
                         Action? undo = null;
-                        try
+                        lock (_simCreateLock)
                         {
-                            inner = ApplySimCreateClientWithUndo(ctx, args, out undo);
-                        }
-                        finally
-                        {
-                            undo?.Invoke();
+                            try
+                            {
+                                inner = ApplySimCreateClientWithUndo(ctx, args, out undo);
+                            }
+                            finally
+                            {
+                                undo?.Invoke();
+                            }
                         }
                         // R6-22 — sim dryRun returns a null ClientNumber to
                         // match live dryRun (which short-circuits before the
@@ -1851,7 +2096,14 @@ namespace LacertMCP.Server.Session
                     }
                     else
                     {
-                        inner = ApplySimCreateClient(ctx, args);
+                        // R7-10 — the sim duplicate-ClientId scan and the
+                        // mint were separate steps; two concurrent creates of
+                        // the same ClientId both succeeded (live rejects the
+                        // second with DuplicateClient). Serialize them.
+                        lock (_simCreateLock)
+                        {
+                            inner = ApplySimCreateClient(ctx, args);
+                        }
                     }
                     return inner;
                 }).ConfigureAwait(false);
@@ -1941,9 +2193,12 @@ namespace LacertMCP.Server.Session
         // 9001 error message name the specific field the write was targeting
         // (follow-up F3). Active context (module/table) is included so the
         // operator sees the full coordinates of the rejected write.
-        private void RejectIfReadOnly(string operation, int? table = null, string? fieldName = null)
+        // R7-09 — takes the context the caller already captured. Re-reading
+        // Context here let a concurrent lacerte_set_context flip readOnly
+        // between the write's capture and this check, so a write could run
+        // against a read-only tuple (or be spuriously rejected).
+        private static void RejectIfReadOnly(SessionContext ctx, string operation, int? table = null, string? fieldName = null)
         {
-            var ctx = RequireContext();
             if (!ctx.ReadOnly) return;
 
             var reason = fieldName == null
@@ -2179,7 +2434,7 @@ namespace LacertMCP.Server.Session
                     {
                         ["clientNumber"] = clientNumber,
                         ["reason"] = "Client has no detail file in the active (dataPath, taxYear, module) cell. " +
-                                     "Verify clientNumber via lacerte_list_clients — detail files are created on the " +
+                                     "Verify clientNumber via lacerte_client_list — detail files are created on the " +
                                      "create-client path, never implicitly by a detail write.",
                     });
             }
@@ -2480,14 +2735,27 @@ namespace LacertMCP.Server.Session
         private void EvictIdempotencyEntry(string key)
         {
             _idempotencyCache.TryRemove(key, out _);
-            if (_idempotencyLocks.TryGetValue(key, out var sem) && sem.CurrentCount == 1)
+            // R7-03 — take the semaphore non-blockingly before removing it.
+            // The old CurrentCount==1 check raced: a waiter could acquire
+            // between the check and the Remove, after which the semaphore
+            // was disposed under it and the next same-key caller minted a
+            // fresh one (two bodies running concurrently). Holding it across
+            // the Remove closes that window; and we no longer Dispose — a
+            // SemaphoreSlim whose AvailableWaitHandle was never touched owns
+            // no unmanaged state, while disposing one a concurrent caller
+            // still references throws ObjectDisposedException in its Wait.
+            if (_idempotencyLocks.TryGetValue(key, out var sem) && sem.Wait(0))
             {
-                var pair = new KeyValuePair<string, SemaphoreSlim>(key, sem);
-                // ConcurrentDictionary's KeyValuePair overload is atomic:
-                // removes only if the current value still equals the snapshot.
-                if (((ICollection<KeyValuePair<string, SemaphoreSlim>>)_idempotencyLocks).Remove(pair))
+                try
                 {
-                    sem.Dispose();
+                    var pair = new KeyValuePair<string, SemaphoreSlim>(key, sem);
+                    // ConcurrentDictionary's KeyValuePair overload is atomic:
+                    // removes only if the current value still equals the snapshot.
+                    ((ICollection<KeyValuePair<string, SemaphoreSlim>>)_idempotencyLocks).Remove(pair);
+                }
+                finally
+                {
+                    sem.Release();
                 }
             }
         }
@@ -2788,7 +3056,13 @@ namespace LacertMCP.Server.Session
                     baseDir = Path.Combine(home, ".config");
                 }
             }
-            return Path.Combine(baseDir, "lacerte-mcp", "idempotency-cache.json");
+            // R7-02 — simulation keeps its own default file so a sim session
+            // on the operator's box never shares (or evicts) the live
+            // cache. Live keeps the historical name.
+            var fileName = Mode == SessionMode.Simulation
+                ? "idempotency-cache.sim.json"
+                : "idempotency-cache.json";
+            return Path.Combine(baseDir, "lacerte-mcp", fileName);
         }
 
         // Persisted file shape:
@@ -2837,7 +3111,8 @@ namespace LacertMCP.Server.Session
                 int loaded = 0;
                 int expired = 0;
                 int skipped = 0;
-                foreach (var p in parsed.Entries)
+                // R7-05 — load at most the newest IdempotencyCacheMaxEntries.
+                foreach (var p in CapNewest(parsed.Entries.Where(e => e != null)))
                 {
                     if (string.IsNullOrEmpty(p.Key) || string.IsNullOrEmpty(p.Fingerprint)) { skipped++; continue; }
                     if (now - p.CreatedAt > IdempotencyTtl) { expired++; continue; }
@@ -3020,11 +3295,40 @@ namespace LacertMCP.Server.Session
         {
             if (!_idempotencyPersistEnabled) return;
             if (string.IsNullOrEmpty(_idempotencyCachePath)) return;
-            // Single-flight: skip if another thread is mid-persist. The
-            // winning thread always serializes the FULL cache so any
-            // entries added between flights are picked up by the next
-            // successful persist.
-            if (Interlocked.CompareExchange(ref _persistingIdempotency, 1, 0) != 0) return;
+            // Single-flight with a re-run request flag (R7-04). Previously a
+            // Store that lost the CompareExchange simply returned; if the
+            // in-flight persist had already snapshotted the cache before that
+            // Store landed, the entry never reached disk until some LATER
+            // Store — and a crash in between lost it, so a post-restart retry
+            // re-executed the write (e.g. a duplicate detail-row append).
+            // Now the loser raises _persistRequested and the winner loops
+            // until no request is outstanding; the post-release re-check
+            // covers a request raised after the winner's last iteration.
+            Volatile.Write(ref _persistRequested, 1);
+            while (Volatile.Read(ref _persistRequested) == 1
+                   && Interlocked.CompareExchange(ref _persistingIdempotency, 1, 0) == 0)
+            {
+                try
+                {
+                    Volatile.Write(ref _persistRequested, 0);
+                    PersistIdempotencyCacheToDiskOnce();
+                }
+                finally
+                {
+                    Volatile.Write(ref _persistingIdempotency, 0);
+                }
+            }
+        }
+
+        // R7-05 — newest-first cap applied to the merged disk snapshot and at
+        // load time, so entries the in-memory eviction dropped do not come
+        // back from disk forever (unbounded file growth + post-restart
+        // memory above IdempotencyCacheMaxEntries).
+        private static IEnumerable<PersistedEntry> CapNewest(IEnumerable<PersistedEntry> entries)
+            => entries.OrderByDescending(e => e.CreatedAt).Take(IdempotencyCacheMaxEntries);
+
+        private void PersistIdempotencyCacheToDiskOnce()
+        {
             try
             {
                 // R6-11 — merge-on-write. Re-read the current disk file and
@@ -3063,10 +3367,7 @@ namespace LacertMCP.Server.Session
                     if (persisted != null) merged[kv.Key] = persisted; // in-memory wins
                 }
                 var snapshot = new PersistedCache();
-                foreach (var kv in merged)
-                {
-                    snapshot.Entries.Add(kv.Value);
-                }
+                snapshot.Entries.AddRange(CapNewest(merged.Values));
 
                 var dir = Path.GetDirectoryName(_idempotencyCachePath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -3123,10 +3424,6 @@ namespace LacertMCP.Server.Session
                         () => true);
                 }
                 catch { /* logging is best-effort */ }
-            }
-            finally
-            {
-                Volatile.Write(ref _persistingIdempotency, 0);
             }
         }
 
@@ -3328,7 +3625,7 @@ namespace LacertMCP.Server.Session
         // wire payloads to the debug log. In the default posture no
         // fingerprint material reaches the wire, so a deterministic hash
         // is not an offline oracle.
-        private static string BuildPayload(string op, params object?[] args)
+        private string BuildPayload(string op, params object?[] args)
         {
             // Canonicalize the operation + args to a JSON blob, then
             // SHA-256 it. JsonSerializer's default contract is stable for
@@ -3336,9 +3633,16 @@ namespace LacertMCP.Server.Session
             // (WriteField/WriteDetail/CreateClient), so byte-identical
             // retries hash identically in ANY process — which is what the
             // P17-004 disk persistence requires.
+            // R7-02 — the backend mode is part of the fingerprint. The
+            // persisted cache outlives the process, and sim seeds use the
+            // real install datapaths (e.g. the 24Tax IData folder), so without
+            // the mode a sim-mode success cached under a key could be
+            // replayed by a later LIVE process: Success returned, the wire
+            // never fired. Cross-mode same-key reuse now surfaces 9102.
             var canon = new Dictionary<string, object?>
             {
                 ["op"] = op,
+                ["mode"] = Mode.ToString(),
                 ["args"] = args,
             };
             var json = JsonSerializer.Serialize(canon, s_payloadJsonOptions);

@@ -84,7 +84,7 @@ namespace LacertMCP.Tests.Odbc
         public void Data1Top_Rejects_NonPositive_Or_Out_Of_Range(int limit)
         {
             var ex = Assert.Throws<LacerteSDKError>(() => SqlTemplates.Data1Top(limit));
-            Assert.Equal(StatusCodes.OutOfIndex, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.InvalidArgument, ex.StatusCode);
         }
 
         [Fact]

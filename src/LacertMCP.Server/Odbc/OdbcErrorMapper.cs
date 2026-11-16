@@ -48,6 +48,9 @@ namespace LacertMCP.Server.Odbc
                 ["sqlState"] = sqlState,
                 ["odbcMessage"] = message,
             };
+            // R7-29 — the mapped guidance used to be computed and dropped.
+            var hint = GuidanceFor(sqlState);
+            if (hint != null) ctx["hint"] = hint;
             if (context != null)
             {
                 foreach (var kvp in context)
@@ -87,10 +90,41 @@ namespace LacertMCP.Server.Odbc
             // HY*/S1* families below.
             if (IsTimeoutOrCanceled(sqlState!)) return false;
             if (sqlState!.StartsWith("08", StringComparison.OrdinalIgnoreCase)) return true;
-            if (sqlState.Equals("IM002", StringComparison.OrdinalIgnoreCase)) return true;
+            if (IsDriverManagerUnreachable(sqlState)) return true;
             if (sqlState.StartsWith("HY", StringComparison.OrdinalIgnoreCase)) return true;
             if (sqlState.StartsWith("S1", StringComparison.OrdinalIgnoreCase)) return true;
             return false;
+        }
+
+        // R7-29 — IM002 / IM003 / IM014: the ODBC driver manager could not
+        // reach a usable LacerteDSII driver.
+        private static bool IsDriverManagerUnreachable(string sqlState)
+            => sqlState.Equals("IM002", StringComparison.OrdinalIgnoreCase)
+               || sqlState.Equals("IM003", StringComparison.OrdinalIgnoreCase)
+               || sqlState.Equals("IM014", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// R7-29 — static operator guidance for SQLSTATE families whose
+        /// catalog remediation would mislead; surfaced as context["hint"].
+        /// Contains NO driver text on purpose: the raw message stays under
+        /// odbcMessage, which is wire-redacted because drivers can echo the
+        /// rejected (taxpayer) value. Null when the catalog text suffices.
+        /// </summary>
+        internal static string? GuidanceFor(string? sqlState)
+        {
+            if (string.IsNullOrEmpty(sqlState)) return null;
+            var s = sqlState!;
+            if (IsTimeout(s))
+                return "ODBC timeout — transient; verify the Lacerte data share is reachable and the DBF is not locked, then retry.";
+            if (IsCanceled(s))
+                return "ODBC operation was canceled (by the caller or a statement timeout); not an index-corruption signal. Retry if the cancel was not intentional.";
+            if (s.Equals("IM014", StringComparison.OrdinalIgnoreCase))
+                return "ODBC DSN/driver architecture mismatch (IM014): this server is a 64-bit process; configure the LacerteDSII DSN in the 64-bit ODBC Data Source Administrator (or install the 64-bit driver).";
+            if (s.Equals("IM003", StringComparison.OrdinalIgnoreCase))
+                return "ODBC driver could not be loaded (IM003): repair/reinstall the Lacerte ODBC driver and confirm its bitness matches this 64-bit server.";
+            if (s.Equals("IM002", StringComparison.OrdinalIgnoreCase))
+                return "ODBC DSN or driver not found (IM002): confirm the LacerteDSII driver is installed for 64-bit applications.";
+            return null;
         }
 
         // R6-36 — shared SQLSTATE classification for the timeout/cancel
@@ -119,10 +153,15 @@ namespace LacertMCP.Server.Odbc
                 return new SqlStateMapping(StatusCodes.Error, "Error", message);
             }
 
-            // Connection failures (08*) and the specific "DSN/Driver not found" (IM002)
-            // both map to DBFNotAccessable.
+            // Connection failures (08*) and the driver-manager "can't reach the
+            // driver" family map to DBFNotAccessable: IM002 (DSN/driver not
+            // found) and — R7-29 — IM003 (driver could not be loaded) and
+            // IM014 (DSN/driver architecture mismatch, the likely failure for
+            // this x64 process against a 32-bit driver). Those two used to
+            // fall to StatusCodes.Error (0) with origin "sdk" and an
+            // "Event Viewer" remediation.
             if (sqlState.StartsWith("08", StringComparison.OrdinalIgnoreCase)
-                || sqlState.Equals("IM002", StringComparison.OrdinalIgnoreCase))
+                || IsDriverManagerUnreachable(sqlState))
             {
                 return new SqlStateMapping(StatusCodes.DBFNotAccessable, "DBFNotAccessable", message);
             }

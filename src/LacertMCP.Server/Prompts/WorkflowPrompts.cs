@@ -233,7 +233,7 @@ Step 2 — Sanity-check the field is writable
 
 Step 3 — Build the target client list
   • Either: the operator gave you an explicit `[clientNumber...]` list — use it.
-  • Or: call `lacerte_client_list` with the relevant filter and extract the `ClientNumber` field.
+  • Or: call `lacerte_client_list` with the relevant filter and extract each row's `clientNumber` field.
   • Tell the operator the count. If > 50, ask for explicit confirmation before proceeding.
 
 Step 4 — Dry-run preview (first {previewCount})

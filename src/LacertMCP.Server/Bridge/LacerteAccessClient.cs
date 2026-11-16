@@ -282,7 +282,21 @@ namespace LacertMCP.Server.Bridge
                     dynamic client = clientList.IClient(taxType, clientId, emailId, firstName, lastName);
                     clientObj = (object?)client;
                     int status = (int)client.CreateClient();
-                    string? assigned = status == 1 ? (string?)client.ClientNumber : null;
+                    // R7-28 — the commit has happened once CreateClient()
+                    // returns Success. Reading the assigned number is a
+                    // separate, best-effort step: if the property is missing
+                    // / not a string / the RPC hiccups, the client STILL
+                    // exists. Previously that read shared this try, so a
+                    // created client was reported as 9201 BridgeUnavailable
+                    // (and, with transient-unwrapping retries, re-issued into
+                    // a DuplicateClient). Report Success with a null number;
+                    // the caller resolves it by ClientID (lacerte_client_find).
+                    string? assigned = null;
+                    if (status == 1)
+                    {
+                        try { assigned = (string?)client.ClientNumber; }
+                        catch (Exception) { assigned = null; }
+                    }
                     return new BridgeCreateClientResult(status, assigned);
                 }
                 catch (LacerteSDKError)

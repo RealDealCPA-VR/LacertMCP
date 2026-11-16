@@ -227,7 +227,23 @@ namespace LacertMCP.Server.Resilience
 
             // LacerteSDKError carries a TAPIStatus — those are NEVER transient
             // (NotSignedIn, ConsentDenied, etc. need re-auth, not retry).
-            if (ex is LacerteSDKError) return false;
+            // R7-27 — every live Bridge method catches ALL exceptions and
+            // rethrows them as LacerteSDKError(BridgeUnavailable 9201) with
+            // the original as InnerException (Writer / Reader / Registration
+            // / CanUseNewApisProbe / LacerteAccessClient). Without unwrapping,
+            // the retry policy chosen in DECISIONS 2026-05-30 + R6-41 never
+            // fired against the real bridge — only against test fakes that
+            // throw a raw COMException. A 9201 whose cause is one of the
+            // whitelisted transient HRESULTs is retried; every other
+            // TAPIStatus-bearing error (NotSignedIn, ConsentDenied, …) is
+            // still never retried.
+            if (ex is LacerteSDKError sdkErr)
+            {
+                return sdkErr.StatusCode == SyntheticStatusCodes.BridgeUnavailable
+                    && sdkErr.InnerException != null
+                    && !(sdkErr.InnerException is LacerteSDKError)
+                    && IsTransient(sdkErr.InnerException);
+            }
 
             // COMException carries an HRESULT directly.
             if (ex is COMException comEx)

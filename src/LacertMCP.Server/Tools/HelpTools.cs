@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
+using LacertMCP.Server.Session;
 using ModelContextProtocol.Server;
 
 namespace LacertMCP.Server.Tools
@@ -312,7 +313,7 @@ namespace LacertMCP.Server.Tools
             {
                 name = "LACERTE_APP_NAME",
                 required = "recommended",
-                defaultValue = "LacerteMCP",
+                defaultValue = LacerteSessionManager.DefaultAppName, // R7-32 — was the literal "LacerteMCP" (drift; P16-013)
                 purpose = "Friendly name shown in the Intuit SDK consent dialog.",
             },
             new

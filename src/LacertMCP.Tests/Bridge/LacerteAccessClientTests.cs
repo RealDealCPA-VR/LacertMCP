@@ -154,7 +154,7 @@ namespace LacertMCP.Tests.Bridge
                     "NEW01", "Individual", firstName: "bob\0", lastName: "Doe",
                     emailId: "jane@example.com"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             Assert.Equal("firstName", ex.Context["field"]);
         }
 

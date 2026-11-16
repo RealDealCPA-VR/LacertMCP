@@ -90,7 +90,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: "OK\0; DROP TABLE"));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -103,7 +103,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: oversize));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -216,7 +216,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
                     value: "data\0evil", subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -500,7 +500,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: double.NaN));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -512,7 +512,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: double.PositiveInfinity));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -523,7 +523,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: float.NegativeInfinity));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -534,7 +534,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, GoodClient, GoodField,
                     value: double.NaN, subClientId: null, stateAbbrev: null));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -549,7 +549,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: arr));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
             Assert.Equal("value", ex.Context["field"]);
         }
 
@@ -563,7 +563,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: obj));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         [Fact]
@@ -578,7 +578,7 @@ namespace LacertMCP.Tests.Bridge
                     GoodAppId, GoodDataPath, GoodDbf, rowNum: 1, field: GoodField,
                     value: s));
             Assert.NotEqual(SyntheticStatusCodes.BridgeUnavailable, ex.StatusCode);
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(SyntheticStatusCodes.FieldWriteInvalid, ex.StatusCode);
         }
 
         // -----------------------------------------------------------------
@@ -600,7 +600,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "bob\0", "Doe", "jane@example.com"));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             Assert.Equal("firstName", ex.Context["field"]);
         }
 
@@ -611,7 +611,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "Jane", "Doe\0; DROP", "jane@example.com"));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             Assert.Equal("lastName", ex.Context["field"]);
         }
 
@@ -625,7 +625,7 @@ namespace LacertMCP.Tests.Bridge
                 BridgeInputValidation.ValidateCreateClientArgs(
                     GoodAppId, GoodDataPath, "NEW01", "Individual",
                     "Jane", "Doe", bigEmail));
-            Assert.Equal(SyntheticStatusCodes.DetailWriteInvalid, ex.StatusCode);
+            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
             // P16-054/P16-080 — bridge-side field name renamed to `emailId`
             // to match the wire form.
             Assert.Equal("emailId", ex.Context["field"]);

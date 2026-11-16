@@ -324,7 +324,7 @@ namespace LacertMCP.Server.Session
 
         // ClientID validation per spec: <=8 alphanumeric, no special chars.
         private static readonly Regex _rxClientId = new Regex(
-            @"^[A-Z0-9]+$",
+            @"^[A-Z0-9]+\z",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         /// <summary>

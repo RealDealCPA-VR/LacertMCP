@@ -94,9 +94,13 @@ namespace LacertMCP.Tests.Session
         // persisted on operator machines.
         private static string ComputeFingerprint(string op, params object?[] args)
         {
+            // R7-02 — the backend mode is part of the canonical payload
+            // (between op and args, same key order as BuildPayload). The
+            // tests that use this helper run in simulation.
             var canon = new Dictionary<string, object?>
             {
                 ["op"] = op,
+                ["mode"] = "Simulation",
                 ["args"] = args,
             };
             var json = JsonSerializer.Serialize(canon);
@@ -261,9 +265,12 @@ namespace LacertMCP.Tests.Session
 
             var row = NewRow(50.0, "r6-04-wd");
             // Attempt 1: the live bridge RETURNS the failure int (return is
-            // open in the Lacerte UI). It must NOT be cached under the key.
-            var r1 = await mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd");
-            Assert.Equal(StatusCodes.DBFNotAccessable, r1);
+            // open in the Lacerte UI). R7-01 — the session now raises it as a
+            // structured LacerteSDKError (sim/live parity: the sim throws on
+            // failure). It must NOT be cached under the key.
+            var ex1 = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
+            Assert.Equal(StatusCodes.DBFNotAccessable, ex1.StatusCode);
             Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
                 "R6-04: a non-Success result must not be cached — pre-fix the failure was sticky for 24h");
 

@@ -59,15 +59,15 @@ namespace LacertMCP.Server.Tools
         // Validation regexes mirror DetailsTools (private there, so mirrored
         // here — the shapes ARE the contract per agent 06 §5 / P14-055).
         private static readonly Regex _rxStateAbbrev = new Regex(
-            @"^[A-Z]{2}$",
+            @"^[A-Z]{2}\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly Regex _rxNumeric = new Regex(
-            @"^-?\d+$",
+            @"^-?[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static readonly Regex _rxNumericSeries = new Regex(
-            @"^\d+$",
+            @"^[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
@@ -266,7 +266,9 @@ namespace LacertMCP.Server.Tools
 
                         int status = await _session.WriteDetail(
                             entry.ClientNumber, row, entry.ReplaceIndex,
-                            dryRun, rowKey, cancellationToken).ConfigureAwait(false);
+                            dryRun, rowKey, cancellationToken,
+                            // R7-25 — pin every row to the context validated above.
+                            expectedContext: ctx).ConfigureAwait(false);
 
                         var info = StatusCodes.GetStatusInfo(status);
                         if (status == StatusCodes.Success)

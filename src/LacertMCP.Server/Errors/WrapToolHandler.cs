@@ -152,6 +152,41 @@ namespace LacertMCP.Server.Errors
                     // catch-all (which would label it as InternalServerError).
                     return SerializeError(OdbcErrorMapper.Map(odbcEx), cid);
                 }
+                catch (OperationCanceledException)
+                {
+                    // R7-18 — a host/client cancellation is not an in-server
+                    // fault. Let it propagate so the MCP SDK applies its
+                    // cancellation semantics (a cancelled request gets no
+                    // response) instead of minting a 9203 "file an issue"
+                    // envelope for a normal notifications/cancelled.
+                    throw;
+                }
+                catch (ArgumentException argEx)
+                {
+                    // R7-18 — argument-validation failures (Pagination's
+                    // negative-limit guard, lacerte_client_find's blank name /
+                    // limit checks, ClientResourceTools' clientNumber checks)
+                    // are caller errors, not server faults. Map them to
+                    // 9017 InvalidArgument — the documented convention — so
+                    // the LLM self-corrects instead of being told to set
+                    // LACERTE_DEBUG_WIRE and file an issue (9203).
+                    var message = argEx.Message ?? string.Empty;
+                    // net48 appends "\r\nParameter name: x" — keep the reason
+                    // to the first line; the name is surfaced separately.
+                    var newline = message.IndexOfAny(new[] { '\r', '\n' });
+                    var reason = newline >= 0 ? message.Substring(0, newline) : message;
+                    var context = new Dictionary<string, object?>
+                    {
+                        ["argument"] = argEx.ParamName,
+                        ["reason"] = reason,
+                    };
+                    if (argEx is ArgumentOutOfRangeException aoor && aoor.ActualValue != null)
+                    {
+                        context["value"] = aoor.ActualValue;
+                    }
+                    var wrapped = new LacerteSDKError(SyntheticStatusCodes.InvalidArgument, context, argEx);
+                    return SerializeError(wrapped, cid);
+                }
                 catch (Exception ex)
                 {
                     // P15-035 — wrap as SyntheticStatusCodes.InternalServerError

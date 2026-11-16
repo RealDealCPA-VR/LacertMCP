@@ -58,7 +58,9 @@ namespace LacertMCP.Server.Errors
         // 9014 — taxYear exceeds the installed Lacerte coverage ceiling
         // (DateTime.Today.Year + 1). Symmetric with 9003 TaxYearTooOld (the
         // floor side). Coordination slot for P15-077 (B_session): SetContext +
-        // SimulateCreateClient + MetadataTools + ConnectionStringBuilder all
+        // SimulateCreateClient + MetadataTools all (R7-31: ConnectionStringBuilder
+        // throws ArgumentException → 9017 InvalidArgument for its own 2018..2099
+        // sanity bounds; the context ceiling is enforced upstream by SetContext)
         // throw this so the wire shape stays consistent across enforcement
         // points. Context includes {taxYear, ceiling}.
         public const int TaxYearTooNew = 9014;
@@ -120,7 +122,7 @@ namespace LacertMCP.Server.Errors
         // ApplySimDetailWriteWithUndo) and live throw the same structured
         // error rather than diverging silently. Remediation: read the
         // existing rows via lacerte_detail_read, append the corrected row,
-        // and delete the stale row via the (future) lacerte_detail_delete
+        // and delete the stale row via the (future, not yet available) detail-delete tool
         // tool. Context carries {op, clientNumber, replaceIndex}.
         public const int LiveReplaceIndexUnsupported = 9019;
 
@@ -276,7 +278,7 @@ namespace LacertMCP.Server.Errors
                 "LiveReplaceIndexUnsupported",
                 Severity.Error,
                 "lacerte_detail_write received a replaceIndex while running in LIVE mode. The Lacerte SDK's WriteToDetailFile COM method only appends (spec §2); there is no documented update-by-index path. Sim mode honors replaceIndex for parity testing; the live path fails closed rather than silently appending and reporting Success.",
-                "To correct a detail row in live mode: (1) call lacerte_detail_read to enumerate existing rows; (2) call lacerte_detail_write WITHOUT replaceIndex to append the corrected row; (3) delete the stale row via lacerte_detail_delete (forthcoming). Until that delete tool ships, surface the divergence to the operator rather than mutating live tax-return data with a stale row left in place."),
+                "To correct a detail row in live mode: (1) call lacerte_detail_read to enumerate existing rows; (2) call lacerte_detail_write WITHOUT replaceIndex to append the corrected row; (3) delete the stale row once a detail-delete tool ships (none exists yet — do not attempt to call one). Until then, surface the divergence to the operator rather than mutating live tax-return data with a stale row left in place."),
 
             [BulkBatchTooLarge] = new StatusInfo(
                 "BulkBatchTooLarge",

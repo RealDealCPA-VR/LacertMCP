@@ -27,7 +27,7 @@ namespace LacertMCP.Server.Odbc
         // The 8-char ceiling is per StatusCodes.LengthExceeded remediation; the
         // uppercase + digits alphabet matches the Lacerte ClientID spec.
         private static readonly Regex ClientIdentifierPattern = new Regex(
-            "^[A-Z0-9]{1,8}$",
+            "^[A-Z0-9]{1,8}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         /// <summary>
@@ -245,6 +245,9 @@ namespace LacertMCP.Server.Odbc
         /// the workflow only wants rows that changed since the threshold,
         /// so dropping the unsubmitted rows is correct).
         /// </para>
+        /// <para>R7-15 — this is a DAY-granular coarse push-down only; the
+        /// session manager applies the exact-timestamp `>= sinceUtc` filter
+        /// to the returned rows so the tool's watermark contract holds.</para>
         /// </summary>
         public static string EfStatusJoinSince(DateTime sinceUtc)
         {
@@ -319,7 +322,7 @@ namespace LacertMCP.Server.Odbc
         // -------------------------------------------------------------------
 
         private static readonly Regex StatePattern = new Regex(
-            "^[A-Z]{2}$",
+            "^[A-Z]{2}\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static void ValidateState(string state)
@@ -343,7 +346,7 @@ namespace LacertMCP.Server.Odbc
         // C{t}_N column identifier shape: C, digit (1-7), underscore, digits/G.
         // Permits both ordinal (C1_2) and global-state (C3_G1) columns.
         private static readonly Regex ColumnIdentifierPattern = new Regex(
-            "^C[1-7]_(G?[0-9]+)$",
+            "^C[1-7]_(G?[0-9]+)\\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private static void ValidateLimit(int limit)
@@ -351,7 +354,7 @@ namespace LacertMCP.Server.Odbc
             if (limit <= 0 || limit > 100_000)
             {
                 throw new LacerteSDKError(
-                    StatusCodes.OutOfIndex,
+                    SyntheticStatusCodes.InvalidArgument, // R7-30 — was OutOfIndex (4), whose remediation is about pre-TY21 write row numbers
                     new Dictionary<string, object?>
                     {
                         ["limit"] = limit,
@@ -365,7 +368,7 @@ namespace LacertMCP.Server.Odbc
             if (column == null || !ColumnIdentifierPattern.IsMatch(column))
             {
                 throw new LacerteSDKError(
-                    StatusCodes.InValidStateAbbrev,
+                    StatusCodes.FieldNotSupported, // R7-30 — was InValidStateAbbrev (28) for a bad COLUMN name
                     new Dictionary<string, object?>
                     {
                         ["column"] = column,

@@ -36,14 +36,14 @@ namespace LacertMCP.Server.Tools
         // DetailRow.StateAbbr (model property) keeps its name because it maps
         // to the DBF column.
         private static readonly Regex _rxStateAbbrev = new Regex(
-            @"^[A-Z]{2}$",
+            @"^[A-Z]{2}\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // Numeric Code shape — Lacerte detail Code fields are integer-valued
         // per the detail-file spec. Allow leading minus for negative codes;
         // do NOT allow decimals (use Amount for those).
         private static readonly Regex _rxNumeric = new Regex(
-            @"^-?\d+$",
+            @"^-?[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // Numeric Series shape — Lacerte Series IDs are non-negative screen
@@ -54,7 +54,7 @@ namespace LacertMCP.Server.Tools
         // the invariant that makes the string safe to interpolate into the
         // unquoted-integer SQL emitted by SqlTemplates.DetailBySeries.
         private static readonly Regex _rxNumericSeries = new Regex(
-            @"^\d+$",
+            @"^[0-9]+\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         private readonly LacerteSessionManager _session;
