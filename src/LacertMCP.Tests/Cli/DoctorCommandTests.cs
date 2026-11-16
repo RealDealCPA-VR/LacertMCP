@@ -367,6 +367,65 @@ namespace LacertMCP.Tests.Cli
             finally { DeleteTree(root); }
         }
 
+        // R7-40 — doctor validates with the loader's own parse path, so it
+        // agrees with the server for every shape.
+        [Theory]
+        [InlineData("{ \"I|1|C1_15\": { \"access\": \"ReadWrite\", \"maxLength\": \"abc\" } }")] // wrong-typed field
+        [InlineData("{ \"I|1|C1_15\": { \"access\": \"ReadWrite\", \"source\": 5 } }")]
+        [InlineData("{ \"I|1|C1_15\": null }")]                                                  // null entry
+        public void Doctor_Shards_LoaderRejectedShapes_Fail(string json)
+        {
+            var root = NewShardTree(("individual.json", json));
+            try
+            {
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, DoctorCommand.ProbeFieldAccessMapShardsAt(root).Status);
+                Assert.Null(LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateShardFile(
+                    Path.Combine(root, "base", "individual.json"), out var err));
+                Assert.False(string.IsNullOrEmpty(err));
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_NumericAccessTheLoaderAccepts_IsNotFail()
+        {
+            var root = NewShardTree(("individual.json", "{ \"I|1|C1_15\": { \"access\": 1, \"source\": \"manual\" } }"));
+            try
+            {
+                Assert.NotEqual(DoctorCommand.ProbeStatus.Fail, DoctorCommand.ProbeFieldAccessMapShardsAt(root).Status);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Overlay_MissingAccess_Fails()
+        {
+            var root = NewShardTree(("individual.json", "{ \"I|1|C1_15\": { \"access\": \"ReadOnly\", \"source\": \"manual\" } }"));
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "overlays", "ty21-not-supported.json"),
+                    "{ \"taxYear\": 2021, \"overrides\": { \"I|1|C1_G38\": { \"source\": \"x\" } } }");
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, r.Status);
+                Assert.Contains("overlays/ty21-not-supported.json", r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Overlay_FileTheLoaderNeverReads_Warns()
+        {
+            var root = NewShardTree(("individual.json", "{ \"I|1|C1_15\": { \"access\": \"ReadOnly\", \"source\": \"manual\" } }"));
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "overlays", "ty22-enable.json"), "{ \"taxYear\": 2022, \"overrides\": {} }");
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Warn, r.Status);
+                Assert.Contains("ty22-enable.json", r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
         [Fact]
         public void Doctor_Shards_EntriesBeyondBaseline_Pass()
         {

@@ -968,15 +968,14 @@ namespace LacertMCP.Cli.Commands
         /// The directory is resolved by <see cref="SchemaDirResolver"/> — the same tree
         /// <c>field-access set/list</c> edit: in the release layout the server's
         /// <c>..\server\Schema\FieldAccessMap</c> (what the MCP server actually reads),
-        /// in the dev bin layout the shared folder <see cref="FieldAccessMapLoader"/> reads.
-        /// The overlay filter matches the loader's (<c>ty*-not-supported.json</c>).
+        /// in a dev checkout the server's build output (what the dev server reads).
+        /// Files are validated with the loader's own parse path (R7-40).
         /// </para>
         ///
         /// <para>
-        /// Severity is <b>Warn</b> (not Fail) when there are no shards or every shard is
-        /// empty: the v1 base shards ship as <c>{}</c> by design (Phase-9 introspection
-        /// pending per Todo.md), so Fail would break the green doctor today. A shard that
-        /// does not parse is <b>Fail</b> (see <see cref="ProbeFieldAccessMapShardsAt"/>).
+        /// Severity is <b>Warn</b> when there are no shards, every shard is empty, or only
+        /// the shipped SDK-PDF baseline is present (most fields still 9012). A shard or
+        /// overlay the loader cannot load is <b>Fail</b> (see <see cref="ProbeFieldAccessMapShardsAt"/>).
         /// The detail reports counts AND the resolved root path so an operator can paste
         /// it into a bug report.
         /// </para>
@@ -1001,7 +1000,7 @@ namespace LacertMCP.Cli.Commands
         /// <c>{root}/base/*.json</c> + <c>{root}/overlays/ty*-not-supported.json</c> —
         /// <paramref name="root"/> is the same <see cref="SchemaDirResolver"/>-resolved
         /// tree <c>field-access set/list</c> edit (in the release layout, the server's
-        /// tree; in dev, the shared bin tree the loader reads).
+        /// tree; in a dev checkout, the server's build output — see SchemaDirResolver).
         ///
         /// <para>Severity model (consistent with the rest of doctor: Fail = real defect,
         /// Warn = known/advisory gap):</para>
@@ -1043,66 +1042,41 @@ namespace LacertMCP.Cli.Commands
             // R7 — entries beyond the shipped SDK-PDF baseline (source != "sdk-pdf":
             // operator `field-access set`, dumper introspection, manual edits).
             var nonBaselineEntries = 0;
+            // R7-40 — validate with the LOADER's own parse path
+            // (FieldAccessMapLoader.ValidateShardFile / ValidateOverlayFile), so
+            // doctor and the server agree by construction: wrong-typed fields,
+            // null entries, bad / missing access, numeric enums — whatever the
+            // loader accepts is OK here and whatever it drops is a Fail.
             foreach (var file in shardFiles.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
             {
-                try
+                var map = LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateShardFile(file, out var err);
+                if (map == null)
                 {
-                    var text = File.ReadAllText(file);
-                    if (string.IsNullOrWhiteSpace(text))
-                    {
-                        continue; // empty file == no entries (loader treats it the same)
-                    }
-                    using (var doc = JsonDocument.Parse(text, new JsonDocumentOptions
-                    {
-                        AllowTrailingCommas = true,
-                        CommentHandling = JsonCommentHandling.Skip,
-                    }))
-                    {
-                        if (doc.RootElement.ValueKind != JsonValueKind.Object)
-                        {
-                            malformed.Add($"{Path.GetFileName(file)} (root is {doc.RootElement.ValueKind}, expected an object)");
-                            continue;
-                        }
-                        // R7 — mirror what FieldAccessMapLoader accepts: each value
-                        // must be an object whose "access" (property names are
-                        // case-insensitive — the CLI / dumper writers emit PascalCase)
-                        // is a FieldAccess name. One bad entry makes the loader's
-                        // Deserialize throw and treat the WHOLE shard as empty, so it
-                        // is a Fail here, not an "operator entry".
-                        string? badEntry = null;
-                        int fileEntries = 0, fileNonBaseline = 0;
-                        foreach (var entry in doc.RootElement.EnumerateObject())
-                        {
-                            fileEntries++;
-                            if (entry.Value.ValueKind != JsonValueKind.Object)
-                            {
-                                badEntry = $"{entry.Name}: value is {entry.Value.ValueKind}, expected an object";
-                                break;
-                            }
-                            var access = GetStringPropertyCI(entry.Value, "access");
-                            if (access == null
-                                || !Enum.TryParse<LacertMCP.Server.Schema.FieldAccess>(access, ignoreCase: true, out var parsed)
-                                || !Enum.IsDefined(typeof(LacertMCP.Server.Schema.FieldAccess), parsed)
-                                || access.Trim().Length == 0 || char.IsDigit(access.Trim()[0]))
-                            {
-                                badEntry = $"{entry.Name}: access '{access ?? "<missing>"}' is not a FieldAccess value";
-                                break;
-                            }
-                            var source = GetStringPropertyCI(entry.Value, "source");
-                            if (!string.Equals(source, "sdk-pdf", StringComparison.OrdinalIgnoreCase)) fileNonBaseline++;
-                        }
-                        if (badEntry != null)
-                        {
-                            malformed.Add($"{Path.GetFileName(file)} ({badEntry})");
-                            continue;
-                        }
-                        totalEntries += fileEntries;
-                        nonBaselineEntries += fileNonBaseline;
-                    }
+                    malformed.Add($"base/{Path.GetFileName(file)} ({err})");
+                    continue;
                 }
-                catch (JsonException ex)
+                totalEntries += map.Count;
+                foreach (var kv in map)
                 {
-                    malformed.Add($"{Path.GetFileName(file)} ({ex.Message})");
+                    if (!string.Equals(kv.Value.Source, "sdk-pdf", StringComparison.OrdinalIgnoreCase)) nonBaselineEntries++;
+                }
+            }
+            var ignoredOverlays = new List<string>();
+            if (Directory.Exists(overlayDir))
+            {
+                foreach (var file in Directory.GetFiles(overlayDir, "*.json", SearchOption.TopDirectoryOnly)
+                             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                {
+                    var fname = Path.GetFileName(file);
+                    if (!LacertMCP.Server.Schema.FieldAccessMapLoader.IsLoadedOverlayFileName(fname))
+                    {
+                        ignoredOverlays.Add(fname);
+                        continue;
+                    }
+                    if (LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateOverlayFile(file, out var oerr) == null)
+                    {
+                        malformed.Add($"overlays/{fname} ({oerr})");
+                    }
                 }
             }
 
@@ -1110,8 +1084,16 @@ namespace LacertMCP.Cli.Commands
             {
                 return new ProbeResult(Name,
                     ProbeStatus.Fail,
-                    $"{malformed.Count} of {shardFiles.Length} base shard(s) under {baseDir} are not valid JSON — the loader treats them as empty: {string.Join("; ", malformed)}",
-                    "Restore the shard(s) from the release zip / git, or regenerate with LacertMCP.FieldAccessDumper.exe; then call lacerte_reload_schema on a running server.");
+                    $"{malformed.Count} file(s) under {root} cannot be loaded — the server ignores each such shard / overlay entirely (base shard → every field of that module is Unknown; overlay → that year's overrides are dropped): {string.Join("; ", malformed)}",
+                    "Fix the reported entry (every entry needs a valid \"access\" value and correctly-typed fields) or restore the file from the release zip / git, then call lacerte_reload_schema on a running server.");
+            }
+
+            if (ignoredOverlays.Count > 0)
+            {
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"overlay file(s) the server never reads (only ty{{yy}}-not-supported.json is loaded): {string.Join(", ", ignoredOverlays)}",
+                    "Rename the overlay to ty<yy>-not-supported.json (one file per tax year) or remove it.");
             }
 
             if (totalEntries == 0)
@@ -1137,20 +1119,6 @@ namespace LacertMCP.Cli.Commands
             return new ProbeResult(Name,
                 ProbeStatus.Pass,
                 $"{totalEntries} entr{(totalEntries == 1 ? "y" : "ies")} ({nonBaselineEntries} beyond the SDK-PDF baseline) across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}");
-        }
-
-        // R7 — case-insensitive string property lookup (System.Text.Json's
-        // JsonElement.TryGetProperty is case-sensitive; the loader is not).
-        private static string? GetStringPropertyCI(JsonElement obj, string name)
-        {
-            foreach (var p in obj.EnumerateObject())
-            {
-                if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    return p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : null;
-                }
-            }
-            return null;
         }
 
         /// <summary>

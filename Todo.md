@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1671 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1677 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1579,3 +1579,9 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
   - no longer recommends the stubbed dumper `--live`.
 - [x] **R7-39** In a dev checkout, `SchemaDirResolver` now targets the **server's** build output (`src/LacertMCP.Server/bin/<plat>/<cfg>/Schema/FieldAccessMap`), the tree the dev server reads. Before, `field-access set` and doctor used the CLI's own bin copy, and the claim that "CLI and server share one output folder" was false.
 - [x] The README no longer advises a base-map `field-access set` for `C1_G38`; it says to use a per-year overlay entry. The bulk detail-write description now states the stop-on-error behaviour, and the HANDOFF DECISIONS count is corrected.
+
+### Confirmation review of 058d52b (2026-11-15; all fixed)
+- [x] **R7-40** Doctor re-implemented the loader's parsing and kept drifting from it: it passed wrongly-typed fields the loader rejects, failed numeric `access` values the loader accepts, and didn't validate overlays at all. Doctor now validates with the loader's own parse path (`FieldAccessMapLoader.ValidateShardFile` / `ValidateOverlayFile`, built on the shared `ParseShard` / `ParseOverlay`), so the two agree by construction. Overlays are validated too, and an overlay file the loader never reads (not `ty{yy}-not-supported.json`) is a Warn.
+- [x] **R7-40b** A `null` shard or overlay entry used to load as a null record and would have thrown NullReferenceException in `GetFieldAccess`. It is now a parse error, handled fail-closed.
+- [x] **R7-41** The dumper's `LoadExisting` swallowed a parse error and "started fresh", silently dropping every existing row on rewrite. It now refuses, with a clear error.
+- [x] The doctor Fail message now describes the real effect, and its remediation no longer points at the stubbed dumper. The README overlay instructions name the only file the loader reads. The `--schema-dir` help and the doc comments describe the dev-checkout tier, and the garbled ShardPath summary is fixed.

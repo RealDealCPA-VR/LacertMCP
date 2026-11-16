@@ -349,8 +349,7 @@ namespace LacertMCP.Server.Schema
                 {
                     using (var stream = File.OpenRead(path))
                     {
-                        var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions);
-                        return (IReadOnlyDictionary<string, FieldEntry>)(map ?? new Dictionary<string, FieldEntry>());
+                        return ParseShard(stream);
                     }
                 }
                 catch (JsonException)
@@ -385,6 +384,78 @@ namespace LacertMCP.Server.Schema
         /// by manifest authoring discipline, not by the loader.
         /// </para>
         /// </summary>
+        /// <summary>
+        /// R7-40 — the ONE parse path for a base shard, shared by the loader and
+        /// <c>lacerte-mcp doctor</c> (via <see cref="ValidateShardFile"/>) so the
+        /// two can never disagree about what loads. Throws <see cref="JsonException"/>
+        /// for anything the loader must reject — including a <c>null</c> entry
+        /// value, which previously loaded as a null FieldEntry and would have
+        /// thrown NullReferenceException inside GetFieldAccess.
+        /// </summary>
+        internal static IReadOnlyDictionary<string, FieldEntry> ParseShard(Stream stream)
+        {
+            var map = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(stream, _jsonOptions)
+                      ?? new Dictionary<string, FieldEntry>();
+            foreach (var kv in map)
+            {
+                if (kv.Value == null) throw new JsonException($"entry '{kv.Key}' is null.");
+            }
+            return map;
+        }
+
+        /// <summary>R7-40 — the ONE parse path for an overlay file (see <see cref="ParseShard"/>).</summary>
+        internal static TaxYearOverlay ParseOverlay(Stream stream, int year)
+        {
+            var raw = JsonSerializer.Deserialize<OverlayFile>(stream, _jsonOptions);
+            if (raw == null)
+            {
+                return new TaxYearOverlay(year, new Dictionary<string, OverlayEntry>());
+            }
+            var overrides = raw.Overrides ?? new Dictionary<string, OverlayEntry>();
+            foreach (var kv in overrides)
+            {
+                if (kv.Value == null) throw new JsonException($"override '{kv.Key}' is null.");
+            }
+            return new TaxYearOverlay(raw.TaxYear == 0 ? year : raw.TaxYear, overrides);
+        }
+
+        /// <summary>
+        /// R7-40 — validate a base shard file exactly as the loader would read
+        /// it. Returns the parsed entries, or null with <paramref name="error"/>
+        /// set when the loader would treat the shard as empty. A blank file is
+        /// valid (zero entries), matching the loader.
+        /// </summary>
+        public static IReadOnlyDictionary<string, FieldEntry>? ValidateShardFile(string path, out string? error)
+        {
+            error = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(File.ReadAllText(path))) return new Dictionary<string, FieldEntry>();
+                using (var stream = File.OpenRead(path)) return ParseShard(stream);
+            }
+            catch (JsonException ex) { error = ex.Message; return null; }
+        }
+
+        /// <summary>R7-40 — validate an overlay file exactly as the loader would read it.</summary>
+        public static TaxYearOverlay? ValidateOverlayFile(string path, out string? error)
+        {
+            error = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(File.ReadAllText(path))) return new TaxYearOverlay(0, new Dictionary<string, OverlayEntry>());
+                using (var stream = File.OpenRead(path)) return ParseOverlay(stream, 0);
+            }
+            catch (JsonException ex) { error = ex.Message; return null; }
+        }
+
+        /// <summary>
+        /// R7-40 — the overlay file naming the loader actually reads
+        /// (<c>ty{yy}-not-supported.json</c>). Any other file in overlays/ is ignored.
+        /// </summary>
+        public static bool IsLoadedOverlayFileName(string fileName)
+            => System.Text.RegularExpressions.Regex.IsMatch(fileName ?? string.Empty,
+                @"^ty[0-9]{2}-not-supported\.json\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
         private static TaxYearOverlay? LoadOverlay(AccessMapSnapshot snap, int taxYear)
         {
             return snap.Overlays.GetOrAdd(taxYear, year =>
@@ -412,13 +483,7 @@ namespace LacertMCP.Server.Schema
                 {
                     using (var stream = File.OpenRead(path))
                     {
-                        var raw = JsonSerializer.Deserialize<OverlayFile>(stream, _jsonOptions);
-                        if (raw == null)
-                        {
-                            return new TaxYearOverlay(year, new Dictionary<string, OverlayEntry>());
-                        }
-                        var overrides = raw.Overrides ?? new Dictionary<string, OverlayEntry>();
-                        return new TaxYearOverlay(raw.TaxYear == 0 ? year : raw.TaxYear, overrides);
+                        return ParseOverlay(stream, year);
                     }
                 }
                 catch (JsonException)

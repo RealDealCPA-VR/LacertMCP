@@ -26,7 +26,7 @@ namespace LacertMCP.Cli.Commands
     /// <para>
     /// The schema root is resolved by <see cref="SchemaDirResolver"/> (explicit
     /// <c>--schema-dir</c> → release-layout <c>..\server\Schema\FieldAccessMap</c> →
-    /// next to lacerte-mcp.exe) so edits land in the tree the MCP server reads; both
+    /// dev-checkout server build output → next to lacerte-mcp.exe) so edits land in the tree the MCP server reads; both
     /// verbs print the resolved path.
     /// </para>
     /// </summary>
@@ -93,7 +93,9 @@ namespace LacertMCP.Cli.Commands
                 "Schema/FieldAccessMap root to read/write (the folder holding base/ and overlays/, " +
                 "or an install folder containing Schema/FieldAccessMap). Default: the release " +
                 "layout's ..\\server\\Schema\\FieldAccessMap when present (the tree the MCP server " +
-                "actually reads), else Schema\\FieldAccessMap next to lacerte-mcp.exe.");
+                "actually reads); in a dev checkout the server's build output " +
+                "(src\\LacertMCP.Server\\bin\\<plat>\\<cfg>\\Schema\\FieldAccessMap; rebuilds overwrite it); " +
+                "else Schema\\FieldAccessMap next to lacerte-mcp.exe.");
 
         /// <summary>
         /// Back-compat overload — preserved for existing call sites that pre-date the
@@ -393,9 +395,9 @@ namespace LacertMCP.Cli.Commands
         /// <summary>
         /// Shard path under the DEFAULT schema root (<see cref="SchemaDirResolver.Resolve(string)"/>
         /// with no explicit dir): the release layout's <c>..\server\Schema\FieldAccessMap</c>
-        /// when present — the tree the MCP server actually reads — else the tree next
-        /// the server's build output in a dev checkout (R7 DevServerBuild), else the
-        /// tree next to lacerte-mcp.exe.
+        /// when present — the tree the MCP server actually reads — else, in a dev
+        /// checkout, the server's build output (R7 DevServerBuild), else the tree
+        /// next to lacerte-mcp.exe.
         /// </summary>
         public static string ShardPath(string basename)
             => ShardPath(basename, SchemaDirResolver.Resolve().Root);

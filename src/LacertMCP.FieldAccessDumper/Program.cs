@@ -321,28 +321,17 @@ namespace LacertMCP.FieldAccessDumper
         private static Dictionary<string, FieldEntry> LoadExisting(string path)
         {
             if (!File.Exists(path)) return new Dictionary<string, FieldEntry>();
-            try
+            // R7-41 — parse with the loader's own path and REFUSE on failure.
+            // The old code logged a warning and "started fresh", so the next
+            // rewrite silently dropped every existing row of an unparseable
+            // shard (now also triggered by an entry missing "access").
+            var map = LacertMCP.Server.Schema.FieldAccessMapLoader.ValidateShardFile(path, out var err);
+            if (map == null)
             {
-                var json = File.ReadAllText(path);
-                if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}")
-                {
-                    return new Dictionary<string, FieldEntry>();
-                }
-                var opts = new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    AllowTrailingCommas = true,
-                    ReadCommentHandling = JsonCommentHandling.Skip,
-                };
-                opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
-                var parsed = JsonSerializer.Deserialize<Dictionary<string, FieldEntry>>(json, opts);
-                return parsed ?? new Dictionary<string, FieldEntry>();
+                throw new InvalidOperationException(
+                    $"refusing to rewrite {path}: it does not parse ({err}). Fix or restore the shard first — rewriting it would drop its existing entries.");
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[dumper] WARN: failed to parse {path}, starting fresh: {ex.Message}");
-                return new Dictionary<string, FieldEntry>();
-            }
+            return new Dictionary<string, FieldEntry>(map.ToDictionary(kv => kv.Key, kv => kv.Value));
         }
 
         private static string ResolveBaseDir(Options opts)
