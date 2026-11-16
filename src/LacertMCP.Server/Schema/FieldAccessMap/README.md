@@ -89,19 +89,47 @@ Two paths, both described in agent 04 §5:
 
 ```
 lacerte-mcp field-access set \
-  --module Individual --table 2 --field C2_45 \
+  --module I --table 2 --field C2_45 \
   --access ReadWrite --data-type numeric --max-length 12 \
   --source manual --note "discovered while writing dependent SSN"
 ```
 
+`--module` is the single module character (`I`/`C`/`P`/`S`/`F`/`R`/`T`/`N`/`B`).
 The CLI loads the right `base/<module>.json`, upserts the entry, re-sorts
-the file, updates `manifest.json`, and prints a diff. Commit the diff.
+the file by key, writes it back, and prints the resolved schema directory
+plus a one-line before/after diff of the entry. It does **not** touch
+`manifest.json` (the loader never reads the manifest; it only lists the
+shipped shard names). It refuses to write if the existing shard is not
+valid JSON rather than replacing it.
+
+Where it writes — the schema directory is resolved in this order:
+
+1. `--schema-dir <path>` (a `FieldAccessMap` root, or an install folder
+   containing `Schema/FieldAccessMap`);
+2. `..\server\Schema\FieldAccessMap` relative to `lacerte-mcp.exe`, if it
+   exists — the release-zip layout, where this is the tree
+   `LacertMCP.Server.exe` actually reads;
+3. `Schema\FieldAccessMap` next to `lacerte-mcp.exe` (the dev bin layout,
+   where CLI and server share one output folder).
+
+That is a **build-output / install** copy, not the source tree: an edit
+made there is overwritten by the next build or release unzip. To make it
+permanent, copy the entry into
+`src/LacertMCP.Server/Schema/FieldAccessMap/base/<module>.json` and commit
+it (or point `--schema-dir` at that source folder). A running MCP server
+caches shards — call the `lacerte_reload_schema` tool to pick up a change
+without a restart.
 
 **B. Introspection dump (bulk) — preferred for full population.**
 
-A script (per agent 04 §5 path A) probes the installed SDK with no-op
-writes and maps the returned `TAPIStatus` to a `FieldAccess`. Output
-overwrites `base/<module>.json` and a PR is opened.
+`LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]`
+probes fields and maps the returned status to a `FieldAccess`, merging the
+results into `base/<module>.json` (existing entries are preserved unless
+`--overwrite`). Default output: a sibling `..\server\Schema\FieldAccessMap\base`
+when present (release layout), else this source tree's `base/` when run
+from a checkout, else `Schema/FieldAccessMap/base` next to the exe. Today
+`--live` is a stub (throws BridgeUnavailable) and sim mode has no fields to
+enumerate, so the dumper writes nothing yet.
 
 ## v1 coverage status — TODO
 

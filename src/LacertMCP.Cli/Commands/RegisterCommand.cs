@@ -41,8 +41,9 @@ namespace LacertMCP.Cli.Commands
                 "Exit 0 on AccessGranted (or off-Windows mint-only), 1 on a denied/failed ceremony, " +
                 "2 when the Lacerte SDK is unavailable on this Windows box.");
 
-            var appNameOpt = new Option<string>("--app-name", () => "Operator Lacerte MCP",
-                "Friendly name shown in the Intuit consent dialog.");
+            var appNameOpt = new Option<string>("--app-name", () => DefaultAppName(),
+                "Friendly name shown in the Intuit consent dialog. Default: LACERTE_APP_NAME when set " +
+                "(so it matches the name the MCP server registers under), else \"" + FallbackAppName + "\".");
             var taxYearOpt = new Option<int>("--tax-year", () => DateTime.UtcNow.Year - 1,
                 "Tax year the registration is scoped to. Defaults to the prior calendar year.");
             var resetOpt = new Option<bool>("--reset", () => false,
@@ -62,6 +63,30 @@ namespace LacertMCP.Cli.Commands
 
             return cmd;
         }
+
+        /// <summary>
+        /// Hard default app name — must match <c>LacerteSessionManager.DefaultAppName</c>
+        /// (internal to the server assembly, so duplicated here) so a CLI register and the
+        /// server's session agree when <c>LACERTE_APP_NAME</c> is unset.
+        /// </summary>
+        public const string FallbackAppName = "Operator Lacerte MCP";
+
+        /// <summary>
+        /// Default for <c>--app-name</c> on register/login: <c>LACERTE_APP_NAME</c> when
+        /// non-blank (the server reads the same variable), else <see cref="FallbackAppName"/>.
+        /// Without this, an operator who set LACERTE_APP_NAME for the server would register
+        /// the CLI under a different name than the server later presents.
+        /// </summary>
+        public static string DefaultAppName()
+            => ResolveDefaultAppName(Environment.GetEnvironmentVariable("LACERTE_APP_NAME"));
+
+        /// <summary>
+        /// Pure seam for <see cref="DefaultAppName"/> (tests pass the env value directly).
+        /// Not trimmed: the server passes LACERTE_APP_NAME through verbatim, and the
+        /// registered name must match it exactly.
+        /// </summary>
+        public static string ResolveDefaultAppName(string? envValue)
+            => string.IsNullOrWhiteSpace(envValue) ? FallbackAppName : envValue!;
 
         /// <summary>
         /// Production entry point — runs the real <see cref="Registration.Register"/> ceremony.

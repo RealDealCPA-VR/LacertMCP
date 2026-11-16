@@ -252,25 +252,233 @@ namespace LacertMCP.Tests.Cli
         /// Fail under normal conditions (Fail is reserved for probe exceptions).
         /// </summary>
         [Fact]
-        public void Doctor_FieldAccessMapShards_UsesLoaderHelpers_And_NeverHardFails()
+        public void Doctor_FieldAccessMapShards_ReportsResolvedSchemaRoot()
         {
             var results = DoctorCommand.RunAllProbes();
             var shards = results.FirstOrDefault(r => r.Name == "FieldAccessMap shards");
             Assert.NotNull(shards);
 
-            // Never a hard Fail under normal conditions (v1 ships empty shards by
-            // design; the probe Warns instead so green-doctor stays achievable).
-            Assert.NotEqual(DoctorCommand.ProbeStatus.Fail, shards!.Status);
-            Assert.True(
-                shards.Status == DoctorCommand.ProbeStatus.Pass ||
-                shards.Status == DoctorCommand.ProbeStatus.Warn,
-                $"Expected Pass or Warn for FieldAccessMap shards; got {shards.Status}: {shards.Detail}");
+            // Severity is pinned deterministically by the ProbeFieldAccessMapShardsAt
+            // tests below against temp trees. It is NOT asserted here: the test-bin
+            // shard tree is shared with AccessMapMutation-collection tests that
+            // transiently write malformed shards (which this probe now reds on).
+            Assert.NotEqual(DoctorCommand.ProbeStatus.Skipped, shards!.Status);
 
-            // Detail must include the resolved schema-root path (the whole point of
-            // wiring through GetSchemaRoot — the operator should be able to paste the
-            // doctor output into a bug report and see where the loader was looking).
-            var expectedRoot = LacertMCP.Server.Schema.FieldAccessMapLoader.GetSchemaRoot();
+            // Detail must include the resolved schema-root path — the same tree
+            // `field-access set/list` edit (SchemaDirResolver).
+            var expectedRoot = LacertMCP.Cli.SchemaDirResolver.Resolve().Root;
             Assert.Contains(expectedRoot, shards.Detail);
+        }
+
+        // ----- FieldAccessMap shards: severity model -----
+
+        private static string NewShardTree(params (string file, string content)[] shards)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "lacerte-mcp-doctor-shards-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(root, "base"));
+            Directory.CreateDirectory(Path.Combine(root, "overlays"));
+            foreach (var (file, content) in shards)
+            {
+                File.WriteAllText(Path.Combine(root, "base", file), content);
+            }
+            return root;
+        }
+
+        private static void DeleteTree(string root)
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best-effort */ }
+        }
+
+        [Fact]
+        public void Doctor_Shards_NoShardFiles_Warns()
+        {
+            var root = NewShardTree();
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Warn, r.Status);
+                Assert.Contains("0 module shards", r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_AllEmpty_Warns_NotPass()
+        {
+            // The v1 shipped state: every base shard is `{}`. Previously this passed.
+            var root = NewShardTree(("individual.json", "{}"), ("corporate.json", "{}\n"), ("gift.json", ""));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Warn, r.Status);
+                Assert.Contains("0 entries", r.Detail);
+                Assert.Contains(root, r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_MalformedShard_Fails_WithRemediation()
+        {
+            var root = NewShardTree(
+                ("individual.json", "{ \"I|1|C1_1\": { \"access\": \"ReadWrite\" } }"),
+                ("corporate.json", "{ this is not json"));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, r.Status);
+                Assert.Contains("corporate.json", r.Detail);
+                Assert.DoesNotContain("individual.json", r.Detail);
+                Assert.False(string.IsNullOrEmpty(r.Remediation));
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_NonObjectRoot_Fails()
+        {
+            var root = NewShardTree(("individual.json", "[1, 2, 3]"));
+            try
+            {
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, DoctorCommand.ProbeFieldAccessMapShardsAt(root).Status);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_WithEntries_Passes()
+        {
+            var root = NewShardTree(
+                ("individual.json", "{ \"I|1|C1_1\": { \"access\": \"ReadWrite\" }, \"I|1|C1_2\": { \"access\": \"ReadOnly\" } }"),
+                ("corporate.json", "{}"));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Pass, r.Status);
+                Assert.Contains("2 entries", r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        // ----- App.config shim: server AND CLI exe configs -----
+
+        private const string CanonicalShim =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><configuration>" +
+            "<startup useLegacyV2RuntimeActivationPolicy=\"true\">" +
+            "<supportedRuntime version=\"v4.0\" sku=\".NETFramework,Version=v4.6\" />" +
+            "</startup></configuration>";
+
+        private const string NoShim =
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><configuration>" +
+            "<startup><supportedRuntime version=\"v4.0\" sku=\".NETFramework,Version=v4.8\" /></startup>" +
+            "</configuration>";
+
+        [Fact]
+        public void Doctor_AppConfigShims_BothValid_Passes()
+        {
+            var dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "lacerte-mcp-shims-" + Guid.NewGuid().ToString("N"))).FullName;
+            try
+            {
+                var server = Path.Combine(dir, "LacertMCP.Server.exe.config");
+                var cli = Path.Combine(dir, "lacerte-mcp.exe.config");
+                File.WriteAllText(server, CanonicalShim);
+                File.WriteAllText(cli, CanonicalShim);
+
+                var r = DoctorCommand.ProbeAppConfigShims(server, cli);
+                Assert.Equal(DoctorCommand.ProbeStatus.Pass, r.Status);
+                Assert.Equal("App.config shim", r.Name);
+            }
+            finally { DeleteTree(dir); }
+        }
+
+        [Fact]
+        public void Doctor_AppConfigShims_CliConfigWithoutShim_Fails_NamingCli()
+        {
+            // The pre-fix state: the CLI's auto-generated exe.config had <startup>
+            // without useLegacyV2RuntimeActivationPolicy, and doctor only checked
+            // the server's config so it stayed green.
+            var dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "lacerte-mcp-shims-" + Guid.NewGuid().ToString("N"))).FullName;
+            try
+            {
+                var server = Path.Combine(dir, "LacertMCP.Server.exe.config");
+                var cli = Path.Combine(dir, "lacerte-mcp.exe.config");
+                File.WriteAllText(server, CanonicalShim);
+                File.WriteAllText(cli, NoShim);
+
+                var r = DoctorCommand.ProbeAppConfigShims(server, cli);
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, r.Status);
+                Assert.Contains("lacerte-mcp.exe.config", r.Detail);
+                Assert.Contains("useLegacyV2RuntimeActivationPolicy", r.Detail);
+                Assert.DoesNotContain("server (", r.Detail);
+                Assert.False(string.IsNullOrEmpty(r.Remediation));
+            }
+            finally { DeleteTree(dir); }
+        }
+
+        [Fact]
+        public void Doctor_AppConfigShims_ServerConfigMissing_Fails()
+        {
+            var dir = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "lacerte-mcp-shims-" + Guid.NewGuid().ToString("N"))).FullName;
+            try
+            {
+                var cli = Path.Combine(dir, "lacerte-mcp.exe.config");
+                File.WriteAllText(cli, CanonicalShim);
+
+                var r = DoctorCommand.ProbeAppConfigShims(Path.Combine(dir, "LacertMCP.Server.exe.config"), cli);
+                Assert.Equal(DoctorCommand.ProbeStatus.Fail, r.Status);
+                Assert.Contains("server (", r.Detail);
+                Assert.Contains("not found", r.Detail);
+            }
+            finally { DeleteTree(dir); }
+        }
+
+        /// <summary>
+        /// Build-output regression guard: the CLI ships its own App.config, so the
+        /// emitted lacerte-mcp.exe.config (copied into the test bin via the project
+        /// reference) must carry the legacy-runtime shim register/login need.
+        /// </summary>
+        [Fact]
+        public void Doctor_CliExeConfig_InBuildOutput_HasShim()
+        {
+            var path = DoctorCommand.ResolveCliConfigPath();
+            Assert.EndsWith("lacerte-mcp.exe.config", path, StringComparison.OrdinalIgnoreCase);
+            var r = DoctorCommand.ProbeAppConfigShimAt(path);
+            Assert.True(r.Status == DoctorCommand.ProbeStatus.Pass, r.Detail);
+        }
+
+        // ----- Windows version: registry-backed, not the version-lied OSVersion -----
+
+        [Fact]
+        public void Doctor_WindowsVersion_Win11Registry_ReportsWindows11()
+        {
+            // Windows 11 still stores ProductName "Windows 10 Home"; build >= 22000 fixes it.
+            var s = DoctorCommand.FormatWindowsVersion("Windows 10 Home", "25H2", 10, 0, "26200", 9974, new Version(6, 2, 9200));
+            Assert.Equal("Windows 11 Home 25H2 (10.0.26200.9974)", s);
+            Assert.DoesNotContain("6.2", s);
+        }
+
+        [Fact]
+        public void Doctor_WindowsVersion_Win10Registry_KeepsWindows10()
+        {
+            var s = DoctorCommand.FormatWindowsVersion("Windows 10 Pro", "22H2", 10, 0, "19045", 4170, new Version(6, 2, 9200));
+            Assert.Equal("Windows 10 Pro 22H2 (10.0.19045.4170)", s);
+        }
+
+        [Fact]
+        public void Doctor_WindowsVersion_NoRegistryData_FallsBackToOsVersion()
+        {
+            var s = DoctorCommand.FormatWindowsVersion(null, null, null, null, null, null, new Version(6, 2, 9200));
+            Assert.StartsWith("Windows NT 6.2.9200", s);
+        }
+
+        [Fact]
+        public void Doctor_WindowsVersion_LiveProbe_IsNotVersionLied()
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT) return;
+            var win = DoctorCommand.RunAllProbes().First(r => r.Name == "Windows version");
+            // On any supported Windows (10/11/Server 2016+) the registry reports 10.0.x;
+            // the version-lied OSVersion says 6.2.9200.
+            Assert.DoesNotContain("6.2.9200", win.Detail);
         }
 
         [Fact]

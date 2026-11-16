@@ -261,7 +261,6 @@ namespace LacertMCP.Tests.Startup
 
         [Theory]
         [InlineData("LACERTE_HEARTBEAT_SECONDS")]
-        [InlineData("LACERTE_BULK_WRITE_MAX")]
         [InlineData("LACERTE_RECENT_LOG_CAPACITY")]
         [InlineData("LACERTE_DEBUG_LOG_MAX_BYTES")]
         [InlineData("LACERTE_DEBUG_LOG_MAX_DIR_BYTES")]
@@ -296,6 +295,87 @@ namespace LacertMCP.Tests.Startup
             var sw = new StringWriter();
             EnvValidator.Validate(sw, Env((name, value)));
             Assert.DoesNotContain(name, warningLines(sw));
+        }
+
+        // ----- Bulk caps: mirror the consumers (Int32, > 0, invariant) -----
+
+        [Theory]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "0", "500")]
+        [InlineData("LACERTE_BULK_CREATE_MAX", "0", "100")]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "-5", "500")]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "3000000000", "500")]
+        [InlineData("LACERTE_BULK_CREATE_MAX", "2147483648", "100")]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "thirty", "500")]
+        public void BulkCap_ValueConsumersIgnore_WarnsIgnored(string name, string value, string defaultCap)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env((name, value)));
+            var output = warningLines(sw);
+            Assert.Contains($"{name}='{value}'", output);
+            Assert.Contains("ignored", output);
+            Assert.Contains($"default cap of {defaultCap}", output);
+        }
+
+        [Theory]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "1")]
+        [InlineData("LACERTE_BULK_WRITE_MAX", "500")]
+        [InlineData("LACERTE_BULK_CREATE_MAX", "2147483647")]
+        public void BulkCap_HonoredValue_NoWarning(string name, string value)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env((name, value)));
+            Assert.DoesNotContain(name, warningLines(sw));
+        }
+
+        // ----- LACERTE_LOG_LEVEL -----
+
+        [Theory]
+        [InlineData("Debug")]
+        [InlineData("information")]
+        [InlineData("Information")]
+        [InlineData(" warning ")]
+        [InlineData("None")]
+        public void LogLevel_Recognized_NoWarning(string value)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_LOG_LEVEL", value)));
+            Assert.DoesNotContain("LACERTE_LOG_LEVEL", warningLines(sw));
+        }
+
+        [Theory]
+        [InlineData("verbose")]
+        [InlineData("info")]
+        [InlineData("2")]
+        public void LogLevel_Unrecognized_WarnsIgnored(string value)
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_LOG_LEVEL", value)));
+            var output = warningLines(sw);
+            Assert.Contains($"LACERTE_LOG_LEVEL='{value}'", output);
+            Assert.Contains("not a recognized log level", output);
+        }
+
+        // ----- LACERTE_DEFAULT_TAX_YEAR parses culture-invariantly -----
+
+        [Fact]
+        public void DefaultTaxYear_ParsesInvariant_RegardlessOfCurrentCulture()
+        {
+            // A culture whose PositiveSign is "p" makes the culture-default
+            // int.TryParse accept "p2024" as 2024; the invariant parse rejects it.
+            var original = System.Threading.Thread.CurrentThread.CurrentCulture;
+            var custom = (System.Globalization.CultureInfo)System.Globalization.CultureInfo.InvariantCulture.Clone();
+            custom.NumberFormat.PositiveSign = "p";
+            try
+            {
+                System.Threading.Thread.CurrentThread.CurrentCulture = custom;
+                var sw = new StringWriter();
+                EnvValidator.Validate(sw, Env(("LACERTE_DEFAULT_TAX_YEAR", "p2024")));
+                Assert.Contains("LACERTE_DEFAULT_TAX_YEAR='p2024' is not an integer", sw.ToString());
+            }
+            finally
+            {
+                System.Threading.Thread.CurrentThread.CurrentCulture = original;
+            }
         }
 
         private static IDictionary<string, string?> Env(params (string, string?)[] pairs)

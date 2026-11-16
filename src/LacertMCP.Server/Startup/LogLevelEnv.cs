@@ -7,8 +7,9 @@ namespace LacertMCP.Server.Startup
     /// P15-053 — parses the <c>LACERTE_LOG_LEVEL</c> environment variable into a
     /// <see cref="LogLevel"/> for the Microsoft.Extensions.Logging pipeline.
     /// Default is <see cref="LogLevel.Information"/>; unparseable values
-    /// silently fall back to the default (the value still appears in the
-    /// startup banner so the operator can spot the typo).
+    /// fall back to the default. The value is NOT echoed in the startup
+    /// banner; instead <see cref="EnvValidator"/> emits a <c>[startup]</c>
+    /// warning for unrecognized values so the operator can spot the typo.
     /// </summary>
     /// <remarks>
     /// Pure function with no env access of its own — callers pass the raw
