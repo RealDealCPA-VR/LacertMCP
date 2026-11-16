@@ -364,8 +364,8 @@ Returns mode, registration state, 24h expiry, active context, debug-log state, a
 
 Sets the active (dataPath, taxYear, module) triple used by every subsequent read/write tool. Validates `taxYear >= 2018` and `module` in `I/C/P/S/F/R/T/N/B`.
 
-- Required: `dataPath: string` (absolute path), `taxYear: int`, `module: string` (length 1).
-- Optional: `readOnly: bool = false` — when true, every write tool short-circuits to 9001 (`FieldIsReadOnly`) before any side effect.
+- Required: `dataPath: string` (fully-qualified absolute path incl. drive; trailing separators and `/` are normalized; drive-relative `C:foo` / drive-less `\foo` are rejected with 9013), `module: string` (length 1).
+- Optional: `taxYear: int` — defaults to the server's `LACERTE_DEFAULT_TAX_YEAR`; omitted with no default configured → 9017. `readOnly: bool = false` — when true, every write tool short-circuits to 9001 (`FieldIsReadOnly`) before any side effect.
 - Response: `{ dataPath, taxYear, module, readOnly }`.
 - Example:
   ```json

@@ -257,6 +257,23 @@ namespace LacertMCP.Server.Tools
                 }
 
                 var info = StatusCodes.GetStatusInfo(result.Status);
+                // R7-28b — a committed live create whose assigned number could
+                // not be read back (LacerteAccessClient best-effort read) is
+                // still a real client. Say so, and how to resolve it, instead
+                // of a bare clientNumber:null an LLM could mistake for a
+                // dry-run. Do NOT retry the create — it would DuplicateClient.
+                if (!dryRun && result.ClientNumber == null)
+                {
+                    return (object)new
+                    {
+                        statusCode = result.Status,
+                        statusName = info.Name,
+                        clientNumber = (string?)null,
+                        clientId,
+                        dryRun,
+                        clientNumberHint = $"The client WAS created, but the SDK did not return its ClientNumber. Resolve it with lacerte_client_find(name) or lacerte_client_list, matching clientId '{clientId}'. Do not re-run the create (it would fail with DuplicateClient).",
+                    };
+                }
                 // P16-054/P16-080 — wire envelope key is `clientId` (was
                 // `clientID`).
                 return (object)new

@@ -75,6 +75,19 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(SyntheticStatusCodes.InvalidArgument, negative.GetProperty("statusCode").GetInt32());
         }
 
+        // R7-18b — a BCL-raised ArgumentException is an in-server bug: 9203.
+        [Fact]
+        public async Task R718_BclArgumentException_StaysInternalServerError()
+        {
+            var json = await WrapToolHandler.Run(() =>
+            {
+                var list = new List<int>();
+                return Task.FromResult<object>(list[3]); // ArgumentOutOfRangeException from System
+            });
+            var root = Root(json);
+            Assert.Equal(SyntheticStatusCodes.InternalServerError, root.GetProperty("statusCode").GetInt32());
+        }
+
         [Fact]
         public async Task R718_Cancellation_PropagatesInsteadOfInternalError()
         {

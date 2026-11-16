@@ -266,11 +266,33 @@ namespace LacertMCP.Server.Session
         private object GetClientWriteLock(string clientNumber)
             => _clientWriteLocks.GetOrAdd(clientNumber, _ => new object());
 
-        // R7-10 — serializes sim client creation (real + dry-run) and the
-        // client-roster reads, so (a) the duplicate-ClientId check and the
-        // mint are atomic and (b) a dry-run's mint→undo window is never
-        // observable. Lock order: _simCreateLock → client write lock.
-        private readonly object _simCreateLock = new object();
+        // R7-10 / R7-35 — simulation visibility gate. EXCLUSIVE (write) for
+        // sim client creation and every sim dry-run (field / detail /
+        // create), SHARED (read) for every sim read core (ListClients,
+        // ReadClient, ReadTable, ReadDetail, ReadEFStatus). So (a) the
+        // duplicate-ClientId check and the mint are atomic, and (b) no read
+        // can observe a dry-run's write→undo window (phantom client, in-flight
+        // field value, phantom detail row). Real field/detail writes do NOT
+        // take it — they only need the per-client lock.
+        // Lock order: _simGate → client write lock → lock(list).
+        // ReaderWriterLockSlim is thread-affine: enter/exit only around
+        // synchronous bodies (never across an await).
+        private readonly ReaderWriterLockSlim _simGate =
+            new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+
+        private T UnderSimRead<T>(Func<T> body)
+        {
+            _simGate.EnterReadLock();
+            try { return body(); }
+            finally { _simGate.ExitReadLock(); }
+        }
+
+        private T UnderSimWrite<T>(Func<T> body)
+        {
+            _simGate.EnterWriteLock();
+            try { return body(); }
+            finally { _simGate.ExitWriteLock(); }
+        }
 
         // ===================================================================
         // Construction
@@ -762,7 +784,14 @@ namespace LacertMCP.Server.Session
             // LacerteSDKError(9013 InvalidDataPath) with {dataPath, reason}
             // — preserves the structured-error invariant so the tool layer
             // surfaces a precise rejection.
-            var canonical = CanonicalizeDataPath(PathValidation.ValidateDataPath(dataPath));
+            var full = PathValidation.ValidateDataPath(dataPath);
+            // R7-20b — only adopt the canonical form on Windows. Off-Windows
+            // (Mono / CI build hosts) GetFullPath("C:\Lacerte\...") is
+            // "<cwd>/C:\Lacerte\..." — storing that would orphan every seeded
+            // sim cell. There the operator string is kept (validated above).
+            var canonical = Environment.OSVersion.Platform == PlatformID.Win32NT
+                ? CanonicalizeDataPath(full)
+                : dataPath;
             ValidateYearAndModule(taxYear, module);
             return canonical;
         }
@@ -944,17 +973,13 @@ namespace LacertMCP.Server.Session
             // enumeration order is unspecified and can change when a create
             // resizes the map between two offset pages, skipping/repeating
             // rows). Live SQL orders by ClientNumber too.
-            // R7-10 — materialize under _simCreateLock so a dry-run create's
+            // R7-10 — materialize under the shared _simGate so a dry-run create's
             // phantom row is never listed.
-            List<IReadOnlyDictionary<string, object?>> result;
-            lock (_simCreateLock)
-            {
-                result = rows
-                    .OrderBy(r => r.ClientNumber, StringComparer.OrdinalIgnoreCase)
-                    .Take(Math.Max(0, limit))
-                    .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
-                    .ToList();
-            }
+            var result = UnderSimRead(() => rows
+                .OrderBy(r => r.ClientNumber, StringComparer.OrdinalIgnoreCase)
+                .Take(Math.Max(0, limit))
+                .Select(r => (IReadOnlyDictionary<string, object?>)CloneRow(r))
+                .ToList());
             return Task.FromResult<IReadOnlyList<IReadOnlyDictionary<string, object?>>>(result);
         }
 
@@ -1008,14 +1033,17 @@ namespace LacertMCP.Server.Session
             // R7-07 — take the per-client write lock while cloning so a
             // concurrent dry-run (which holds it across write → undo) is
             // never observed mid-flight.
-            lock (_simCreateLock)
-            lock (GetClientWriteLock(key))
+            UnderSimRead(() =>
             {
-                if (module.Clients.TryGetValue(key, out var row))
+                lock (GetClientWriteLock(key))
                 {
-                    result = CloneRow(row);
+                    if (module.Clients.TryGetValue(key, out var row))
+                    {
+                        result = CloneRow(row);
+                    }
                 }
-            }
+                return 0;
+            });
             return Task.FromResult(result);
         }
 
@@ -1069,9 +1097,15 @@ namespace LacertMCP.Server.Session
                 () => ReadTableCore(table, clientNumber, stateAbbrev, cancellationToken));
         }
 
+        // R7-35 — every sim read materializes under the shared gate.
         private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTableCore(
             int table, string? clientNumber, string? stateAbbrev,
             CancellationToken cancellationToken = default)
+            => UnderSimRead(() => ReadTableCoreUnlocked(table, clientNumber, stateAbbrev, cancellationToken));
+
+        private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTableCoreUnlocked(
+            int table, string? clientNumber, string? stateAbbrev,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ctx = RequireContext();
@@ -1245,14 +1279,16 @@ namespace LacertMCP.Server.Session
             // writer's order). The unlocked ToList threw "Destination array
             // was not long enough" / "Collection was modified" under a
             // concurrent append, and could expose an in-flight dry-run row.
-            DetailRow[] snapshotRows;
-            lock (GetClientWriteLock(key))
+            var snapshotRows = UnderSimRead(() =>
             {
-                lock (list)
+                lock (GetClientWriteLock(key))
                 {
-                    snapshotRows = list.ToArray();
+                    lock (list)
+                    {
+                        return list.ToArray();
+                    }
                 }
-            }
+            });
             IEnumerable<DetailRow> rows = snapshotRows;
             if (seriesFilter.HasValue)
             {
@@ -1351,6 +1387,10 @@ namespace LacertMCP.Server.Session
         }
 
         private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatusCore(
+            SessionContext ctx, DateTime? sinceUtc)
+            => UnderSimRead(() => ReadEFStatusCoreUnlocked(ctx, sinceUtc));
+
+        private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadEFStatusCoreUnlocked(
             SessionContext ctx, DateTime? sinceUtc)
         {
             RequireRegistered();
@@ -1652,16 +1692,26 @@ namespace LacertMCP.Server.Session
                         // on undo. The inner row.Fields dict mutation stays
                         // as-is; this lock just brackets the dry-run pair.
                         Action? undo = null;
-                        lock (GetClientWriteLock(clientNumber))
+                        // R7-35 — exclusive sim gate (outer) so no sim read
+                        // observes the write→undo window. No await inside.
+                        _simGate.EnterWriteLock();
+                        try
                         {
-                            try
+                            lock (GetClientWriteLock(clientNumber))
                             {
-                                inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew, out undo);
+                                try
+                                {
+                                    inner = ApplySimFieldWriteWithUndo(ctx, table, clientNumber, field, value, subClientId, stateAbbrev, useNew, out undo);
+                                }
+                                finally
+                                {
+                                    undo?.Invoke();
+                                }
                             }
-                            finally
-                            {
-                                undo?.Invoke();
-                            }
+                        }
+                        finally
+                        {
+                            _simGate.ExitWriteLock();
                         }
                     }
                     else
@@ -1887,16 +1937,26 @@ namespace LacertMCP.Server.Session
                         // reference-equality remove fix below as
                         // defense-in-depth. See WriteField for full reasoning.
                         Action? undo = null;
-                        lock (GetClientWriteLock(clientNumber))
+                        // R7-35 — exclusive sim gate (outer) so no sim read
+                        // observes the write→undo window. No await inside.
+                        _simGate.EnterWriteLock();
+                        try
                         {
-                            try
+                            lock (GetClientWriteLock(clientNumber))
                             {
-                                inner = ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo);
+                                try
+                                {
+                                    inner = ApplySimDetailWriteWithUndo(ctx, clientNumber, row, replaceIndex, out undo);
+                                }
+                                finally
+                                {
+                                    undo?.Invoke();
+                                }
                             }
-                            finally
-                            {
-                                undo?.Invoke();
-                            }
+                        }
+                        finally
+                        {
+                            _simGate.ExitWriteLock();
                         }
                     }
                     else
@@ -2069,22 +2129,22 @@ namespace LacertMCP.Server.Session
                         // P14-043 — per-operation undo. CreateClient mints a
                         // ClientNumber + adds one Clients entry; undo decrements
                         // NextClientNumber + removes the entry.
-                        // R7-10 — under _simCreateLock so the phantom client
+                        // R7-10 — under the exclusive _simGate so the phantom client
                         // is never visible to ListClients/ReadClient and a
                         // concurrent real create of the same ClientId can't
                         // see it as a duplicate.
-                        Action? undo = null;
-                        lock (_simCreateLock)
+                        inner = UnderSimWrite(() =>
                         {
+                            Action? undo = null;
                             try
                             {
-                                inner = ApplySimCreateClientWithUndo(ctx, args, out undo);
+                                return ApplySimCreateClientWithUndo(ctx, args, out undo);
                             }
                             finally
                             {
                                 undo?.Invoke();
                             }
-                        }
+                        });
                         // R6-22 — sim dryRun returns a null ClientNumber to
                         // match live dryRun (which short-circuits before the
                         // wire and cannot mint). The undo above already
@@ -2100,10 +2160,7 @@ namespace LacertMCP.Server.Session
                         // mint were separate steps; two concurrent creates of
                         // the same ClientId both succeeded (live rejects the
                         // second with DuplicateClient). Serialize them.
-                        lock (_simCreateLock)
-                        {
-                            inner = ApplySimCreateClient(ctx, args);
-                        }
+                        inner = UnderSimWrite(() => ApplySimCreateClient(ctx, args));
                     }
                     return inner;
                 }).ConfigureAwait(false);
@@ -2673,29 +2730,38 @@ namespace LacertMCP.Server.Session
                 return await body().ConfigureAwait(false);
             }
             SemaphoreSlim? sem = null;
-            for (int attempt = 0; attempt < 2; attempt++)
+            for (int attempt = 0; attempt < 8; attempt++)
             {
-                sem = _idempotencyLocks.GetOrAdd(key!, _ => new SemaphoreSlim(1, 1));
+                var candidate = _idempotencyLocks.GetOrAdd(key!, _ => new SemaphoreSlim(1, 1));
                 try
                 {
-                    await sem.WaitAsync().ConfigureAwait(false);
-                    break;
+                    await candidate.WaitAsync().ConfigureAwait(false);
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Evictor disposed the semaphore between our GetOrAdd
-                    // and our WaitAsync. The eviction pass is single-flight
-                    // and already finished considering this key; the next
-                    // GetOrAdd installs a fresh semaphore cleanly.
-                    sem = null;
+                    // Defensive (R7-03 no longer disposes evicted semaphores).
+                    continue;
                 }
+                // R7-03 — ownership re-check. Between our GetOrAdd and our
+                // WaitAsync the evictor may have removed this semaphore from
+                // the map; a later same-key caller then mints a FRESH one and
+                // the two bodies would run concurrently. Only proceed while
+                // holding the semaphore that is still registered for the key;
+                // otherwise release the orphan and retry against the live one.
+                if (_idempotencyLocks.TryGetValue(key!, out var current)
+                    && ReferenceEquals(current, candidate))
+                {
+                    sem = candidate;
+                    break;
+                }
+                candidate.Release();
             }
             if (sem == null)
             {
-                // Two consecutive disposals inside our GetOrAdd→WaitAsync
-                // window is statistically negligible but theoretically
-                // possible. Degrade to unlocked execution — equivalent to
-                // a cache miss, the documented worst-case behavior.
+                // Eight consecutive evictions inside our GetOrAdd→WaitAsync
+                // window is not a realistic schedule. Degrade to unlocked
+                // execution — equivalent to a cache miss, the documented
+                // worst-case behavior.
                 return await body().ConfigureAwait(false);
             }
             // P18-032 — stamp the acquire timestamp AFTER WaitAsync returns
@@ -2744,6 +2810,9 @@ namespace LacertMCP.Server.Session
             // SemaphoreSlim whose AvailableWaitHandle was never touched owns
             // no unmanaged state, while disposing one a concurrent caller
             // still references throws ObjectDisposedException in its Wait.
+            // A caller that captured this semaphore before the Remove but
+            // waits on it afterwards is handled by the ownership re-check in
+            // ExecuteWithIdempotencyLock (it releases the orphan and retries).
             if (_idempotencyLocks.TryGetValue(key, out var sem) && sem.Wait(0))
             {
                 try
@@ -3315,7 +3384,11 @@ namespace LacertMCP.Server.Session
                 }
                 finally
                 {
-                    Volatile.Write(ref _persistingIdempotency, 0);
+                    // R7-04b — full fence on release. A Volatile.Write followed by
+                    // the loop's Volatile.Read of _persistRequested may be
+                    // reordered (store→load), letting a concurrent request be
+                    // missed by both threads.
+                    Interlocked.Exchange(ref _persistingIdempotency, 0);
                 }
             }
         }
@@ -3701,6 +3774,7 @@ namespace LacertMCP.Server.Session
             _odbc?.Dispose();
             // Dispose all idempotency-lock semaphores.
             foreach (var sem in _idempotencyLocks.Values) sem.Dispose();
+            _simGate.Dispose();
         }
 
         // ===================================================================

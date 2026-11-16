@@ -331,6 +331,23 @@ namespace LacertMCP.Server.Tools
 
                         var info = StatusCodes.GetStatusInfo(result.Status);
                         succeededCount++;
+                        if (!dryRun && result.ClientNumber == null)
+                        {
+                            // R7-28b — committed live create whose number the
+                            // SDK did not return (see lacerte_client_create).
+                            rows.Add(new
+                            {
+                                index = i,
+                                clientId = normalizedClientId,
+                                succeeded = true,
+                                statusCode = result.Status,
+                                statusName = info.Name,
+                                clientNumber = (string?)null,
+                                wouldCreate = false,
+                                clientNumberHint = "Created, but the SDK did not return the ClientNumber — resolve it via lacerte_client_find / lacerte_client_list by clientId. Do not re-run this row.",
+                            });
+                            continue;
+                        }
                         rows.Add(new
                         {
                             index = i,

@@ -733,6 +733,17 @@ namespace LacertMCP.Server.Logging
         // Redaction helpers
         // -----------------------------------------------------------------
 
+        // R7-33 — the exact FieldAccess enum names (case-sensitive, as
+        // MetadataTools emits them via FieldAccess.ToString()).
+        private static readonly HashSet<string> _fieldAccessLabels = new HashSet<string>(
+            Enum.GetNames(typeof(LacertMCP.Server.Schema.FieldAccess)), StringComparer.Ordinal);
+
+        private static bool IsFieldAccessLabel(JsonNode? node)
+            => node is JsonValue v
+               && v.TryGetValue<string>(out var s)
+               && s != null
+               && _fieldAccessLabels.Contains(s);
+
         private static void RedactNode(JsonNode node, HashSet<string> keys, bool diskScope)
         {
             switch (node)
@@ -758,6 +769,14 @@ namespace LacertMCP.Server.Logging
                         // the wire-scope LLM consumer should never see them either.
                         if (_piiFieldCodes.Contains(name))
                         {
+                            // R7-33 — exempt FieldAccess labels. The
+                            // lacerte_field_access_map envelope is keyed by the
+                            // same field codes ({"C1_15":"ReadWrite"}), so the
+                            // LLM saw "***" for exactly the SSN/DOB/bank fields
+                            // whose writability it most needs to check. An
+                            // access-enum literal is metadata, never a value:
+                            // no SSN/DOB/email/bank number can equal one.
+                            if (IsFieldAccessLabel(obj[name])) continue;
                             obj[name] = JsonValue.Create("***");
                             continue;
                         }

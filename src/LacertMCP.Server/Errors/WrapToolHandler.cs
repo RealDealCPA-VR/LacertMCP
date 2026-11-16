@@ -161,7 +161,7 @@ namespace LacertMCP.Server.Errors
                     // envelope for a normal notifications/cancelled.
                     throw;
                 }
-                catch (ArgumentException argEx)
+                catch (ArgumentException argEx) when (IsOwnValidationThrow(argEx))
                 {
                     // R7-18 — argument-validation failures (Pagination's
                     // negative-limit guard, lacerte_client_find's blank name /
@@ -222,6 +222,23 @@ namespace LacertMCP.Server.Errors
                 // in whatever state we found it.
                 WireLog.CurrentCorrelationId.Value = prior;
             }
+        }
+
+        /// <summary>
+        /// R7-18b — only ArgumentExceptions THROWN BY THIS SERVER'S OWN CODE
+        /// (tool / pagination / ODBC-builder validation guards) are caller
+        /// errors. One raised inside the BCL — a List indexer or Substring
+        /// off-by-one, Dictionary.Add on a duplicate key — is an in-server bug
+        /// and must stay 9203 (with exceptionType) rather than telling the LLM
+        /// to "self-correct" an argument it never supplied. TargetSite is the
+        /// method that executed the throw; for async/lambda bodies it is the
+        /// compiler-generated MoveNext / closure, whose declaring type still
+        /// lives in the LacertMCP.Server namespace.
+        /// </summary>
+        internal static bool IsOwnValidationThrow(ArgumentException ex)
+        {
+            var ns = ex.TargetSite?.DeclaringType?.Namespace;
+            return ns != null && ns.StartsWith("LacertMCP.Server", StringComparison.Ordinal);
         }
 
         private static string SerializeError(LacerteSDKError err, string cid)

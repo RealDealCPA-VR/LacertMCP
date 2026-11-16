@@ -294,7 +294,17 @@ namespace LacertMCP.Server.Startup
             var mode = (!sim && live && onWindows) ? SessionMode.Live : SessionMode.Simulation;
 
             var dataRoot = Get(env, "LACERTE_DATA_ROOT");
-            var defaultTaxYear = Get(env, "LACERTE_DEFAULT_TAX_YEAR");
+            // R7-21 — show the EFFECTIVE value. An invalid value is ignored by
+            // the session manager (and warned about above), so echoing the raw
+            // string ("defaultTaxYear=abc") contradicted the "ignored" line.
+            var rawTaxYear = Get(env, "LACERTE_DEFAULT_TAX_YEAR");
+            string? defaultTaxYear = rawTaxYear;
+            if (!string.IsNullOrEmpty(rawTaxYear))
+            {
+                bool valid = int.TryParse(rawTaxYear, NumberStyles.Integer, CultureInfo.InvariantCulture, out var y)
+                    && y >= 2018 && y <= DateTime.UtcNow.Year + 1;
+                defaultTaxYear = valid ? y.ToString(CultureInfo.InvariantCulture) : "<ignored>";
+            }
             var debugWire = Get(env, "LACERTE_DEBUG_WIRE") == "1";
             var logPath = Get(env, "LACERTE_DEBUG_LOG_PATH");
             var asmVersion = SafeAssemblyVersion();

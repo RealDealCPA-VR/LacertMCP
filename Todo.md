@@ -1475,3 +1475,52 @@ Session goal: assess completeness, close everything still open and doable off th
 - [x] **P20-004** `HeartbeatWriter` immediate-write contract restored under Hosting.Abstractions 10.x (pulled in by F9): the 10.x line schedules `BackgroundService.ExecuteAsync` asynchronously instead of running it synchronously to the first await inside `StartAsync`, which silently broke "file on disk by the time host startup returns". Startup sweep + first `TryWrite` moved into a `StartAsync` override.
 - [x] **P20-005** Fixed pre-existing scheduling flake in `FieldAccessMapLoaderP18AtomicityTests.ReloadCaches_AtomicSwap_NoBlendedSnapshot_VisibleToReader`: under full-suite thread-pool pressure the reloader could finish all 200 reloads and set `stopReader` before the reader task ever ran → zero observations → NotEmpty/Contains assertion failures. Reloader now waits on a `ManualResetEventSlim` the reader sets after its first observation.
 - [x] **P20-006** Doc sync: README dashboard row, SKILL.md (`totalTuplesScanned` drift fix + pure-read wording + SDK 1.4.0 + 1506 count), INSTRUCTION_MANUAL (7b/7d pure-read wording, glossary SDK version), ARCHITECTURE stack line, DECISIONS.md 2026-06-11 entries, fresh HANDOFF.md.
+
+## Phase 21 — Round-7 deep code review (2026-11-15)
+
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1623 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+
+### HIGH (fixed)
+- [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
+- [x] **R7-PII** `lacerte_diff_clients` / `lacerte_year_over_year` leaked SSN/DOB/email/bank to the LLM (`{field,a,b}` / `{field,fromValue,toValue}` slots unredacted) → value-slot redaction for PII codes
+- [x] **R7-02** Persisted idempotency cache shared across sim and live (sim success replayed by a live process) → mode in fingerprint + separate sim file
+- [x] **R7-07** `ReadDetail` copied the shared detail list without its lock → "Destination array was not long enough" under concurrent writes
+- [x] **R7-10** Two concurrent sim `CreateClient`s with the same ClientId both succeeded → serialized
+- [x] **R7-14** Empty `clientNumber` on the "one client" read tools returned EVERY client's rows → 9017
+- [x] **R7-21** `LACERTE_DEFAULT_TAX_YEAR=abc` crashed the server before the handshake (validator said "ignored") → ignored
+- [x] **R7-CLI1** CLI / dumper exes lacked the `useLegacyV2RuntimeActivationPolicy` shim although `register`/`login` activate the SDK COM in-process; doctor gave a false green
+- [x] **R7-CLI3** `field-access set` / dumper wrote shards the server never reads (CLI's own copy) → schema-dir resolution prefers `..\server\Schema\FieldAccessMap`
+
+### MEDIUM (fixed)
+- [x] **R7-12/13** Bridge content rules ran live-only (sim accepted 300-char Description, `\u0001`, 51-char names); wrong code 9008 for field/create writes; live dry-run previewed Success for pre-TY21 / bad-shape writes the commit refuses
+- [x] **R7-15** `lacerte_ef_status` `sinceUtc` truncated to the day (poll re-delivered the whole day)
+- [x] **R7-16** SKILL.md canonical `lacerte_client_find(name: "John Smith")` always found nothing
+- [x] **R7-17** `lacerte_set_context` never used `LACERTE_DEFAULT_TAX_YEAR` despite docs + remediation text
+- [x] **R7-18** ArgumentException (negative limit, blank name, …) and host cancellation surfaced as 9203 InternalServerError
+- [x] **R7-20** Equivalent dataPath spellings (trailing `\`, `/`) opened an empty sim cell; drive-relative `C:foo` / drive-less `\foo` passed "absolute" validation
+- [x] **R7-24** `lacerte_field_access_map` probed a fixed `C{t}_0..25` grid (could never list C1_71 etc. — prompts treat absence as STOP); **R7-33** its PII-code entries were masked to `***` on the wire
+- [x] **R7-25/26** Bulk rows not pinned to the batch context; bulk-create dry-run passed in-batch duplicate clientIds that the commit half-applied
+- [x] **R7-27/28** AutoReconnect never retried against the real bridge (9201 wrapper); post-commit ClientNumber read failure reported a created client as BridgeUnavailable
+- [x] **R7-YoY** YoY detail totals summed as double (false "changed" rows) → decimal
+- [x] **R7-LOG** WireLog timestamps / file names used the current culture (th-TH/ar-SA/fi-FI broke history + retention); full-results mode made the in-memory ring unbounded
+- [x] **R7-03/04/05** Idempotency eviction could dispose a held semaphore; a lost persist race could drop an entry before a crash; disk cache had no cap
+- [x] **R7-CLI** doctor shard probe passed on all-empty / malformed shards; wrong Windows version (manifest-less OSVersion); unregister couldn't remove a corrupt AppID; `--app-name` ignored `LACERTE_APP_NAME`; release.ps1 never stamped the tag version into binaries; build/test.ps1 `--` forwarding broken
+
+### LOW (fixed)
+- [x] Validation regexes accepted a trailing `\n` (`$`) and non-ASCII digits (`\d`) → `\z` + `[0-9]`
+- [x] Stale tool names in hints (`lacerte_create_client`, `lacerte_list_clients`, callable-looking `lacerte_detail_delete`) + new guard test that every `lacerte_*` reference in server source resolves
+- [x] `lacerte_can_use_new_apis` accepted any module/year; per-tool stats merged both write tools under "Run"; `RejectIfReadOnly` re-read Context; ListClients hash order; `clientNumber`/`stateAbbrev` normalization on writes; client diff always reported `C1_0`; field history marked `result:2` as succeeded; ODBC IM003/IM014 unmapped + guidance hint dropped; SqlTemplates wrong validation codes; ConnectionStringBuilder `returnType` unvalidated; doc drift (APP_NAME default, dumper flags, output paths)
+
+### Live-box verification items (cannot be closed off-Windows)
+- [ ] **R7-L1** `SqlTemplates` DATA3/DATA4 state filter uses `C3_G1`/`C4_G1` while sim seeds state in `C3_1` — confirm the real column on a live DSN (latent: ODBC reads not yet wired)
+- [ ] **R7-L2** `Writer.WriteDetail` sends `row.Amount ?? 0.0` (COM shape is "best guess") — confirm whether `WriteToDetailFile` accepts a null Amount so description-only rows round-trip like sim
+- [ ] **R7-L3** Confirm `IClient.ClientNumber` is the property that carries the assigned number after `CreateClient()` (spec lists `ClientID`); R7-28 made the read best-effort either way
+
+### Second-pass review of the fix diff (independent reviewer; all fixed)
+- [x] **R7-04b** persist-loop release used `Volatile.Write` → store/load reorder could still miss a request; now `Interlocked.Exchange`
+- [x] **R7-03b** eviction could orphan a semaphore a caller had captured but not yet awaited → acquirer re-checks ownership and retries
+- [x] **R7-18b** `ArgumentException` → 9017 narrowed to throws from this server's own code; BCL-raised (indexer / Substring / Dictionary.Add) stay 9203
+- [x] **R7-20b** canonical dataPath adopted only on Windows (off-Windows `GetFullPath("C:\…")` would orphan sim cells)
+- [x] **R7-35** dry-run state still visible to `ReadTable` / `ReadEFStatus` / `ListClients` → reader/writer sim gate (exclusive for creates + dry-runs, shared for every sim read)
+- [x] **R7-28b** live create Success with no readable ClientNumber now carries `clientNumberHint` (single + bulk)
+- [x] Doc drift: INSTRUCTION_MANUAL / README `set_context` signature; stray form-feed byte in SKILL.md

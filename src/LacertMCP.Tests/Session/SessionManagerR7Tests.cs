@@ -323,6 +323,58 @@ namespace LacertMCP.Tests.Session
         }
 
         // -----------------------------------------------------------------
+        // R7-35 — no sim read observes a dry-run's write→undo window
+        // -----------------------------------------------------------------
+
+        private static bool IsDry(IReadOnlyDictionary<string, object?> row)
+            => row.TryGetValue(SeedField, out var v) && Equals(v, "DRYRUN");
+
+        [Fact]
+        public async Task R735_ConcurrentReads_NeverSeeDryRunFieldValue()
+        {
+            using var mgr = await NewRegisteredSimAsync();
+            await mgr.WriteField(1, "1001", SeedField, "REAL");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
+            int leaks = 0;
+            var dry = Task.Run(async () =>
+            {
+                while (!cts.IsCancellationRequested)
+                    await mgr.WriteField(1, "1001", SeedField, "DRYRUN", dryRun: true);
+            });
+            var read = Task.Run(async () =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var c = await mgr.ReadClient("1001");
+                    var t = await mgr.ReadTable(1, "1001");
+                    var l = await mgr.ListClients(null, int.MaxValue);
+                    if (IsDry(c!) || t.Any(IsDry) || l.Any(IsDry))
+                    {
+                        Interlocked.Increment(ref leaks);
+                    }
+                }
+            });
+            await Task.WhenAll(dry, read);
+            Assert.Equal(0, leaks);
+        }
+
+        [Fact]
+        public async Task R728_LiveCreate_SuccessWithoutNumber_CarriesHint()
+        {
+            var fake = new ScriptedBridge { CreateClientNumber = null };
+            using var mgr = NewLiveManagerWithFake(fake);
+            mgr.SetRegisteredForTest(true);
+            mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
+            var json = await new CreateClientTools(mgr).LacerteClientCreate(
+                "NONUM", "Individual", "First", "Last", "e@x.com");
+            using var doc = JsonDocument.Parse(json);
+            var result = doc.RootElement.GetProperty("result");
+            Assert.Equal(StatusCodes.Success, result.GetProperty("statusCode").GetInt32());
+            Assert.Equal(JsonValueKind.Null, result.GetProperty("clientNumber").ValueKind);
+            Assert.Contains("WAS created", result.GetProperty("clientNumberHint").GetString());
+        }
+
+        // -----------------------------------------------------------------
         // R7-11 — client list order is deterministic
         // -----------------------------------------------------------------
 
@@ -569,6 +621,7 @@ namespace LacertMCP.Tests.Session
             public int WriteDetailCalls;
             public int UpdateTaxReturnCalls;
             public bool CanUseNew = true;
+            public string? CreateClientNumber = "1";
             public readonly Queue<int> UpdateTaxReturnStatuses = new Queue<int>();
 
             public int Register(string appName, string appId, int taxYear) => StatusCodes.AccessGranted;
@@ -608,7 +661,7 @@ namespace LacertMCP.Tests.Session
 
             public BridgeCreateClientResult CreateClient(string appId, string dataPath, int year, char module,
                 string clientId, string taxType, string? firstName, string? lastName, string? emailId)
-                => new BridgeCreateClientResult(StatusCodes.Success, "1");
+                => new BridgeCreateClientResult(StatusCodes.Success, CreateClientNumber);
 
             public void Dispose() { }
         }

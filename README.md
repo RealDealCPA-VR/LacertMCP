@@ -219,7 +219,7 @@ The server registers **42 MCP tools**, grouped below by the same categories `lac
 | Tool | Params | What it does |
 | --- | --- | --- |
 | `lacerte_session_status` | none | Snapshot of mode, registration, 24h expiry, active context, `nextSteps[]` hints. Zero wire I/O — call first. |
-| `lacerte_set_context` | `dataPath`, `taxYear`, `module`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
+| `lacerte_set_context` | `dataPath`, `module`, `taxYear?`, `readOnly?` | Set the active (dataPath, taxYear, module) triple; `readOnly: true` blocks all writes with 9001. |
 | `lacerte_list_modules` | none | The 9-module catalog (I/C/P/S/F/R/T/N/B) with names + ODBC ReturnType strings. |
 | `lacerte_list_datapaths` | none | Discover `{YY}Tax\{Module}Data` folders under `LACERTE_DATA_ROOT` (fallback `C:\Lacerte`). |
 | `lacerte_can_use_new_apis` | `taxYear`, `module` | Whether (taxYear, module) supports TY21+ `UpdateTaxReturn`; cached per pair. |
@@ -438,8 +438,8 @@ lacerte_field_write
 
 Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<module>.json`).
 
-- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY]` — print every entry for a module/table at the requested year (overlays applied).
-- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable).
+- `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY] [--schema-dir <dir>]` — print every entry for a module/table at the requested year (overlays applied).
+- `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...] [--schema-dir <dir>]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable). Both commands target, in order: `--schema-dir`, the sibling `..\server\Schema\FieldAccessMap` (release-zip layout — the tree the server actually reads), else the CLI's own folder; the resolved path is printed.
 - `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]` (it probes all known modules/tables itself — there are no `--module`/`--table` flags; `--live` needs Windows + the Lacerte SDK).
 
 ### `lacerte-mcp doctor`

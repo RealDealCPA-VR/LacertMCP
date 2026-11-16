@@ -582,3 +582,57 @@ This entry documents the policy that three code comments have cited since P18 (`
 **Behavioral trap worth remembering:** Hosting.Abstractions 10.x **schedules `BackgroundService.ExecuteAsync` asynchronously** instead of running it synchronously up to the first await inside `StartAsync`. `HeartbeatWriter` relied on the old behavior for its "file on disk by the time startup returns" contract — the startup sweep + immediate `TryWrite` now live in a `StartAsync` override (the only correct place once the 8.x quirk is gone). Audit any future `BackgroundService` for the same assumption.
 
 **Source:** Todo.md Phase 20 P20-003/P20-004; NuGet flatcontainer metadata for ModelContextProtocol[.Core] 1.4.0 + System.Text.Json 10.0.7.
+
+## 2026-11-15 — Round-7 deep review: live write failures raise; content rules run in both modes
+
+**Chosen:** `LacerteSessionManager.WriteField` / `WriteDetail` convert a non-Success TAPIStatus **returned** by the live bridge into a structured `LacerteSDKError` (after the Success-only idempotency store, so failures are still never cached). The bridge's content rules (`BridgeInputValidation.ValidateValue` / `ValidateDetailRowContent` / `ValidateCreateClientText`: 255/50-char caps, C0 control characters, NaN/Infinity, non-scalar) now run at the session chokepoint in **both** modes. Field-write content violations report `9015 FieldWriteInvalid`, create-client text violations report `24 InValidClientName` (was `9008 DetailWriteInvalid`, whose message is about detail-row shape). A live `dryRun` applies the same pre-TY21 refusal (`9202`) and identifier-shape checks as the commit.
+
+**Why:** the `ILacerteBridge` contract says "failures throw" and the sim throws, but `Bridge.Writer` returned raw ints. The single-write tools and `lacerte_field_write_bulk` reported `success:true, statusCode:2` (DBFNotAccessable) for a rejected live write, which an LLM reads as a landed write. That broke the two-mode rule in the most dangerous direction. Sim also accepted values live rejected, and a live preview passed writes the commit would refuse.
+
+**Source:** round-7 review (Todo.md Phase 21 R7-01/R7-12/R7-13).
+
+## 2026-11-15 — Idempotency fingerprint includes the backend mode; sim cache file is separate
+
+**Chosen:** `BuildPayload` canonicalizes `{op, mode, args}` (mode between op and args), and the default persisted cache for simulation is `idempotency-cache.sim.json`; live keeps `idempotency-cache.json`. An explicit `LACERTE_IDEMPOTENCY_PERSIST_PATH` shared by both modes now yields `9102 IdempotencyConflict` on cross-mode reuse instead of a silent replay.
+
+**Why:** sim seeds use the real install datapaths (`C:\Lacerte\24Tax\IData`). A sim session on the operator's box could cache `CreateClient(..., key)` → `(Success, "1003")`, and a live process within 24h replayed it. The wire never fired, and the returned number could name a different real client.
+
+**Consequence:** fingerprints persisted before this change no longer match. Within their 24h TTL, a byte-identical retry surfaces 9102 instead of replaying. This is accepted because live mode has not run against a real Lacerte box yet, and the sim file moved anyway. The R6-01 cross-process test helper mirrors the new canonical form.
+
+## 2026-11-15 — Error-envelope mapping: ArgumentException → 9017; cancellation propagates
+
+**Chosen:** `WrapToolHandler.Run` maps `ArgumentException` (incl. `ArgumentOutOfRangeException`) to `9017 InvalidArgument` with `{argument, reason[, value]}`, and **rethrows** `OperationCanceledException` instead of wrapping it.
+
+**Why:** Pagination's negative-limit guard, `lacerte_client_find`'s blank-name / limit checks, ClientResourceTools and ConnectionStringBuilder all throw `ArgumentException`. These are caller errors, but they reached the LLM as `9203 InternalServerError` ("set LACERTE_DEBUG_WIRE=1 and file an issue"). A host cancellation (`notifications/cancelled`) is not a server fault; the MCP SDK owns cancellation semantics. Bulk tools still catch per-row cancellation themselves and return their partial `stoppedEarly` envelope.
+
+## 2026-11-15 — LACERTE_DEFAULT_TAX_YEAR: honored by set_context; invalid values ignored
+
+**Chosen:** `lacerte_set_context`'s `taxYear` is optional (`int? taxYear = null`, placed after `module`; MCP binds by name) and falls back to `LACERTE_DEFAULT_TAX_YEAR`, else `9017`. An invalid value (non-integer, < 2018, > UtcNow.Year+1) is **ignored** (treated as unset), matching EnvValidator's "… — ignored" warning. Previously it was a fail-loud throw.
+
+**Why:** the docs, HelpTools and the code 11/25 remediation all promised the fallback, but nothing read it. The fail-loud throw ran inside the singleton HeartbeatWriter resolves at host start, so a typo killed the server before the MCP handshake. That happened right after stderr had told the operator the value was ignored.
+
+## 2026-11-15 — Wire redaction: PII value slots in diff/audit shapes; FieldAccess labels exempt
+
+**Chosen:** when an object's `field` is a true-secret code (`_piiFieldCodes`), every value-slot sibling is masked. Value slots are `a`/`b`, before/after, old/new, from/to, prior/current, original/updated, `delta`, and any `*Value` / `*Values`; addressing keys like `clientNumber` and `reason` are left alone. Separately, a PII-code **key** whose value is exactly a `FieldAccess` enum name (`ReadWrite`, `ReadOnly`, …) is not masked.
+
+**Why:** `lacerte_diff_clients` (`{field, a, b}`) and `lacerte_year_over_year` (`{field, fromValue, toValue}`) returned SSN/DOB/email/bank values unmasked, because only a sibling literally named `value` was scrubbed. Conversely, `lacerte_field_access_map` is keyed by field code, so the LLM saw `"C1_15":"***"`. That hid writability for exactly the fields where it matters most. No SSN/DOB/email/bank value can equal an access-enum literal.
+
+## 2026-11-15 — Bulk batches: context pinned per row; in-batch duplicate clientIds rejected up front
+
+**Chosen:** the three bulk write tools pass the context they validated as `expectedContext` to every per-row session call, and the chokepoint throws `9016 ContextMismatch` if the active context changed (value equality, so re-setting the identical tuple is fine). `lacerte_client_create_bulk` rejects an `entries[]` that repeats a clientId (case-insensitive) with `9017` (`context.duplicates`) before any row runs, in dry-run and commit alike.
+
+**Why:** a mid-batch `lacerte_set_context` silently retargeted the remaining rows. Dry-run rows are applied then undone one at a time, so `[SMITH, smith]` previewed as two successes, and the commit then half-applied and stopped on DuplicateClient.
+
+## 2026-11-15 — AutoReconnect sees through the bridge's 9201 wrapper
+
+**Chosen:** `AutoReconnect.IsTransient` treats `LacerteSDKError(BridgeUnavailable 9201)` as transient iff its `InnerException` is (non-SDK and) one of the four whitelisted HRESULTs. Every other TAPIStatus-bearing error is still never retried.
+
+**Why:** every live Bridge method wraps all exceptions as 9201, so the retry policy chosen on 2026-05-30 (and R6-41, retry-then-verify for append-only ops) never ran against the real bridge, only against test fakes. Companion fix: `LacerteAccessClient.CreateClient` reads the assigned `ClientNumber` best-effort *after* the commit. A failed property read now returns Success with a null number instead of 9201, which a retry would have turned into DuplicateClient.
+
+## 2026-11-15 — Simulation visibility gate (reader/writer) replaces the per-op dry-run locking
+
+**Chosen:** a single `ReaderWriterLockSlim _simGate` (SupportsRecursion). It is taken **exclusive** for sim client creation and for every sim dry-run (field / detail / create), and **shared** for every sim read core (ListClients, ReadClient, ReadTable, ReadDetail, ReadEFStatus). Real field/detail writes do not take it; they keep the per-client lock. Lock order: `_simGate` → per-client write lock → `lock(list)`. The gate is entered and exited only around synchronous bodies, never across an `await`.
+
+**Why:** sim dry-run is "apply, then undo". The per-client lock serialized dry-runs against writers, but readers never took it, so a concurrent read could return a dry-run value, a phantom detail row, or a phantom client. Live has no such window. A shared/exclusive gate makes every read see either before or after a dry-run, never the middle, without serializing reads against each other.
+
+**Also (second pass):** `WrapToolHandler` maps `ArgumentException` to 9017 **only** when this server's own code threw it (`TargetSite` namespace `LacertMCP.Server*`). BCL-thrown ones are in-server bugs and stay 9203. The idempotency lock acquirer re-checks that it holds the semaphore still registered for the key.
