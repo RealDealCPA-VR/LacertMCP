@@ -104,8 +104,11 @@ Write-Host "==> Releasing v$Version" -ForegroundColor Cyan
 # ---- 3. Stage Server + verify Schema/FieldAccessMap tree --------------
 $serverBin = Join-Path $script:RepoRoot 'src/LacertMCP.Server/bin/x64/Release'
 $cliBin = Join-Path $script:RepoRoot 'src/LacertMCP.Cli/bin/x64/Release'
+# The dumper builds the writable-field map on the Lacerte PC; install-http.ps1 installs it
+# and prints the exact command. Without it field writes stay refused (the map ships empty).
+$dumperBin = Join-Path $script:RepoRoot 'src/LacertMCP.FieldAccessDumper/bin/x64/Release'
 
-foreach ($p in @($serverBin, $cliBin)) {
+foreach ($p in @($serverBin, $cliBin, $dumperBin)) {
     if (-not (Test-Path -LiteralPath $p)) {
         Write-Host "Missing build output: $p" -ForegroundColor Red
         exit 1
@@ -232,6 +235,15 @@ Copy-Item -Path (Join-Path $serverBin '*') -Destination $serverStage -Recurse -F
 Write-Host "==> Staging CLI -> $cliStage"
 Copy-Item -Path (Join-Path $cliBin '*') -Destination $cliStage -Recurse -Force
 
+$dumperStage = Join-Path $stageRoot 'dumper'
+New-Item -ItemType Directory -Path $dumperStage -Force | Out-Null
+Write-Host "==> Staging field-map dumper -> $dumperStage"
+Copy-Item -Path (Join-Path $dumperBin '*') -Destination $dumperStage -Recurse -Force
+if (-not (Test-Path -LiteralPath (Join-Path $dumperStage 'LacertMCP.FieldAccessDumper.exe'))) {
+    Write-Host 'LacertMCP.FieldAccessDumper.exe missing from the dumper build output.' -ForegroundColor Red
+    exit 1
+}
+
 # Copy README + LICENSE if present at repo root so the operator gets a
 # self-contained drop.
 # install-http.ps1 sets the server up as an always-on tailnet service + control page.
@@ -249,7 +261,7 @@ $zipPath = Join-Path $stageRoot "LacertMCP-v$Version.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 
 # Compress server/ + cli/ + any docs into one zip.
-$toZip = @($serverStage, $cliStage, (Join-Path $stageRoot 'install-http.ps1'))
+$toZip = @($serverStage, $cliStage, $dumperStage, (Join-Path $stageRoot 'install-http.ps1'))
 foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
     $p = Join-Path $stageRoot $f
     if (Test-Path -LiteralPath $p) { $toZip += $p }
