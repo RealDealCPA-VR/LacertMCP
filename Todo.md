@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1663 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1665 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1563,3 +1563,10 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
   - The TY21 DATA2 name is given as `-Detail-SubClientInfo` in the list but `-SubClientInfo` in the sample.
   - The pre-TY21 DATA4 sample says `[DATA4-Subclient State Info]`, but the table list says "State Subclient Info".
   - The `TaxModule` / TPSDKStatus 1–4 integers are positional.
+
+### Final review of the source batch (2026-11-15; all fixed)
+- [x] **R7-SRC15** Base `C1_G38` ReadWrite plus the exact-year TY21 overlay meant TY22+ failed OPEN for a field the PDF removes from TY21. It is dropped from base and stays fail-closed (9012).
+- [x] **R7-SRC16** The doctor shard probe reported green with only the SDK-PDF baseline present, while most fields still return 9012. It now Warns, with remediation, until entries beyond the `sdk-pdf` baseline exist.
+- [x] **R7-SRC17** The schema JSON is copied with `Always`, not `PreserveNewest`, so a bin copy left stale by an aborted shard-mutating fixture is refreshed on the next build.
+- [x] Stale text fixed: loader probe-order comment, `DetailRow.TSJ` comment, SKILL TSJ set, bulk replaceIndex wording. The detail-write tools and the onboarding prompt now say that live detail writes return 9202.
+- Decision recorded: the appendix's global-field rows ship for Individual and Partnership only; other modules stay fail-closed for those fields.

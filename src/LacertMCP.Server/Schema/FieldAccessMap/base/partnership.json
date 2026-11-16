@@ -77,12 +77,6 @@
     "description": "Global field (documented access)",
     "addedAt": "2026-11-15"
   },
-  "P|1|C1_G38": {
-    "access": "ReadWrite",
-    "source": "sdk-pdf",
-    "description": "Global field (documented access)",
-    "addedAt": "2026-11-15"
-  },
   "P|1|C1_G39": {
     "access": "ReadOnly",
     "source": "sdk-pdf",

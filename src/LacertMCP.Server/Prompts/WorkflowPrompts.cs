@@ -111,6 +111,7 @@ Step 4 — Seed core address / phone fields (if collected during intake)
   / `Unknown` / absent from the response, STOP and report the column.
 
 Step 5 — Seed starter detail rows (W-2 / 1099 / Schedule C totals collected at intake)
+  • Simulation mode only for now: live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files only via its ODBC driver, not wired yet). In live mode skip this step and ask the operator to enter the rows in Lacerte.
   • `lacerte_detail_write` takes 5 REQUIRED flat params (clientNumber, series, code, amount, description) plus 7 optional row-key segments that default to empty string (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) and 3 optional control params (replaceIndex, dryRun, idempotencyKey). There is NO nested `row:` wrapper — every field is a top-level kwarg.
   • A W-2 row looks like:
       `lacerte_detail_write({{ clientNumber, series: ""11"", code: ""1"", amount: 50000.00, description: ""Employer A"", tsj: ""T"" }})`

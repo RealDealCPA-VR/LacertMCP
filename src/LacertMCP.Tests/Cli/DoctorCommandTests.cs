@@ -317,6 +317,38 @@ namespace LacertMCP.Tests.Cli
             finally { DeleteTree(root); }
         }
 
+        // R7 — only the shipped SDK-PDF baseline entries present: most fields
+        // still return 9012, so this must Warn (with remediation), not Pass.
+        [Fact]
+        public void Doctor_Shards_OnlySdkPdfBaseline_Warns()
+        {
+            var root = NewShardTree(
+                ("individual.json", "{ \"I|1|C1_G4\": { \"access\": \"ReadWrite\", \"source\": \"sdk-pdf\" } }"),
+                ("corporate.json", "{ \"C|3|C3_G1\": { \"access\": \"ReadOnly\", \"source\": \"sdk-pdf\" } }"));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Warn, r.Status);
+                Assert.Contains("SDK-PDF baseline", r.Detail);
+                Assert.NotNull(r.Remediation);
+            }
+            finally { DeleteTree(root); }
+        }
+
+        [Fact]
+        public void Doctor_Shards_EntriesBeyondBaseline_Pass()
+        {
+            var root = NewShardTree(
+                ("individual.json", "{ \"I|1|C1_G4\": { \"access\": \"ReadWrite\", \"source\": \"sdk-pdf\" }, \"I|1|C1_15\": { \"access\": \"ReadWrite\", \"source\": \"manual\" } }"));
+            try
+            {
+                var r = DoctorCommand.ProbeFieldAccessMapShardsAt(root);
+                Assert.Equal(DoctorCommand.ProbeStatus.Pass, r.Status);
+                Assert.Contains("1 beyond the SDK-PDF baseline", r.Detail);
+            }
+            finally { DeleteTree(root); }
+        }
+
         [Fact]
         public void Doctor_Shards_MalformedShard_Fails_WithRemediation()
         {

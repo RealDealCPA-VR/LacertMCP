@@ -650,3 +650,9 @@ This entry documents the policy that three code comments have cited since P18 (`
 **Fail-closed where the PDF documents no COM API:** live detail-row writes return `9202 SimulationOnly`. The SDK writes detail files through its ODBC driver, whose write path is not wired yet. A live create returns Success with a null ClientNumber because the SDK returns none.
 
 **Inference flagged:** the `TaxModule` enum's integer values are not printed. The .NET sample's `(TaxModule)(SelectedIndex + 1)`, together with the documented module order (Individual … Benefit), gives ordinal = index + 1 (`Modules.TaxModuleOrdinal`). TPSDKStatus 1..4 follow the same C# enum-position rule from the documented `ConsentDenied = 0`.
+
+## 2026-11-15 — PDF field-access rows: literal entries only, I/P scope, no fail-open across years
+
+**Chosen:** the PDF appendix's literal access rows ship as `source: "sdk-pdf"` entries. The documented DATA1/DATA5 global-field rows go in the Individual and Partnership shards. The structural DATA2–DATA4 rows go in all nine. The TY21 not-supported lists form the exact-year TY21 overlay. Range rules ("remaining non-global fields") are not encoded, so the 2026-05-30 fail-closed default stands. **No base entry may be ReadWrite when the PDF removes that field in a later year without a per-year overlay**: `C1_G38` is omitted for this reason. Doctor Warns until entries beyond the `sdk-pdf` baseline exist.
+
+**Why:** the 2026-05-30 decision said the map ships with the spec's hard-coded entries, but the shards had shipped empty. Encoding ranges or other modules from a non-module-scoped table would widen the write surface beyond what the source states literally.

@@ -440,9 +440,8 @@ namespace LacertMCP.Server.Schema
             // any AppDomain with ShadowCopyFiles) Assembly.Location is a temp
             // cache folder WITHOUT the content tree, so the loader silently saw
             // an empty map — every lookup Unknown — which hid the shipped shards
-            // from the test suite. Probe, in order: the assembly's folder, the
-            // AppDomain base directory, and the assembly's original (CodeBase)
-            // folder; use the first that actually contains the tree.
+            // from the test suite. Probe several candidate folders (order below)
+            // and use the first that actually contains the tree.
             // Order: the ORIGINAL assembly folder (CodeBase — the real
             // install / bin folder even under shadow copy) first, then the
             // AppDomain base directory, then Assembly.Location (the shadow

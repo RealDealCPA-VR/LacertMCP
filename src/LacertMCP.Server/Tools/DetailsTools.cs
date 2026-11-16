@@ -103,7 +103,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success). Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
+        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Simulation mode only for now: in live mode this returns 9202 SimulationOnly (the Lacerte SDK writes detail files only through its ODBC driver, which is not wired yet) — enter live detail rows in Lacerte. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success). Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
         public Task<string> LacerteDetailWrite(
             [Description("Lacerte ClientNumber.")] string clientNumber,
             [Description("Numeric Series identifier per Lacerte spec §2 — must match ^\\d+$ (e.g. '11'=W-2, '12'=Interest, '13'=Dividends, '14'=Dependents, '20'=Income, '30'=State, '40'=Partners). Required.")] string series,

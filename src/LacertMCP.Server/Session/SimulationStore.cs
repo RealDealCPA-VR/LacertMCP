@@ -63,7 +63,7 @@ namespace LacertMCP.Server.Session
         string StateAbbr,
         string CityAbbr,
         string Source,
-        string TSJ,            // "T" | "S" | "J" | ""
+        string TSJ,            // SDK: "Taxpayer" | "Spouse" | "Joint" | "" (blank = Joint); T/S/J aliases normalized on write (R7-SRC)
         string ImportSrc,
         double? Amount,
         string Description);

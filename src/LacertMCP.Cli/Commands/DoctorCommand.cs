@@ -1012,7 +1012,9 @@ namespace LacertMCP.Cli.Commands
         ///   <item><description><b>Warn</b> — no shard files, OR every shard parses but
         ///   holds zero entries (the v1 shipped-empty state: every WriteField returns
         ///   9012 UnknownFieldAccess until populated).</description></item>
-        ///   <item><description><b>Pass</b> — at least one entry across the base shards.</description></item>
+        ///   <item><description><b>Warn</b> — (R7) only the shipped SDK-PDF baseline
+        ///   entries (source "sdk-pdf") are present; most fields still return 9012.</description></item>
+        ///   <item><description><b>Pass</b> — at least one entry beyond the SDK-PDF baseline.</description></item>
         /// </list>
         /// </summary>
         public static ProbeResult ProbeFieldAccessMapShardsAt(string root)
@@ -1038,6 +1040,9 @@ namespace LacertMCP.Cli.Commands
 
             var malformed = new List<string>();
             var totalEntries = 0;
+            // R7 — entries beyond the shipped SDK-PDF baseline (source != "sdk-pdf":
+            // operator `field-access set`, dumper introspection, manual edits).
+            var nonBaselineEntries = 0;
             foreach (var file in shardFiles.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
             {
                 try
@@ -1058,7 +1063,15 @@ namespace LacertMCP.Cli.Commands
                             malformed.Add($"{Path.GetFileName(file)} (root is {doc.RootElement.ValueKind}, expected an object)");
                             continue;
                         }
-                        foreach (var _ in doc.RootElement.EnumerateObject()) totalEntries++;
+                        foreach (var entry in doc.RootElement.EnumerateObject())
+                        {
+                            totalEntries++;
+                            var isBaseline = entry.Value.ValueKind == JsonValueKind.Object
+                                && entry.Value.TryGetProperty("source", out var src)
+                                && src.ValueKind == JsonValueKind.String
+                                && string.Equals(src.GetString(), "sdk-pdf", StringComparison.OrdinalIgnoreCase);
+                            if (!isBaseline) nonBaselineEntries++;
+                        }
                     }
                 }
                 catch (JsonException ex)
@@ -1083,9 +1096,21 @@ namespace LacertMCP.Cli.Commands
                     null);
             }
 
+            if (nonBaselineEntries == 0)
+            {
+                // R7 — only the documented SDK-PDF rows (a handful of globals +
+                // structural ReadOnly rows) are present: ordinary fields such as
+                // C1_15 still return 9012 UnknownFieldAccess. Green here would
+                // mislead the operator.
+                return new ProbeResult(Name,
+                    ProbeStatus.Warn,
+                    $"only the SDK-PDF baseline is present ({totalEntries} documented entries across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}) — most fields still return 9012 UnknownFieldAccess until catalogued",
+                    "Catalogue the fields you write: run LacertMCP.FieldAccessDumper.exe --live --year <yyyy> on the Lacerte box, or `lacerte-mcp field-access set ...` per field, then call lacerte_reload_schema.");
+            }
+
             return new ProbeResult(Name,
                 ProbeStatus.Pass,
-                $"{totalEntries} entr{(totalEntries == 1 ? "y" : "ies")} across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}");
+                $"{totalEntries} entr{(totalEntries == 1 ? "y" : "ies")} ({nonBaselineEntries} beyond the SDK-PDF baseline) across {shardFiles.Length} module shard(s), {overlays} overlay(s) under {root}");
         }
 
         /// <summary>

@@ -136,9 +136,10 @@ enumerate, so the dumper writes nothing yet.
 The source SDK PDF (Intuit *Lacerte SDK Developer Instructions*, https://static.developer.intuit.com/resources/Lacerte_SDK_Developer_Instructions.pdf) was re-mined. Its literal rows now ship with `source: "sdk-pdf"`:
 
 - **`individual.json` / `partnership.json`.** The documented DATA1 global fields:
-  - `C1_G4`, `C1_G12`, `C1_G13` and `C1_G38` are ReadWrite.
+  - `C1_G4`, `C1_G12` and `C1_G13` are ReadWrite. The PDF also lists `C1_G38` as ReadWrite, but its "Not Supported Fields in TY21" list removes it from TY21. Overlays are exact-year and no TY22+ list exists, so a ReadWrite base entry would fail **open** for TY22+. It is therefore omitted and stays fail-closed (9012); catalogue it per year with `field-access set` if needed.
   - The other listed `C1_G*` fields are ReadOnly.
   - The listed DATA5 globals (`C5_G5`, `C5_G48`, `C5_G49`, `C5_G52`–`C5_G54`, `C5_G56`–`C5_G61`) are Hidden.
+- **Scope.** The global-field rows above ship for Individual and Partnership only, the scope the PDF's TY21 lists and the original spec mining attribute them to. Other modules stay fail-closed for those fields.
 - **All nine modules.** The structural DATA2–DATA4 rows: `C2_1` and `C4_1` (subclient number), `C3_G1` and `C4_G1` (state abbreviation), and `C2_G1`, all ReadOnly.
 - **`overlays/ty21-not-supported.json`.** The PDF's "Not Supported Fields in TY21" lists for Individual and Partnership. These include `C5_1`–`C5_67`, expanded to literal keys. Per DECISIONS 2026-05-30, an overlay applies to its **exact** year only.
 
