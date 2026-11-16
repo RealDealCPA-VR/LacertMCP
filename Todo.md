@@ -1478,7 +1478,7 @@ Session goal: assess completeness, close everything still open and doable off th
 
 ## Phase 21 — Round-7 deep code review (2026-11-15)
 
-Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1624 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
+Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, session, core tools, bulk/aggregate tools + logging, CLI/startup/build). Every finding was re-verified against source before fixing. Net: **1506 → 1625 tests, 0 warnings, 0 failures** (3 consecutive full-suite runs). Branch `review/r7-deep-review`.
 
 ### HIGH (fixed)
 - [x] **R7-01** Live write that the SDK rejects (returned TAPIStatus ≠ 1) reported `success:true` in `lacerte_field_write` / `lacerte_update_return` / `lacerte_detail_write` / `lacerte_field_write_bulk` → session chokepoint now raises a structured error (sim parity)
@@ -1512,9 +1512,9 @@ Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, 
 - [x] `lacerte_can_use_new_apis` accepted any module/year; per-tool stats merged both write tools under "Run"; `RejectIfReadOnly` re-read Context; ListClients hash order; `clientNumber`/`stateAbbrev` normalization on writes; client diff always reported `C1_0`; field history marked `result:2` as succeeded; ODBC IM003/IM014 unmapped + guidance hint dropped; SqlTemplates wrong validation codes; ConnectionStringBuilder `returnType` unvalidated; doc drift (APP_NAME default, dumper flags, output paths)
 
 ### Live-box verification items (cannot be closed off-Windows)
-- [ ] **R7-L1** `SqlTemplates` DATA3/DATA4 state filter uses `C3_G1`/`C4_G1` while sim seeds state in `C3_1` — confirm the real column on a live DSN (latent: ODBC reads not yet wired)
-- [ ] **R7-L2** `Writer.WriteDetail` sends `row.Amount ?? 0.0` (COM shape is "best guess") — confirm whether `WriteToDetailFile` accepts a null Amount so description-only rows round-trip like sim
-- [ ] **R7-L3** Confirm `IClient.ClientNumber` is the property that carries the assigned number after `CreateClient()` (spec lists `ClientID`); R7-28 made the read best-effort either way
+- [x] **R7-L1** Resolved from source: `docs/research/agents/03-odbc-dbf-access.md` §3 puts the state in `C3_G1`/`C4_G1` (what `SqlTemplates` filters on). The sim seed used `C3_1` → seed now uses `C3_G1` (test `R7L1_SimStateRow_CarriesStateInGroupColumn`).
+- [ ] **R7-L2** (hardware confirmation, not a known defect) `Writer.WriteDetail` sends `row.Amount ?? 0.0`; the `WriteToDetailFile` COM signature is not in any source available here. Confirm on a live box whether a null Amount is accepted; adjust only if live reads back differently from sim.
+- [ ] **R7-L3** (hardware confirmation, not a known defect) Spec says CreateClient "returns the new ClientNumber" but names no property. Code reads `IClient.ClientNumber` best-effort; if absent it returns Success + `clientNumberHint` (R7-28/28b), so no unsafe outcome either way. Confirm the property name on a live box.
 
 ### Second-pass review of the fix diff (independent reviewer; all fixed)
 - [x] **R7-04b** persist-loop release used `Volatile.Write` → store/load reorder could still miss a request; now `Interlocked.Exchange`
@@ -1529,3 +1529,4 @@ Five-lane source review (bridge/ODBC/errors vs `Lacerte_MCP_Structure_Spec.md`, 
 - [x] **R7-35b** `ListClients` snapshotted `Clients.Values` (eager copy on net48) BEFORE entering the sim gate → dry-run phantom clients still listed (reproduced: 1183 leaks in 2s pre-fix; regression test `R735b_ConcurrentDryRunCreates_NeverListPhantomClients`)
 - [x] **R7-35c** `_simGate.Dispose()` could throw `SynchronizationLockException` at shutdown while a call held the gate → best-effort dispose
 - [x] **R7-04c** persist request-flag clear is now a full fence (`Interlocked.Exchange`)
+- [x] **Final review** of the third-pass commit + R7-L1 seed fix + full sweep of the sim visibility gate: **no findings** (1625 passed / 0 failed).

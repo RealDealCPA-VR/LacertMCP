@@ -148,6 +148,6 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 ### Round-7 live items
 - [ ] A live `lacerte_field_write` while the return is open in Lacerte returns `success:false` + `statusCode 2 DBFNotAccessable` (not `success:true`).
 - [ ] `lacerte-mcp register` succeeds from the CLI exe (its own `lacerte-mcp.exe.config` carries the legacy-runtime shim); `doctor` App.config probe is green for both exe configs.
-- [ ] `lacerte_state_read` on a TY24 client returns rows (validates the `C3_G1` filter column — Todo R7-L1).
+- [ ] `lacerte_state_read` on a TY24 client returns rows and the state is in `C3_G1` (Todo R7-L1 — resolved from source; this is the live sanity check).
 - [ ] A description-only detail row written live reads back with the same Amount as sim (Todo R7-L2).
 - [ ] `lacerte_client_create` live returns the assigned `clientNumber` (Todo R7-L3).

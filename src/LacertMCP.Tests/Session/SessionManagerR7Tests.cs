@@ -298,6 +298,17 @@ namespace LacertMCP.Tests.Session
             Assert.Equal("v", rows.Single()["C3_5"]);
         }
 
+        // R7-L1 — sim state rows carry the state in C3_G1, the column the
+        // live SQL filters on (SqlTemplates.Data3OldFormByState).
+        [Fact]
+        public async Task R7L1_SimStateRow_CarriesStateInGroupColumn()
+        {
+            using var mgr = await NewRegisteredSimAsync(SeedData.DataPathCData2024, 2024, 'C');
+            var row = (await mgr.ReadTable(3, "1001", "CA")).Single();
+            Assert.Equal("CA", row["C3_G1"]);
+            Assert.Contains("C3_G1 = 'CA'", LacertMCP.Server.Odbc.SqlTemplates.Data3OldFormByState("1001", "CA"));
+        }
+
         // -----------------------------------------------------------------
         // R7-10 — concurrent same-ClientId creates: exactly one succeeds
         // -----------------------------------------------------------------
