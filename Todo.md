@@ -1586,3 +1586,8 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
 - [x] **R7-41** The dumper's `LoadExisting` swallowed a parse error and "started fresh", silently dropping every existing row on rewrite. It now refuses, with a clear error.
 - [x] The doctor Fail message now describes the real effect, and its remediation no longer points at the stubbed dumper. The README overlay instructions name the only file the loader reads. The `--schema-dir` help and the doc comments describe the dev-checkout tier, and the garbled ShardPath summary is fixed.
 - [x] **R7-40c** Out-of-range numeric `access` (e.g. 99) loaded as an undefined enum value and passed doctor. `ParseShard` / `ParseOverlay` now reject undefined values, so the loader fails closed and doctor reports Fail.
+
+### Self-update (2026-11-16)
+- [x] `lacerte-mcp update`: latest GitHub release → SHA-256-verified download → backup → in-place swap (server/cli/dumper) with rollback; keeps the dumper-built field map; stops/restarts the `install-http.ps1` launcher and checks `/healthz`; `--check`, `--tag`, `--force`, `--reset-field-map`, `--allow-running`, `--install-dir`; source checkouts fast-forward instead. 34 tests in `Cli/UpdateCommandTests.cs`.
+- [x] `--schedule daily|off [--at HH:mm]`: per-user scheduled task "LacertMCP auto-update"; runs logged to `update.log`.
+- [ ] Verify on the Lacerte PC: once a release containing this ships, run `lacerte-mcp update --check` there, then `update`, and confirm the control page shows the new version and the field map was kept.

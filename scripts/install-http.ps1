@@ -162,5 +162,10 @@ Write-Host 'To allow field writes, build the writable-field map once per tax yea
 Write-Host "  & '$dumper' --live --year 2024 --out '$mapDir'"
 Write-Host '  (re-running this installer keeps a map you have already built)'
 Write-Host ''
+$cliExe = Join-Path $installDir 'cli\lacerte-mcp.exe'
+Write-Host 'To update later (no admin needed; keeps your field map):'
+Write-Host "  & '$cliExe' update                    # now"
+Write-Host "  & '$cliExe' update --schedule daily   # automatically, every night at 03:00"
+Write-Host ''
 Write-Host "Control page:  http://localhost:$Port/   (from other tailnet devices: http://$ip`:$Port/)" -ForegroundColor Green
 Write-Host "Agents connect to: http://$ip`:$Port/mcp   (give each device access on the Access tab first)" -ForegroundColor Green

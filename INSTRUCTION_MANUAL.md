@@ -58,6 +58,7 @@ KEY CLI COMMANDS
   lacerte-mcp register              # mint AppID + Intuit consent ceremony
   lacerte-mcp login                 # refresh the 24-hour Intuit auth ticket
   lacerte-mcp unregister --confirm  # wipe persisted AppID
+  lacerte-mcp update                # install the latest GitHub release (--check / --schedule daily)
 
 MCP CLIENT CONFIG FILES
   Claude Desktop : %APPDATA%/Claude/claude_desktop_config.json
@@ -931,6 +932,33 @@ Exit-code contract:
 - **3** is **not used by doctor** — it is reserved across the CLI for "not implemented here" verbs.
 
 Status badges adapt to the active terminal encoding: pretty Unicode glyphs (`✓ ⚠ ✗`) on UTF-8 terminals (Windows Terminal, PowerShell 7), `[OK] [WARN] [FAIL] [--]` on legacy code pages.
+
+### `lacerte-mcp update`
+
+Keeps the install current with what is published on GitHub. A new version exists once a `v*` tag is pushed and the Release workflow has attached `LacertMCP-v<x.y.z>.zip`.
+
+| Flag | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `--check` | bool | `false` | Only report; exit `2` if an update is available. Changes nothing. |
+| `--tag` | string | latest | Install a specific release (`0.2.1` or `v0.2.1`); allows downgrades. |
+| `--force` | bool | `false` | Reinstall even when already current. |
+| `--reset-field-map` | bool | `false` | Take the release's field-access map instead of keeping the one built on this PC. |
+| `--allow-running` | bool | `false` | Stdio installs only: swap while `LacertMCP.Server.exe` runs (restart the host right after). |
+| `--install-dir` | path | the install this CLI runs from | Install root (the folder holding `server\` and `cli\`). |
+| `--repo` | owner/name | `RealDealCPA-VR/LacertMCP` | Where releases come from. |
+| `--schedule` | `daily` \| `off` | — | Add / remove the per-user scheduled task **LacertMCP auto-update**. |
+| `--at` | HH:mm | `03:00` | Time of day for `--schedule daily`. |
+
+How a release install is updated:
+
+1. The latest release is looked up and the zip is downloaded to `%TEMP%`. Its size and SHA-256 are checked against the values GitHub publishes, and the zip is checked for the `server\` + `cli\` shape. Nothing in the install changes until all of that passes.
+2. If `install-http.ps1`'s Startup launcher runs this install, the launcher and server are stopped. Without the launcher (a stdio server under Claude Desktop), a running server makes the update refuse, unless `--allow-running` is passed.
+3. `server\`, `cli\` and `dumper\` are copied to `backups\v<old>-<time>\` (the newest 3 are kept), then swapped. The writable-field map you built with the dumper is kept. Files Windows has locked are renamed to `*.old-update` and deleted next run. If anything fails, the backup is put back.
+4. The launcher is restarted (on a failure, with the old version) and `/healthz` is polled for up to 45 s. A line goes to `update.log` in the install folder.
+
+From a git working copy, the same command fast-forwards the current branch to its upstream and prints the rebuild command instead.
+
+Exit codes: **0** updated or already current; **1** failed or refused; **2** `--check` found an update.
 
 ---
 

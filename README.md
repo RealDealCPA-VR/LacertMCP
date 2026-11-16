@@ -90,6 +90,7 @@ powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -Uninstall
 * Agents (manual): `claude mcp add --transport http lacerte http://<Tailscale IP>:8767/mcp` (give the device access on the Access tab first).
 * Each connection has its own active context, so two agents can't redirect each other's writes. Read-only devices can never write.
 * `GET /healthz` (loopback only) returns 200/503 with the same checks, for watchdogs.
+* **Updating:** `& "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" update` pulls the latest GitHub release, verifies its SHA-256, backs up the install, stops the server, swaps the files, restarts it and checks `/healthz`. No admin needed, and your writable-field map is kept. To make it automatic, run `... update --schedule daily` once (a per-user scheduled task, 03:00 by default; `--schedule off` removes it). A new version reaches the PC when a `v*` tag is pushed (`.github/workflows/release.yml` publishes the release). See [`lacerte-mcp update`](#lacerte-mcp-update).
 
 ## Install paths (per MCP client)
 
@@ -391,6 +392,7 @@ TL;DR:
 | `lacerte-mcp tools` | List every MCP tool the server registers (reflection — no stdio boot). Supports `--filter <regex>` / `--name <exact>` / `--names-only` / `--json`. |
 | `lacerte-mcp field-access {set,list,discover}` | Manage the per-field access map. `discover` exits 3 with a pointer to the standalone `LacertMCP.FieldAccessDumper.exe`. |
 | `lacerte-mcp doctor` | Pre-flight probes for the install; exit 0/1/2 contract (3 reserved for "not implemented here", see `field-access discover`). |
+| `lacerte-mcp update` | Update the install from the latest GitHub release (or fast-forward a git checkout); `--check` to only look, `--schedule daily` to automate. |
 
 ### `lacerte-mcp register [--app-name X] [--tax-year Y] [--reset]`
 
@@ -468,6 +470,20 @@ Setup verification across OS/runtime, install, config, and identity probes (cano
 - `1` — at least one probe failed (e.g. fresh checkout with no AppID; ODBC DSN missing).
 - `2` — **PARTIAL**: at least one probe warned (advisory — its remediation line is printed) or was skipped (no fails). Skips are the typical off-Windows result since the Windows-only probes can't run; warn-only runs land here too (R6-29 — a warn-only box no longer claims "all probes green" with exit 0).
 - `3` is **not used by doctor** — it is reserved across the CLI for "not implemented here" verbs (see `field-access discover`).
+
+### `lacerte-mcp update`
+
+`lacerte-mcp update [--check] [--tag <x.y.z>] [--force] [--reset-field-map] [--allow-running] [--install-dir <dir>] [--repo <owner/name>] [--schedule daily|off [--at HH:mm]]`
+
+Brings the install it runs from up to date with GitHub. No admin needed.
+
+- **Release install** (`%LOCALAPPDATA%\LacertMCP` from `install-http.ps1`, or any unzipped release with `server\` + `cli\`): fetches the latest release (or `--tag`), downloads `LacertMCP-v*.zip` and verifies its size and SHA-256. Only then does it touch the install: it backs up `server\`, `cli\` and `dumper\` to `backups\v<old>-<time>\` (the last 3 are kept) and swaps the files. Files Windows has locked, including this CLI's own exe, are renamed aside and cleaned up on the next run. A swap that fails part-way is rolled back.
+  - **Always-on server:** if the `install-http.ps1` Startup launcher runs this install, the update stops it, swaps the files, restarts it (the restored old version after a rollback) and waits for `/healthz`.
+  - **Stdio server under Claude Desktop:** the update refuses while the server is running. Quit the host first, or pass `--allow-running`.
+  - **Writable-field map:** the installed `server\Schema\FieldAccessMap\base\*.json` shards built by the dumper are kept over the release's copies, the same rule as the installer. `--reset-field-map --force` takes the release's map instead.
+- **Source checkout** (CLI running from `src\LacertMCP.Cli\bin\…` in a git working copy): `git fetch` + fast-forward to the branch's upstream. It refuses on uncommitted changes or a diverged branch, then prints the rebuild command.
+- `--schedule daily [--at 03:00]` registers the per-user scheduled task **LacertMCP auto-update** to run `lacerte-mcp update` every day while you're signed in. `--schedule off` removes it. Every release-install run appends a line to `update.log` in the install folder.
+- Exit codes: `0` updated / already current; `1` failed or refused (the install is left as it was); `2` `--check` found an update.
 
 ## Troubleshooting
 

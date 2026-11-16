@@ -1,5 +1,17 @@
 # Handoff State
 
+## Last Session Summary (2026-11-16, later) — `lacerte-mcp update` (self-update from GitHub releases)
+
+- Branch `feat/self-update`, cut from `feat/live-reads-verified-writes`. New `Commands/UpdateCommand.cs` + `Update/` (ReleaseVersion, GitHubReleaseSource, ReleaseInstaller, LauncherService). README "Network mode" + CLI sections, INSTRUCTION_MANUAL section 9, `install-http.ps1` closing hints, DECISIONS and Todo updated.
+- Verified on this Windows box:
+  - 34 new tests pass. They include a really-running locked exe (a ping.exe copy) renamed aside, and a two-clone git fast-forward.
+  - Real GitHub runs against a scratch install:
+    - v0.2.0 → v0.2.1, SHA-256 verified.
+    - The CLI replaced itself from inside the install.
+    - An install-http-style launcher (sim mode, port 8799) was stopped, the files swapped, the launcher restarted, and `/healthz` answered.
+  - `--schedule daily` / `off` registered and removed a real per-user task without admin.
+- **Releases v0.2.0/v0.2.1 were built from `feat/live-reads-verified-writes`, not master.** An install only gets `update` after a release containing this branch is tagged. Until then, bootstrap it once by hand: unzip that release and re-run `install-http.ps1`.
+
 ## Last Session Summary (2026-11-16) — merged master (R7) into the HTTP branch; workstation one-line setup
 
 - Merged `origin/master` (PR #4, R7 deep review) into `feat/live-reads-verified-writes`. Conflicts: `LacerteSessionManager.cs` (kept R7's canonical dataPath + `ThrowIfWriteFailed`, re-applied the per-device read-only `SessionScope` check in `SetContext` and `RejectIfReadOnly`), one R6 test, and these docs (both sides kept). Two branch tests updated to R7's PDF-aligned ODBC: `TaxYear=2024`, `[<client>-Detail-ClientStateInfo]`.

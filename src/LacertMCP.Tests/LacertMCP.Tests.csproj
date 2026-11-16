@@ -32,6 +32,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- UpdateCommandTests build fake release zips. -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\LacertMCP.Server\LacertMCP.Server.csproj" />
     <ProjectReference Include="..\LacertMCP.Cli\LacertMCP.Cli.csproj" />
   </ItemGroup>
