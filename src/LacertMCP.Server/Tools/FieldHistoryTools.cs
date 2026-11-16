@@ -48,7 +48,7 @@ namespace LacertMCP.Server.Tools
             };
 
         [McpServerTool]
-        [Description("Read the audit history for one (clientNumber, field) pair from the WireLog JSONL records. Requires LACERTE_DEBUG_WIRE=1 — when disabled, returns an empty rows list with a hint pointing at the env var. Counts only the OUTER op='WriteField' records (skips the inner Bridge.* mirrors to avoid double-counting). Each row carries succeeded=true/false — failed writes (WireLog error records) surface with succeeded=false plus the error text, so a rejected write is distinguishable from a landed one. Rows are returned oldest-first; when total exceeds limit the NEWEST rows are kept (the truncated older tail is the recoverable-from-archives part). limit defaults to 100, clamped to Pagination.MaxLimit (1000). The `value` column is the redacted '***' sentinel for every row by design (disk-scope redaction is unconditional per the WireLog policy) — the operator's original write payload is recoverable from their input record, not from this tool. sinceUtc defaults to (now - 14 days). Malformed JSONL lines are skipped silently; a missing log dir surfaces the same disabled-WireLog hint.")]
+        [Description("Read the audit history for one (clientNumber, field) pair from the WireLog JSONL records. Requires LACERTE_DEBUG_WIRE=1 — when disabled, returns an empty rows list with a hint pointing at the env var. Counts only the OUTER op='WriteField' records (skips the inner Bridge.* mirrors to avoid double-counting). Each row carries succeeded=true/false — failed writes (WireLog error records, or records whose logged result is a non-Success status, reported by statusName) surface with succeeded=false plus the error text, so a rejected write is distinguishable from a landed one. Rows are returned oldest-first; when total exceeds limit the NEWEST rows are kept (the truncated older tail is the recoverable-from-archives part). limit defaults to 100, clamped to Pagination.MaxLimit (1000). The `value` column is the redacted '***' sentinel for every row by design (disk-scope redaction is unconditional per the WireLog policy) — the operator's original write payload is recoverable from their input record, not from this tool. sinceUtc defaults to (now - 14 days). Malformed JSONL lines are skipped silently; a missing log dir surfaces the same disabled-WireLog hint.")]
         public Task<string> LacerteFieldHistory(
             [Description("ClientNumber (SDK-minted monotonic ID, e.g. '1001') whose write history to retrieve.")] string clientNumber,
             [Description("Lacerte field code (e.g. 'C1_3' for email). The history is keyed by EXACT field name — not by friendly-alias.")] string field,
@@ -221,6 +221,11 @@ namespace LacertMCP.Server.Tools
                     // one (both used to render as statusCode:null).
                     succeeded = r.Succeeded,
                     statusCode = r.StatusCode,
+                    // R7 — name alongside the code so a non-Success result
+                    // is self-describing without a status-table lookup.
+                    statusName = r.StatusCode.HasValue
+                        ? StatusCodes.GetStatusInfo(r.StatusCode.Value).Name
+                        : null,
                     error = r.Error,
                     durationMs = r.DurationMs,
                 }).ToList();
@@ -342,6 +347,21 @@ namespace LacertMCP.Server.Tools
                 errorText = string.IsNullOrEmpty(errType)
                     ? (errMessage ?? "unknown error")
                     : (string.IsNullOrEmpty(errMessage) ? errType : errType + ": " + errMessage);
+            }
+            else if (statusCode.HasValue && statusCode.Value != StatusCodes.Success)
+            {
+                // R7 — a record with a numeric `result` other than
+                // StatusCodes.Success is a write the SDK REJECTED (e.g.
+                // result: 2 = DBFNotAccessable), even though no exception
+                // was thrown. Older session-manager builds returned the
+                // non-Success TAPIStatus instead of throwing, so their logs
+                // carry no `error` object; without this branch those
+                // rejected writes rendered as succeeded=true. Surface the
+                // status by NAME (tools never expose a bare status int as
+                // the explanation).
+                succeeded = false;
+                var info = StatusCodes.GetStatusInfo(statusCode.Value);
+                errorText = info.Name + ": " + info.UserMessage;
             }
 
             long? durationMs = null;

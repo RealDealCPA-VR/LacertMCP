@@ -411,5 +411,134 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal(0, root.GetProperty("removed").GetArrayLength());
             Assert.Equal(0, root.GetProperty("changed").GetArrayLength());
         }
+
+        // ---- R7 — PII masking of {field, a, b} rows on the wire ----
+
+        [Fact]
+        public async Task DiffClients_PiiEmailDiff_MasksBothSides_NonPiiVisible_R7()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            var tools = new ClientDiffTools(mgr);
+
+            // BROW (1001) vs PEND (1002): C1_3 (email, a PII code) differs,
+            // C1_2 (last name, not a true secret) differs.
+            var json = await tools.LacerteDiffClients("1001", "1002");
+            Assert.DoesNotContain(SeedData.BROW.Email, json);
+            Assert.DoesNotContain(SeedData.PEND.Email, json);
+
+            var diffs = ToolTestHelpers.Parse(json).GetProperty("result")
+                .GetProperty("dataOne").GetProperty("fields").EnumerateArray().ToArray();
+
+            var email = diffs.Single(d => d.GetProperty("field").GetString() == "C1_3");
+            Assert.Equal("***", email.GetProperty("a").GetString());
+            Assert.Equal("***", email.GetProperty("b").GetString());
+
+            var lastName = diffs.Single(d => d.GetProperty("field").GetString() == "C1_2");
+            Assert.Equal(SeedData.BROW.LastName, lastName.GetProperty("a").GetString());
+            Assert.Equal(SeedData.PEND.LastName, lastName.GetProperty("b").GetString());
+        }
+
+        [Fact]
+        public async Task DiffDataOne_SsnDiff_MaskedThroughWireEnvelope_R7()
+        {
+            // C1_15 (TaxpayerSSN) is not writable through the sim seed, so
+            // drive the pure helper's output through the real wire envelope
+            // (WrapToolHandler -> WireLog.Redact Wire scope) — the same path
+            // lacerte_diff_clients takes.
+            var a = new Dictionary<string, object?>
+            {
+                ["C1_15"] = "111-22-3333", ["C1_19"] = "1980-01-01", ["C1_2"] = "Smith",
+            };
+            var b = new Dictionary<string, object?>
+            {
+                ["C1_15"] = "444-55-6666", ["C1_19"] = "1981-02-02", ["C1_2"] = "Jones",
+            };
+            var diff = ClientDiffTools.DiffDataOne(a, b, new HashSet<string>(ClientDiffTools.DefaultIgnoreFields));
+            var json = await LacertMCP.Server.Errors.WrapToolHandler.Run(
+                () => Task.FromResult<object>(new { fields = diff.Diffs }));
+
+            Assert.DoesNotContain("111-22-3333", json);
+            Assert.DoesNotContain("444-55-6666", json);
+            Assert.DoesNotContain("1980-01-01", json);
+            Assert.DoesNotContain("1981-02-02", json);
+
+            var rows = ToolTestHelpers.Parse(json).GetProperty("result")
+                .GetProperty("fields").EnumerateArray().ToArray();
+            Assert.Equal(3, rows.Length);
+            foreach (var code in new[] { "C1_15", "C1_19" })
+            {
+                var row = rows.Single(r => r.GetProperty("field").GetString() == code);
+                Assert.Equal("***", row.GetProperty("a").GetString());
+                Assert.Equal("***", row.GetProperty("b").GetString());
+            }
+            var name = rows.Single(r => r.GetProperty("field").GetString() == "C1_2");
+            Assert.Equal("Smith", name.GetProperty("a").GetString());
+            Assert.Equal("Jones", name.GetProperty("b").GetString());
+        }
+
+        // ---- R7 — C{t}_0 ClientNumber columns are ignored by default ----
+
+        [Fact]
+        public async Task DiffClients_IdenticalExceptClientNumber_ReportsZeroDiffs_R7()
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
+            // Two clients with identical DATA1 content. ClientID must be
+            // unique per data folder (DuplicateClient), so it is suppressed
+            // via ignoreFields; everything else differs only by number.
+            var c1 = await mgr.CreateClient(new LacertMCP.Server.Session.CreateClientArgs(
+                "TWNA", "Individual", FirstName: "Terry", LastName: "Twin", EmailId: "twin@example.com"));
+            var c2 = await mgr.CreateClient(new LacertMCP.Server.Session.CreateClientArgs(
+                "TWNB", "Individual", FirstName: "Terry", LastName: "Twin", EmailId: "twin@example.com"));
+            Assert.NotNull(c1.ClientNumber);
+            Assert.NotNull(c2.ClientNumber);
+            Assert.NotEqual(c1.ClientNumber, c2.ClientNumber);
+
+            var tools = new ClientDiffTools(mgr);
+            var root = ToolTestHelpers.Parse(await tools.LacerteDiffClients(
+                c1.ClientNumber!, c2.ClientNumber!, ignoreFields: new[] { "clientId" }));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            var result = root.GetProperty("result");
+
+            Assert.Equal(0, result.GetProperty("summary").GetProperty("differingFieldsCount").GetInt32());
+            Assert.Equal(0, result.GetProperty("dataOne").GetProperty("fields").GetArrayLength());
+
+            var ignored = result.GetProperty("ignoredFields").EnumerateArray()
+                .Select(e => e.GetString()).ToArray();
+            Assert.Contains("clientNumber", ignored);
+            Assert.Contains("C1_0", ignored);
+        }
+
+        [Fact]
+        public void DiffRowsByKey_RowsDifferOnlyInClientNumberColumn_NoChange_R7()
+        {
+            // DATA2 / DATA3 rows also carry the C{t}_0 ClientNumber column;
+            // under the default ignore set two clients' matched rows that
+            // differ only by owner must not land in `changed`.
+            var ignore = new HashSet<string>(ClientDiffTools.DefaultIgnoreFields);
+
+            var subA = new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["clientNumber"] = "1001", ["subClientId"] = 1, ["C2_0"] = "1001", ["C2_1"] = 1, ["C2_2"] = "Partner A" },
+            };
+            var subB = new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["clientNumber"] = "1002", ["subClientId"] = 1, ["C2_0"] = "1002", ["C2_1"] = 1, ["C2_2"] = "Partner A" },
+            };
+            var subRoot = SerializeDiff(ClientDiffTools.DiffRowsByKey(subA, subB, "subClientId", ignore));
+            Assert.Equal(0, subRoot.GetProperty("changed").GetArrayLength());
+
+            var stA = new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["clientNumber"] = "1001", ["stateAbbrev"] = "CA", ["C3_0"] = "1001", ["C3_1"] = "CA" },
+            };
+            var stB = new List<IReadOnlyDictionary<string, object?>>
+            {
+                new Dictionary<string, object?> { ["clientNumber"] = "1002", ["stateAbbrev"] = "CA", ["C3_0"] = "1002", ["C3_1"] = "CA" },
+            };
+            var stRoot = SerializeDiff(ClientDiffTools.DiffRowsByKey(stA, stB, "stateAbbrev", ignore));
+            Assert.Equal(0, stRoot.GetProperty("changed").GetArrayLength());
+        }
     }
 }
