@@ -63,6 +63,10 @@ namespace LacertMCP.Server.Prompts
                 name: "lacerte_entity_return_entry",
                 description: "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified field-dictionary mappings, with dry runs, operator approval and read-back.",
                 whenToUse: "Operator wants a corporate, S-corp, partnership or trust return's data entered from a trial balance, K-1 package or prior-year return."),
+            new PromptCatalogEntry(
+                name: "lacerte_individual_return_entry",
+                description: "Enter a 1040 return's data from the client's documents (W-2s, 1099s, 1098s, K-1s, organizer) as a proposal: document inventory, verified field-dictionary mappings only, judgement calls as questions, coverage check, operator approval and read-back.",
+                whenToUse: "Operator wants an individual (1040) return prepared or entered from the client's tax documents."),
         };
 
         [McpServerTool(Name = "lacerte_prompts")]
@@ -147,6 +151,9 @@ namespace LacertMCP.Server.Prompts
                     break;
                 case "lacerte_entity_return_entry":
                     result = WorkflowPrompts.EntityReturnEntry(string.IsNullOrWhiteSpace(returnType) ? "1120" : returnType!);
+                    break;
+                case "lacerte_individual_return_entry":
+                    result = WorkflowPrompts.IndividualReturnEntry();
                     break;
                 default:
                     return string.Empty;

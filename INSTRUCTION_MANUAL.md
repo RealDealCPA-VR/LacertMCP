@@ -170,7 +170,7 @@ You don't need Windows or a Lacerte install to kick the tires. The server ships 
 }
 ```
 
-**Step 3.** Restart Claude Desktop (or your host). Type `/` and confirm that `lacerte_client_intake`, `lacerte_review_ef_status`, `lacerte_field_write_bulk`, `lacerte_csv_intake` and `lacerte_entity_return_entry` appear in the prompt picker.
+**Step 3.** Restart Claude Desktop (or your host). Type `/` and confirm that `lacerte_client_intake`, `lacerte_review_ef_status`, `lacerte_field_write_bulk`, `lacerte_csv_intake`, `lacerte_entity_return_entry` and `lacerte_individual_return_entry` appear in the prompt picker.
 
 **Step 4.** Drive the seeded datapaths (six in all; the S-corp `SData` and trust `FData` paths are listed in the seed table below). Type these prompts verbatim:
 
@@ -781,7 +781,7 @@ Write an approved, unchanged proposal: only the approved lines, in the proposal'
 
 ## 8. Prompts catalog
 
-Five first-class MCP prompts registered via `WithPromptsFromAssembly()` in `Program.cs`. Discoverable through the standard MCP `prompts/list` handshake. In Claude Desktop, type `/` to surface them; in Cursor, `@lacerte`. Source: `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
+Six first-class MCP prompts registered via `WithPromptsFromAssembly()` in `Program.cs`. Discoverable through the standard MCP `prompts/list` handshake. In Claude Desktop, type `/` to surface them; in Cursor, `@lacerte`. Source: `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
 
 ### `lacerte_client_intake`
 
@@ -816,6 +816,30 @@ Bulk-onboards clients from a CSV / Tax-Organizer export. Requires a one-shot col
 
 - Args: `sourceLabel?: string`, `rowCount?: int`.
 - Steps: confirm session, declare column→field mapping once, validate row payloads before any write, per-row create + seed with stop-on-first-error, per-row outcome report.
+
+### `lacerte_entity_return_entry`
+
+Prepares an 1120, 1120-S, 1065 or 1041 return from source documents as a proposal for your approval. See Workflow H.
+
+- Args: `returnType: string = "1120"` (1120 / 1120S / 1065 / 1041, or C / S / P / F), `sourceLabel?: string`.
+- Steps: session and context, the client, the verified mappings (stops if there are none), owners, build the proposal, submit for your approval, commit after approval, pre-filing check.
+
+### `lacerte_individual_return_entry`
+
+Prepares a 1040 return from the client's documents (W-2s, 1099s, 1098s, K-1s, organizer, prior-year return) as a proposal for your approval. See Workflow I.
+
+- Args: `taxYear?: int`, `sourceLabel?: string`.
+- Steps:
+  1. Session and context (Individual data folder, module I).
+  2. The client: find it, read what is already there.
+  3. The verified mappings via `lacerte_field_dictionary`. Stops if module I has none.
+  4. Document inventory: every document, who it belongs to, its tax year. You confirm the list is complete before anything is entered.
+  5. People and filing status: differences become lines or manual items; filing status and dependents are questions for you.
+  6. Build the proposal: one cited line per box per document, never totals.
+  7. Coverage check: every document is fully entered, partly entered with manual items, or explained.
+  8. Submit for your approval (your PIN and the client number).
+  9. Commit after approval, with read-back.
+  10. Review: `lacerte_pre_filing_check` and `lacerte_year_over_year`. Claude can't see the refund or tax due.
 
 ---
 
@@ -1167,6 +1191,21 @@ What it takes, and what is in place:
 5. **You review and approve.** First, once, set your approval PIN on the Lacerte PC: `lacerte-mcp approval-pin set`. On the control page open **Proposals**, review each line beside its source, reject any you disagree with, then check "Entries go into: client … · name · form year · folder", type the client number and your PIN, and approve; or send it back with a note. On the Lacerte PC the same is `lacerte-mcp proposal show <id>` then `lacerte-mcp proposal approve <id> --confirm`. Claude can't approve and never asks for your PIN. To make proposals the only way agents can write, re-run `install-http.ps1 -RequireApproval`.
 6. **Commit.** Claude commits the approved proposal (`lacerte_proposal_commit`), or you press Commit on the control page. The commit first re-reads the client and writes nothing if it isn't the return you approved. Only approved lines are written, each read back. If a detail line is marked Uncertain, check the client's detail rows in Lacerte and resolve it; then commit again. Claude finishes with `lacerte_pre_filing_check`.
 7. Close and reopen the client in Lacerte to see the changes; Lacerte computes the forms. Enter the manual items. Filing stays in Lacerte.
+
+### Workflow I — Preparing a 1040 return
+
+The setup is the same as Workflow H steps 1–3 (map the fields for module I with `map-diff`, switch on live detail writes after the live checks) and the approval is the same as steps 5–7. What differs is how Claude prepares the proposal, with the `lacerte_individual_return_entry` prompt:
+
+1. **Give Claude the client's documents** (W-2s, 1099s, 1098s, K-1s, organizer pages, last year's return) and name the client and tax year. Example: "Prepare the 2024 return for Robert Brown from these documents."
+2. **Claude lists the documents and asks you whether the list is complete.** Each document is listed with its type, payer, owner (taxpayer, spouse or joint) and tax year. A document for another year or another person is not entered. If last year's folder exists, Claude compares against last year and asks about anything that had a document then and has none now.
+3. **Claude builds the proposal.** One line per box per document, with the figure as printed, the payer's name as the description, and the source page and box. It doesn't add or net amounts; Lacerte does the math.
+4. **Judgement calls come to you as questions**: filing status, dependents, whether income is Schedule C, Schedule E or other income, home office and vehicle method, estimated payments with no record, conflicts between the organizer and a form.
+5. **Hand-entry items are listed**: anything unmapped, long 1099-B transaction lists (use Lacerte's own import), depreciation and assets, carryovers, anything Claude couldn't read with confidence.
+6. **Coverage check.** Before submitting, Claude shows a table of every document and what was done with it, so nothing goes unentered without you seeing it.
+7. **You approve, Claude commits** (Workflow H steps 5–6). Afterwards Claude runs the pre-filing check and a year-over-year comparison and points out large changes.
+8. **In Lacerte**: reopen the client, review Lacerte's diagnostics and the refund or balance due, and enter the manual items. Claude can't see calculated results and won't state a refund.
+
+Full SSNs, bank and account numbers are never repeated in Claude's reasoning, excerpts or chat; only the last 4 digits.
 
 ---
 

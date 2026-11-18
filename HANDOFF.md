@@ -1,5 +1,13 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, later still) — v0.2.6, v0.2.7, 1040 workflow
+
+- Released v0.2.6 (proposals + approval PIN) and v0.2.7 (SKILL.md brought up to date; docs only). SKILL.md is not in the release zip: re-upload it wherever it is installed.
+- New prompt `lacerte_individual_return_entry` (6 prompts): 1040 preparation as a proposal. Document inventory the operator confirms, one cited line per box per document, tsj / state, judgement calls as questions, coverage check, then the same submit / commit steps as the entity prompt (now one shared copy: `ProposalLineRules`, `SubmitStep`, `CommitStep` in WorkflowPrompts.cs).
+- `lacerte_help` overview is at its 8KB budget; several strings were shortened to fit the new prompt. Adding more needs trimming or a topic split.
+- Tests 2322 passed, 11 skipped (two runs). Committed on master; not pushed, not tagged.
+- Not verified: the 1040 prompt against real module I mappings (the dictionary is empty), so how Lacerte stores W-2s, 1099s, dependents and TSJ is unconfirmed.
+
 ## Last Session Summary (2026-11-18, late night) — approval PIN + target-return check
 
 - Approving a proposal (and resolving an Uncertain line) now needs the approval PIN, set only by typing `lacerte-mcp approval-pin set` in a console on the Lacerte PC (PBKDF2-SHA256, 5 wrong = 15-minute lock). The reviewer also types the client number.

@@ -16,7 +16,7 @@
 | Write amounts (detail rows) | **Built, off.** Out-of-process worker, backup, read-back, duplicate protection, dictionary gate, mandatory bulk preview. Not yet verified on the Lacerte PC |
 | Undo Claude's amounts (`detail-restore`) | **Built.** The ODBC DELETE is not yet verified on the Lacerte PC |
 | Field dictionary (what each Lacerte field/code means) | **Tooling done; content empty.** Mappings are recorded on the PC with `lacerte-mcp map-diff` |
-| Guided entry workflow (`lacerte_entity_return_entry`) | **Done** for 1120 / 1120-S / 1065 / 1041; no 1040 workflow |
+| Guided entry workflow | **Done**: `lacerte_entity_return_entry` for 1120 / 1120-S / 1065 / 1041 and `lacerte_individual_return_entry` for 1040. Both stop until the field dictionary has mappings |
 | Pre-filing checks | **Done** for 1040 / 1065 / 1120 / 1120-S / 1041 (structural rules only) |
 | See Lacerte's calculated return or diagnostics | **Not possible today.** The SDK exposes inputs, not results |
 | Review queue / approval record | **Built** (after v0.2.5): proposals, control-page Proposals tab, `lacerte-mcp proposal`, `-RequireApproval`. Live commit not yet verified on the Lacerte PC |
@@ -97,10 +97,11 @@ Claude can read PDFs and images today, so this is mostly workflow and storage, n
 - Whatever doesn't show up stays a "preparer enters this" item in the packet.
 
 ### 7. A 1040 workflow
-**Why.** The guided workflow covers entity returns only, and 1040s are likely most of the volume.
-**Do:**
-- Add an individual-return workflow covering W-2 and 1099 intake, dependents, Schedule C/E basics and state.
+**Why.** The guided workflow covered entity returns only, and 1040s are likely most of the volume.
+**Built (2026-11-18):** the `lacerte_individual_return_entry` prompt: document inventory confirmed by the operator, one cited line per box per document, taxpayer / spouse ownership, state amounts, judgement calls as questions, a coverage check, then the same approval and commit steps as the entity workflow. It is not yet exercised against real 1040 mappings, because module I has none.
+**Still to do:**
 - Prioritize 1040 lines in the mapping program.
+- Once mappings exist, run the workflow on a test client and adjust it to how Lacerte actually stores W-2s, 1099s and dependents.
 
 ### 8. Working alongside staff
 **Why.** If a return is open in Lacerte while Claude writes, writes fail or need checking (9022).

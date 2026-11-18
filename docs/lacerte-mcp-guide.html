@@ -448,7 +448,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
           <tr><td>More fields, once mapped on your PC (field dictionary)</td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td></tr>
           <tr><td>Enter income, deductions or K-1 amounts (detail rows)</td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td><td><span class="tag warn">setup</span></td></tr>
           <tr><td>Pre-filing readiness check</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
-          <tr><td>Guided data entry (<code>lacerte_entity_return_entry</code>)</td><td>&ndash;</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Guided data entry as a proposal (<code>lacerte_individual_return_entry</code> for 1040, <code>lacerte_entity_return_entry</code> for the others)</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
         </tbody>
       </table>
     </div>
@@ -724,7 +724,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
   <!-- ============================================================ PART VII -->
   <section class="part" id="tools">
     <div class="part-head"><div class="no">Part VII</div><h2>Tools Claude can use</h2></div>
-    <p class="intro">Claude chooses these automatically from what you ask. You never call them yourself, but knowing them helps you phrase requests. There are also five guided workflows (MCP prompts): client intake, e-file review, bulk field update, CSV intake, and preparing an 1120 / 1120-S / 1065 / 1041 return as a proposal for your approval.</p>
+    <p class="intro">Claude chooses these automatically from what you ask. You never call them yourself, but knowing them helps you phrase requests. There are also six guided workflows (MCP prompts): client intake, e-file review, bulk field update, CSV intake, preparing a 1040 from the client's documents, and preparing an 1120 / 1120-S / 1065 / 1041 return. Both preparation workflows build a proposal for your approval.</p>
 
     <div class="toolbar">
       <input id="toolSearch" class="search" type="search" placeholder="Search tools, e.g. state, bulk, e-file…" aria-label="Search tools">
@@ -816,7 +816,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
   <footer>
     <div class="status-row">
       <span>Version <b>0.2.5+</b></span>
-      <span>Automated tests <b>2,312 passing</b></span>
+      <span>Automated tests <b>2,322 passing</b></span>
       <span>Simulation <b>fully tested</b></span>
       <span>Live mode <b>wired, awaiting first run on the Lacerte PC</b></span>
     </div>
@@ -930,7 +930,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
     ["Meta", "lacerte_return_codes", "info", "Every status code with its meaning and fix."],
     ["Meta", "lacerte_reload_schema", "info", "Pick up a new field-access map without restarting."],
     ["Meta", "lacerte_help", "info", "Built-in help: modes, tools, settings, limits."],
-    ["Meta", "lacerte_prompts", "info", "The five guided workflows, in full."],
+    ["Meta", "lacerte_prompts", "info", "The six guided workflows, in full."],
     ["Proposals", "lacerte_proposal_create", "write", "Start a proposal for one client: the place Claude puts every entry it intends to make, for you to approve."],
     ["Proposals", "lacerte_proposal_add_lines", "write", "Add entries, each with its source document, page and box, reasoning and confidence. Each is dry-run checked on the spot."],
     ["Proposals", "lacerte_proposal_update_line", "write", "Fix one entry; it is checked again and needs review again."],

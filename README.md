@@ -324,7 +324,7 @@ The server registers **53 MCP tools**, grouped below by the same categories `lac
 | `lacerte_return_codes` | none | All 28 TAPIStatus + 5 TPSDKStatus + synthetic 9xxx codes with `origin`/`originGroup` discriminators. |
 | `lacerte_reload_schema` | none | Drop in-process FieldAccessMap caches so fresh shards take effect without a restart (a restart invalidates the 24h auth ticket). |
 | `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 53 tools by category, env vars, limits, first-call, prompts. |
-| `lacerte_prompts` | `name?` | List or fetch the 5 canonical workflow prompt bodies inline. |
+| `lacerte_prompts` | `name?` | List or fetch the 6 canonical workflow prompt bodies inline. |
 
 ### Proposals (10)
 
@@ -345,7 +345,7 @@ Proposal-then-approve: the agent prepares a return as a proposal, a person revie
 
 ## Prompts
 
-Five first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Program.cs`, discoverable through the standard MCP `prompts/list` handshake):
+Six first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Program.cs`, discoverable through the standard MCP `prompts/list` handshake):
 
 | Prompt | What it walks the agent through | Args |
 | --- | --- | --- |
@@ -354,6 +354,7 @@ Five first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Pro
 | `lacerte_field_write_bulk` | Bulk field write across many clients with mandatory dry-run preview (first N), idempotency keys, stop-on-first-error. Name matches the `lacerte_field_write_bulk` tool (P16-052 — was `lacerte_bulk_field_update` pre-P16). | `table: int = 1`, `field: string` (required), `previewCount: int = 3` |
 | `lacerte_csv_intake` | Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column→field mapping declaration, per-row idempotency keys, stop-on-first-error. | `sourceLabel?: string`, `rowCount?: int` |
 | `lacerte_entity_return_entry` | Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using ONLY verified `lacerte_field_dictionary` mappings (stops when the module has none): map source lines for operator approval, dry-run, commit with idempotency keys, handle `verified` / 9022, check owners, finish with `lacerte_pre_filing_check`. | `returnType: string = "1120"` (1120 / 1120S / 1065 / 1041), `sourceLabel?: string` |
+| `lacerte_individual_return_entry` | Enter a 1040 return's data from the client's documents (W-2s, 1099s, 1098s, K-1s, organizer) as a proposal, using ONLY verified `lacerte_field_dictionary` mappings (stops when module I has none): document inventory confirmed by the operator, one cited line per box per document, taxpayer / spouse ownership, judgement calls (filing status, dependents, Schedule C/E classification) as questions, a coverage check so no document goes unentered, operator approval, commit with read-back, then `lacerte_pre_filing_check` and `lacerte_year_over_year`. Never states a refund or tax due (the SDK doesn't expose calculated results). | `taxYear?: int`, `sourceLabel?: string` |
 
 Canonical step lists live in `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
 

@@ -197,7 +197,7 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 - `lacerte_field_dictionary(module: string, search?: string, taxYear?: int) → { module, moduleName, taxYear, search, count, totalEntries, entries: [{ id, concept, form, line?, kind: "field"|"detail", table?, field?, series?, code?, prefix?, suffix?, needsSubclient, needsState, dataType, notes?, taxYears?, verifiedOn, source }], note?, loadError? }` — verified map from a tax concept (1120 gross receipts, a K-1 box, ...) to the DATA1-4 column or detail Series/Code that holds it. `module` takes I/C/P/S/F/R/T/N/B or an alias (1120, 1065, 1041, ...). When `note` says there are no verified mappings, do NOT guess field or detail codes; mappings are recorded on the Lacerte PC with `lacerte-mcp map-diff` (then `lacerte_reload_schema`). A listed field with no literal access-map entry is classified by the SDK range rules.
 - `lacerte_return_codes() → { count, rows: [{ code, name, severity, userMessage, remediation, origin, originGroup }], codes }` — full code catalog. `origin` ∈ {TAPIStatus, TPSDKStatus, Synthetic}; `originGroup` ∈ {sdk, synthetic} matches the error envelope's `origin`.
 - `lacerte_help(topic?: string) → various by topic` — distilled README inline. Topics: `null`/`""` (full overview), `"modes"`, `"tools"`, `"env"`, `"limits"` (the killer payload — what this MCP does NOT do), `"first-call"`, `"prompts"`. Aliases: `"quickstart"`→`first-call`, `"envvars"`/`"environment"`→`env`, etc. Pure static content; safe pre-context.
-- `lacerte_prompts(name?: string) → catalog rows or { found, name, description, whenToUse, body }` — list/fetch the 5 canonical workflow recipes. Use when host MCP doesn't expose Prompts UI (Cursor pre-0.47, Windsurf, generic stdio).
+- `lacerte_prompts(name?: string) → catalog rows or { found, name, description, whenToUse, body }` — list/fetch the 6 canonical workflow recipes. Use when host MCP doesn't expose Prompts UI (Cursor pre-0.47, Windsurf, generic stdio).
 
 ### Schema reload (1 tool)
 
@@ -235,11 +235,11 @@ Prepare returns as a proposal; a person approves it; then commit. You can NEVER 
 
 ### Prompts catalog tool
 
-- `lacerte_prompts(name?: string)` — already listed under Discovery. Lists or fetches the 5 canonical workflow prompts; described in next section.
+- `lacerte_prompts(name?: string)` — already listed under Discovery. Lists or fetches the 6 canonical workflow prompts; described in next section.
 
 ---
 
-## Prompts (5 canonical workflows)
+## Prompts (6 canonical workflows)
 
 Registered via `WithPromptsFromAssembly()`. When the MCP host exposes a Prompts UI, prefer those (`/` in Claude Desktop, `@` in Cursor). When the host doesn't, call `lacerte_prompts(name)` to get the body and follow inline.
 
@@ -250,6 +250,7 @@ Registered via `WithPromptsFromAssembly()`. When the MCP host exposes a Prompts 
 | `lacerte_field_write_bulk` | Bulk field write across many clients with mandatory dry-run preview (first N), idempotency keys, stop-on-first-error.                                          | `table: int = 1`, `field: string` (required), `previewCount: int = 3` |
 | `lacerte_csv_intake`     | Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column→field mapping declaration, per-row idempotency keys, stop-on-first-error.            | `sourceLabel?: string`, `rowCount?: int`                          |
 | `lacerte_entity_return_entry` | Enter an 1120 / 1120-S / 1065 / 1041 return from source documents as a PROPOSAL: verified dictionary mappings only, every line cited and dry-run validated, manual items + questions, operator approves, commit with read-back, then pre-filing check. Stops instead of guessing when a mapping is missing. | `returnType: string = "1120"` (1120/1120S/1065/1041 or C/S/P/F), `sourceLabel?: string` |
+| `lacerte_individual_return_entry` | Enter a 1040 return from the client's documents (W-2s, 1099s, 1098s, K-1s, organizer) as a PROPOSAL: document inventory the operator confirms, verified dictionary mappings only, one cited line per box per document (never totals), `tsj` from who owns the document, judgement calls (filing status, dependents, Schedule C/E classification) as questions, coverage check, operator approves, commit with read-back, then pre-filing check + year-over-year. Never state a refund or tax due. | `taxYear?: int`, `sourceLabel?: string` |
 
 ---
 
@@ -263,7 +264,7 @@ Registered via `WithPromptsFromAssembly()`. When the MCP host exposes a Prompts 
 4. Fix or remove any line with `preview.ok=false`, then `lacerte_proposal_submit`. Tell the operator the proposal id, the target return (`state.entriesGoInto`), and where to review it. Stop there: the operator approves with their PIN.
 5. When the operator says it's approved: `lacerte_proposal_get` → if `state.readyToCommit`, `lacerte_proposal_commit` → report per-line results (only `verified` lines are done) → `lacerte_pre_filing_check`.
 
-For entity returns, the `lacerte_entity_return_entry` prompt walks through the same steps.
+ALWAYS fetch and follow the matching prompt rather than improvising: `lacerte_individual_return_entry` for a 1040, `lacerte_entity_return_entry` for an 1120 / 1120-S / 1065 / 1041 (`lacerte_prompts(name)` returns the body on hosts without a prompt picker). The 1040 prompt adds a document inventory, a coverage check and privacy rules (never repeat a full SSN or account number outside a line's `value`).
 
 The direct-write recipes below (`lacerte_field_write`, the bulk tools) are for client-level housekeeping (addresses, emails). With `LACERTE_REQUIRE_APPROVAL=1` they return `9023` for real writes; switch to a proposal, never look for a way around it.
 
@@ -477,7 +478,7 @@ For SDK codes, also check `lacerte_return_codes` for the full enum.
 - `lacerte_recent_log(cid)` — recent log lines for a correlation ID (always-on ring; doesn't need `LACERTE_DEBUG_WIRE`).
 - `lacerte_session_status()` — current mode / registration / context / wire-log state, with `nextSteps` bootstrap guidance.
 - `lacerte_request_stats()` — process-lifetime aggregate counters when "is the server healthy?".
-- `lacerte_prompts()` — the 5 canonical workflow recipes.
+- `lacerte_prompts()` — the 6 canonical workflow recipes.
 - `lacerte_proposal_get(proposalId)` — `state.blockers` explains why a proposal can't move.
 - The skill body sketch (this file) is the single source of truth for conventions; if you find drift, prefer this skill's guidance.
 
@@ -485,7 +486,7 @@ For SDK codes, also check `lacerte_return_codes` for the full enum.
 
 ## Versioning + back-compat note
 
-Current release: v0.2.6 (2,312 tests passing). Simulation is fully tested; live mode is wired but still being verified on the Lacerte PC (REGRESSION_CHECKLIST). Wire conventions canonicalized in P16/P17/P18. Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are still emitted but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
+Current release: v0.2.7; the 1040 workflow prompt lands in the release after it (2,322 tests passing). Simulation is fully tested; live mode is wired but still being verified on the Lacerte PC (REGRESSION_CHECKLIST). Wire conventions canonicalized in P16/P17/P18. Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are still emitted but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
 
 Registration: `lacerte-mcp register` and `lacerte-mcp login` run the REAL Intuit consent + sign-in ceremony (`Bridge/Registration.cs`, wired in R6-05). Exit 0 = `AccessGranted` (or off-Windows `[skipped]` mint-only); exit 1 = denied/failed ceremony; exit 2 = PARTIAL (Lacerte SDK COM surface unavailable — AppID persisted, run `lacerte-mcp doctor`). Exit 3 is RETIRED for these verbs. The end-to-end ceremony against a real Intuit dialog is still pending verification on a Windows + Lacerte box.
 

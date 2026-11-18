@@ -143,7 +143,8 @@ namespace LacertMCP.Tests.Integration
                 Assert.Contains("lacerte_field_write_bulk", names);
                 Assert.Contains("lacerte_csv_intake", names);
                 Assert.Contains("lacerte_entity_return_entry", names);
-                Assert.Equal(5, names.Length);
+                Assert.Contains("lacerte_individual_return_entry", names);
+                Assert.Equal(6, names.Length);
             }
             finally
             {

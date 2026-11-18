@@ -373,7 +373,7 @@ Surface every tool error verbatim — do not summarize away a 9xxx status code. 
             string text;
             if (target == null)
             {
-                text = $"The requested return type '{returnType}' is not one this workflow covers. Ask the operator which of these they mean: 1120 (corporate), 1120S (S-corporation), 1065 (partnership) or 1041 (trust / fiduciary), then restart this prompt with that value. Individual (1040) data entry is not covered by this workflow.";
+                text = $"The requested return type '{returnType}' is not one this workflow covers. Ask the operator which of these they mean: 1120 (corporate), 1120S (S-corporation), 1065 (partnership) or 1041 (trust / fiduciary), then restart this prompt with that value. Individual (1040) returns have their own workflow: `lacerte_individual_return_entry` (fetch it with `lacerte_prompts`).";
             }
             else
             {
@@ -402,22 +402,11 @@ Step 4 — Owners
 Step 5 — Build a proposal (nothing is written to the return yet)
   • Create it with `lacerte_proposal_create` (client number; it uses the active context; title e.g. ""{form} <year> from <source>"").
   • Go through {source} line by line and match each amount or answer to a dictionary entry (by concept, form and line).
-  • Add every mapped value with `lacerte_proposal_add_lines`. Field targets: {{kind: ""field"", table, field, value, subClientId?, stateAbbrev?}}. Detail targets: {{kind: ""detail"", detail: {{series, code, amount, description, suffix, prefix?, ...}}}}, always with the entry's `suffix` (and `prefix` if it has one). Every line carries `dictionaryId`, `source` {{document, page, location (box / line), excerpt}}, `reasoning` wherever you used judgement, and `confidence` (high / medium / low). Several W-2s, 1099s or K-1 lines can share one dictionary id: add one line per SOURCE line.
-  • Each line is dry-run validated on the spot. A line with `ok: false` can't be approved: fix it with `lacerte_proposal_update_line` or drop it with `lacerte_proposal_remove_line`. If a target is refused (9012 / 9001 / 9202) it isn't writable — move it to the manual list; never work around a refusal.
-  • Never overwrite existing data silently: when a target already has a value, say so in the line's `reasoning` and ask about it as a question.
-  • Every UNMAPPED source line goes to `lacerte_proposal_add_manual_items` (description, amount, source, reason): the preparer enters those by hand.
-  • Anything the preparer must decide goes to `lacerte_proposal_add_questions`.
+{ProposalLineRules}
 
-Step 6 — Submit for review (HARD GATE: a person approves)
-  • Call `lacerte_proposal_submit`, then tell the operator the proposal id, the return it goes into (`state.entriesGoInto`), the number of lines, manual items and questions, and that they review and approve it on the control page (Proposals) or on the Lacerte PC with `lacerte-mcp proposal show <id>` and `lacerte-mcp proposal approve <id> --confirm`, confirming the client number and entering their approval PIN.
-  • You cannot approve a proposal (never ask for, guess or enter the approval PIN), and nothing is written until a person approves it. Do not enter this return with `lacerte_field_write` / `lacerte_detail_write` or their bulk forms: the proposal is the record of what was approved (a server running with LACERTE_REQUIRE_APPROVAL=1 refuses direct writes with 9023).
-  • If the operator returns it for changes (status ReturnedForChanges; their note is in `lastReview`), make the changes and submit again. Changing an approved proposal revokes its approval.
+{SubmitStep(6)}
 
-Step 7 — Commit after approval
-  • Only when `lacerte_proposal_get` shows status Approved (state.readyToCommit true), call `lacerte_proposal_commit`. It writes only the lines the operator approved, with read-back and duplicate protection.
-  • Check every line result: Succeeded (verified) is done; SucceededUnverified was accepted but not confirmed — list it for the operator to check in Lacerte.
-  • Failed field lines (for example 9022 WriteNotVerified because the return was open in Lacerte): report them; once the cause is fixed, `lacerte_proposal_commit` again runs only the unfinished lines.
-  • An Uncertain detail line (an error whose context says `rowWritten: yes / unknown`, or 9022): the row may already be in the return. NEVER retry it and never add it again — the commit stops there. Tell the operator to check the client's detail rows in Lacerte and resolve the line (control page or `lacerte-mcp proposal resolve`); then commit again for the rest.
+{CommitStep(7)}
 
 Step 8 — Review
   • Run `lacerte_pre_filing_check` for the client and report blockers and warnings.
@@ -429,6 +418,120 @@ Surface every tool error verbatim with its statusCode; do not summarize away a 9
             return new GetPromptResult
             {
                 Description = "Prepare an 1120 / 1120-S / 1065 / 1041 return from source documents as a proposal (verified mappings only, dry-run validated, cited); the operator approves it; then commit with read-back.",
+                Messages = new List<PromptMessage>
+                {
+                    new PromptMessage
+                    {
+                        Role = Role.User,
+                        Content = new TextContentBlock { Text = text },
+                    },
+                },
+            };
+        }
+
+        // -----------------------------------------------------------------
+        // Shared proposal steps (entity + individual return entry). One copy,
+        // so the approval and commit rules can't drift between workflows.
+        // -----------------------------------------------------------------
+
+        private const string ProposalLineRules = @"  • Add every mapped value with `lacerte_proposal_add_lines`. Field targets: {kind: ""field"", table, field, value, subClientId?, stateAbbrev?}. Detail targets: {kind: ""detail"", detail: {series, code, amount, description, suffix, prefix?, ...}}, always with the entry's `suffix` (and `prefix` if it has one). Every line carries `dictionaryId`, `source` {document, page, location (box / line), excerpt}, `reasoning` wherever you used judgement, and `confidence` (high / medium / low). Several W-2s, 1099s or K-1 lines can share one dictionary id: add one line per SOURCE line.
+  • Each line is dry-run validated on the spot. A line with `ok: false` can't be approved: fix it with `lacerte_proposal_update_line` or drop it with `lacerte_proposal_remove_line`. If a target is refused (9012 / 9001 / 9202) it isn't writable — move it to the manual list; never work around a refusal.
+  • Never overwrite existing data silently: when a target already has a value, say so in the line's `reasoning` and ask about it as a question.
+  • Every UNMAPPED source line goes to `lacerte_proposal_add_manual_items` (description, amount, source, reason): the preparer enters those by hand.
+  • Anything the preparer must decide goes to `lacerte_proposal_add_questions`.";
+
+        private static string SubmitStep(int step) => "Step " + step + @" — Submit for review (HARD GATE: a person approves)
+  • Call `lacerte_proposal_submit`, then tell the operator the proposal id, the return it goes into (`state.entriesGoInto`), the number of lines, manual items and questions, and that they review and approve it on the control page (Proposals) or on the Lacerte PC with `lacerte-mcp proposal show <id>` and `lacerte-mcp proposal approve <id> --confirm`, confirming the client number and entering their approval PIN.
+  • You cannot approve a proposal (never ask for, guess or enter the approval PIN), and nothing is written until a person approves it. Do not enter this return with `lacerte_field_write` / `lacerte_detail_write` or their bulk forms: the proposal is the record of what was approved (a server running with LACERTE_REQUIRE_APPROVAL=1 refuses direct writes with 9023).
+  • If the operator returns it for changes (status ReturnedForChanges; their note is in `lastReview`), make the changes and submit again. Changing an approved proposal revokes its approval.";
+
+        private static string CommitStep(int step) => "Step " + step + @" — Commit after approval
+  • Only when `lacerte_proposal_get` shows status Approved (state.readyToCommit true), call `lacerte_proposal_commit`. It writes only the lines the operator approved, with read-back and duplicate protection.
+  • Check every line result: Succeeded (verified) is done; SucceededUnverified was accepted but not confirmed — list it for the operator to check in Lacerte.
+  • Failed field lines (for example 9022 WriteNotVerified because the return was open in Lacerte): report them; once the cause is fixed, `lacerte_proposal_commit` again runs only the unfinished lines.
+  • An Uncertain detail line (an error whose context says `rowWritten: yes / unknown`, or 9022): the row may already be in the return. NEVER retry it and never add it again — the commit stops there. Tell the operator to check the client's detail rows in Lacerte and resolve the line (control page or `lacerte-mcp proposal resolve`); then commit again for the rest.";
+
+        // -----------------------------------------------------------------
+        // /lacerte_individual_return_entry
+        // -----------------------------------------------------------------
+
+        [McpServerPrompt(Name = "lacerte_individual_return_entry")]
+        [Description(
+            "Enter an individual (1040) return's data into Lacerte from the client's documents (W-2s, 1099s, 1098s, K-1s, organizer, " +
+            "prior-year return) as a PROPOSAL: a document inventory first, ONLY verified field-dictionary mappings, every line cited and " +
+            "dry-run validated, judgement calls put to the preparer as questions, and a coverage check so no document goes unentered; " +
+            "the operator approves it (control page / CLI), then it is committed with read-back verification, followed by a pre-filing " +
+            "check and a year-over-year comparison. Stops instead of guessing when a mapping is missing.")]
+        public static GetPromptResult IndividualReturnEntry(
+            [Description("Optional tax year of the return (e.g. 2024). Default: confirm it with the operator.")]
+            int? taxYear = null,
+            [Description("Optional label for the source material (e.g. \"Smith 2024 documents\"). Default: ask the operator.")]
+            string? sourceLabel = null)
+        {
+            var source = string.IsNullOrWhiteSpace(sourceLabel) ? "the client's source documents (ask the operator for them)" : $"\"{sourceLabel}\"";
+            var yearNote = taxYear.HasValue
+                ? $"The operator asked for tax year {taxYear.Value}: set the context to that year, and check that the documents are for {taxYear.Value}."
+                : "Confirm the tax year with the operator.";
+            var titleYear = taxYear.HasValue ? taxYear.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "<year>";
+            var text =
+$@"You are entering an individual return (Form 1040, Lacerte module 'I') into Lacerte from {source}. Lacerte computes the forms; your job is data entry only, done safely. You do not decide tax positions: anything that needs judgement goes to the preparer as a question. Follow every step; never skip a gate.
+
+Step 1 — Session and context
+  • Call `lacerte_session_status`. If it isn't registered/signed in, STOP and tell the operator to sign in (control page ""Sign in to Lacerte"" or `lacerte-mcp login`).
+  • Set the context with `lacerte_set_context` to the Individual data folder for the tax year (module 'I'). Use `lacerte_list_datapaths` if unsure. {yearNote}
+
+Step 2 — The client
+  • Find the client with `lacerte_client_find`. If it doesn't exist, ask before creating it with `lacerte_client_create` (dry run first), then resolve its client number with `lacerte_client_find`.
+  • Read what is already there: `lacerte_client_summary`, `lacerte_subclient_read`, `lacerte_state_read`, `lacerte_detail_read`. A return carried forward from last year already holds names, addresses, employers and payers, and sometimes amounts. Never overwrite existing data without the operator's explicit OK for that item.
+
+Step 3 — Load the verified mappings (HARD GATE)
+  • Call `lacerte_field_dictionary` with module 'I' and the tax year.
+  • If it returns no entries (its `note` says no verified mappings yet), STOP data entry. Tell the operator that 1040 fields haven't been mapped on their Lacerte PC yet (they are recorded with `lacerte-mcp map-diff`), and offer to read the documents and summarize them, or to read and summarize the return, instead.
+  • You may ONLY write to a field or detail Series/Code that a dictionary entry names. Never guess a field (C1_n…) or a detail code from memory, from the simulation seeds, or from another module.
+
+Step 4 — Document inventory (HARD GATE: nothing is entered from a document that isn't on the inventory)
+  • List every source document: its type (W-2, 1099-INT, 1099-DIV, 1099-B, 1099-R, 1099-NEC, 1099-MISC, 1099-G, 1099-K, SSA-1099, 1098, 1098-T, 1098-E, 1095-A, Schedule K-1, organizer pages, property-tax and charity records, estimated-tax payment records, prior-year return), the payer or issuer, who it belongs to (taxpayer, spouse or joint), the tax year printed on it, and whether you can read it clearly.
+  • A document for a different tax year or a different person is NOT entered: list it and ask the operator.
+  • A corrected form replaces the original; if both are present, ask which to use.
+  • If last year's data folder exists, call `lacerte_year_over_year` (fromYear = last year, toYear = this year) to see what kinds of income the client had last year (skip this when `foundInFromYear` is false). Anything last year had that has no document this year (an employer, a bank, a brokerage, a K-1) becomes a question, never an assumption.
+  • Show the inventory to the operator and ask whether it is complete BEFORE entering anything.
+
+Step 5 — People and filing status
+  • Compare the taxpayer, spouse, address and dependents on the documents with what is in the return. A difference (new address, new dependent, name change) is a proposal line only where the dictionary maps that field; otherwise it is a manual item.
+  • Never choose or change the filing status, whether someone qualifies as a dependent, or who claims a child: put it to the preparer as a question.
+  • Privacy: an identifier (SSN, ITIN, EIN, bank or account number) goes only in a line's `value` when that is the thing being entered. Never repeat a full SSN, ITIN, bank or account number in `reasoning`, `excerpt`, a description, a question or in chat: show the last 4 digits only.
+
+Step 6 — Build a proposal (nothing is written to the return yet)
+  • Create it with `lacerte_proposal_create` (client number; it uses the active context; title e.g. ""1040 {titleYear} from <source>"").
+  • Work through the inventory one document at a time. For every box or line that has a value, find the dictionary entry by concept, form and box / line.
+  • One line per box per document: three W-2s are three sets of lines, never one total. Do not add, net, annualize or round: enter the figure as printed and let Lacerte do the math.
+  • On a joint return set the detail row's `tsj` (Taxpayer / Spouse / Joint) from who the document belongs to on the inventory; if you can't tell whose it is, ask. State amounts (W-2 boxes 15–17, state withholding on a 1099) carry the `stateAbbrev`.
+  • Use the employer's or payer's name as the detail `description`, so the preparer can match the row to the document.
+{ProposalLineRules}
+  • Always a manual item, never a guess: anything without a dictionary entry; long transaction lists (1099-B sales: Lacerte has its own import for those) unless the dictionary maps them and the operator wants them entered here; depreciation and assets; carryovers from earlier years; anything you can't read with confidence.
+  • Always a question, never your decision: filing status and dependents; whether income belongs to a business (Schedule C), a rental (Schedule E) or other income; home office, vehicle and mileage method; estimated-tax payments that no document supports (ask for dates and amounts); an organizer answer that conflicts with a form; the digital-asset and foreign-account answers; an identity-protection PIN.
+  • Mark a figure you had trouble reading `confidence: low` and say why in `reasoning`.
+
+Step 7 — Coverage check (before you submit)
+  • Go back over the inventory. Every document must be one of: fully entered (every box with a value has a line), partly entered (the rest are manual items), or not entered (a manual item or a question says why).
+  • A document on the inventory with nothing recorded against it is a mistake: fix it before submitting.
+  • Give the operator the coverage table in chat: document, owner, lines added, manual items, questions.
+
+{SubmitStep(8)}
+
+{CommitStep(9)}
+
+Step 10 — Review
+  • Run `lacerte_pre_filing_check` for the client and report blockers and warnings.
+  • If last year's data folder exists, run `lacerte_year_over_year` again and point out large changes (income types that appeared or disappeared, amounts that moved a lot) as things for the preparer to look at, not as errors.
+  • Report: what was written (verified), what needs a manual check, the manual items that must be entered by hand, the open questions, and the coverage table.
+  • You cannot see what Lacerte calculates (refund, balance due, diagnostics). Never state or estimate the refund or the tax due. Tell the operator to close and reopen the client in Lacerte so it recalculates, and to review the diagnostics there. Filing and e-filing stay in Lacerte.
+
+Surface every tool error verbatim with its statusCode; do not summarize away a 9xxx code.";
+
+            return new GetPromptResult
+            {
+                Description = "Prepare a 1040 return from the client's documents as a proposal (document inventory, verified mappings only, dry-run validated, cited, coverage check); the operator approves it; then commit with read-back.",
                 Messages = new List<PromptMessage>
                 {
                     new PromptMessage

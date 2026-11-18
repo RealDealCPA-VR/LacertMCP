@@ -1627,4 +1627,6 @@ Starting point (2026-11-18 morning): reads every return type and creates clients
 - [ ] Proposals follow-ups: line decisions in the activity log with reviewer name; let a CommitFailed proposal be returned for changes; live commit verified on the Lacerte PC (after FP-2 live items).
 - [ ] Phase B (rest): map the first return type; source-document intake with citations.
 - [ ] Phase C: parallel run on last year's returns; error threshold.
-- [ ] Phase D/E: other return types incl. a 1040 workflow; encryption/retention of backups and journals; compliance sign-off.
+- [x] 1040 workflow prompt `lacerte_individual_return_entry` (6 prompts): document inventory, per-box lines, questions for judgement calls, coverage check; shares the submit/commit steps with the entity prompt.
+- [ ] 1040 workflow: exercise against real module I mappings on a test client once they are recorded.
+- [ ] Phase D/E: other return types; encryption/retention of backups and journals; compliance sign-off.

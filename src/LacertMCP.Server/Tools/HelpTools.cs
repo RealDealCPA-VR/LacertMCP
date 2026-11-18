@@ -156,11 +156,11 @@ namespace LacertMCP.Server.Tools
         // same scope language.
         private static string[] WhatThisDoesNotDo() => new[]
         {
-            "Return data entry only as far as mapped and enabled: every module can be read; writing needs verified lacerte_field_dictionary mappings (never guess codes) and, for amounts, live detail writes switched on (else 9202). Use the lacerte_entity_return_entry prompt; with an empty dictionary, offer to read and summarize instead.",
-            "No e-filing actions. Read-only EF status via lacerte_ef_status (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.",
+            "Return data entry only as far as mapped and enabled: every module can be read; writing needs verified lacerte_field_dictionary mappings (never guess codes) and, for amounts, live detail writes switched on (else 9202). Use the lacerte_individual_return_entry (1040) or lacerte_entity_return_entry prompt; with an empty dictionary, offer to read and summarize instead.",
+            "No e-filing actions: EF status is read-only (lacerte_ef_status, TY19+); submit, retransmit or correct an e-file in Lacerte.",
             "No printing, PDF rendering or export: use Lacerte's File -> Print / Print to PDF.",
-            "No organizer, client portal, letter template, or diagnostics-detail access. Those live in non-DBF Lacerte surfaces this MCP doesn't wire up.",
-            "Single-operator only. No concurrency control across multiple Lacerte users sharing one datapath. Don't point two MCP servers at the same LACERTE_DATA_PATH simultaneously.",
+            "No organizer, client portal, letter template, or diagnostics-detail access (non-DBF Lacerte surfaces).",
+            "Single-operator only: no concurrency control across Lacerte users sharing a datapath. Don't point two MCP servers at the same LACERTE_DATA_PATH.",
             "No archived / closed-copy / prior-firm-transfer file access. The MCP sees the live working set under {YY}Tax\\{Module}Data, not Lacerte's archive folders.",
             "No live UI refresh: Lacerte shows writes after the client is closed and reopened.",
         };
@@ -385,20 +385,20 @@ namespace LacertMCP.Server.Tools
             },
         };
 
-        // The four real prompts registered via WithPromptsFromAssembly. Names
+        // The prompts registered via WithPromptsFromAssembly. Names
         // verbatim from WorkflowPrompts.cs / README.
         private static object[] RelatedPrompts() => new object[]
         {
             new
             {
                 name = "lacerte_client_intake",
-                purpose = "Onboard a new client end-to-end: verify session, pick datapath/module/year, create client, seed DATA1 fields, seed detail rows, verify roster.",
+                purpose = "Onboard a new client end-to-end: context, create, seed fields and detail rows, verify.",
                 args = new[] { "clientName?: string" },
             },
             new
             {
                 name = "lacerte_review_ef_status",
-                purpose = "Triage e-file status: pull EFiling+EFStatus join, group by Status, surface Rejected first, flag stale Pending/Transmitted (>72h). TY19+ only.",
+                purpose = "Triage e-file status: group by Status, Rejected first, flag stale Pending/Transmitted (>72h). TY19+ only.",
                 args = new[] { "taxYear?: int" },
             },
             new
@@ -410,14 +410,20 @@ namespace LacertMCP.Server.Tools
             new
             {
                 name = "lacerte_csv_intake",
-                purpose = "Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column->field mapping, per-row idempotency keys, stop-on-first-error.",
+                purpose = "Bulk-onboard clients from a CSV / Tax-Organizer export: one-shot column->field mapping, per-row idempotency keys.",
                 args = new[] { "sourceLabel?: string", "rowCount?: int" },
             },
             new
             {
                 name = "lacerte_entity_return_entry",
-                purpose = "Prepare an 1120 / 1120-S / 1065 / 1041 return as a proposal from source documents (verified mappings only); the operator approves it, then commit.",
+                purpose = "Prepare an 1120 / 1120-S / 1065 / 1041 return as a proposal from source documents; the operator approves it, then commit.",
                 args = new[] { "returnType: string = \"1120\" (1120 | 1120S | 1065 | 1041)", "sourceLabel?: string" },
+            },
+            new
+            {
+                name = "lacerte_individual_return_entry",
+                purpose = "Prepare a 1040 return as a proposal from the client's documents; the operator approves it, then commit.",
+                args = new[] { "taxYear?: int", "sourceLabel?: string" },
             },
         };
 
