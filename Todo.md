@@ -1622,7 +1622,8 @@ Starting point (2026-11-18 morning): reads every return type and creates clients
 - [x] Decide: approval model -> proposal-then-approve (DECISIONS 2026-11-18).
 - [ ] Decide: first return type, who maps fields, §7216 / data-handling review.
 - [x] Phase B (part): proposals — store, 10 `lacerte_proposal_*` tools, commit through the guarded write paths, `lacerte-mcp proposal` CLI, control-page Proposals tab (review, approve, reject, return, resolve, commit), `LACERTE_REQUIRE_APPROVAL` / installer `-RequireApproval`, prompt rewritten to prepare into a proposal.
-- [ ] Decide: approver identity. An agent with shell access on the Lacerte PC or the owner's device can still call the approve endpoint or CLI; closing that needs a human-only secret (per-approval PIN) or OS user separation.
+- [x] Approver identity: approval PIN (console-only set, PBKDF2, lockout) that also confirms the target return; commit re-checks the client (DECISIONS 2026-11-18). Residual: a same-user agent can replace the PIN file (visible as "last changed").
+- [ ] Live: REGRESSION_CHECKLIST "Proposal + approval PIN live items" (incl. which DATA1 column holds entity names).
 - [ ] Proposals follow-ups: line decisions in the activity log with reviewer name; let a CommitFailed proposal be returned for changes; live commit verified on the Lacerte PC (after FP-2 live items).
 - [ ] Phase B (rest): map the first return type; source-document intake with citations.
 - [ ] Phase C: parallel run on last year's returns; error threshold.

@@ -752,14 +752,23 @@ namespace LacertMCP.Server.Web
       .catch(function (e) {
         if (prop.openId !== id) return;
         prop.busy = null;
-        prop.err = { text: e.message, blockers: e.data && e.data.blockers };
-        return loadDetail(true);
+        prop.err = { text: e.message, blockers: e.data && e.data.blockers,
+          where: action === "approve" ? "approve" : action === "resolve" ? "resolve:" + body.lineId : null };
+        return loadDetail(true).then(scrollToErr);
       });
   }
 
-  function errBanner(box) {
-    if (!prop.err) return;
-    var b = el("div", "banner err", prop.err.text);
+  // An approve / resolve error (wrong PIN, wrong client number) is shown inside
+  // that form, which is scrolled into view; other errors go at the top.
+  function inlineErr(text, where) { prop.err = { text: text, where: where }; renderDetail(); scrollToErr(); }
+  function scrollToErr() {
+    var e = document.querySelector("#pdBody .err-here");
+    if (e) e.scrollIntoView({ block: "center" });
+  }
+
+  function errBanner(box, where) {
+    if (!prop.err || (prop.err.where || null) !== (where || null)) return;
+    var b = el("div", "banner err" + (where ? " err-here" : ""), prop.err.text);
     if (prop.err.blockers && prop.err.blockers.length) {
       var ul = el("ul", "blockers");
       prop.err.blockers.forEach(function (x) { ul.appendChild(el("li", null, x)); });
@@ -928,7 +937,7 @@ namespace LacertMCP.Server.Web
       yes.disabled = no.disabled = !!prop.busy || !rps.set || rps.locked;
       var resolve = function (inReturn) {
         var pin = takePin(rpin);
-        if (!pin) { prop.err = { text: "Enter your approval PIN to resolve " + l.lineId + "." }; renderDetail(); return; }
+        if (!pin) { inlineErr("Enter your approval PIN to resolve " + l.lineId + ".", "resolve:" + l.lineId); return; }
         act("resolve", { lineId: l.lineId, rowIsInReturn: inReturn, pin: pin, note: noteVal("resolve:" + l.lineId) },
           l.lineId + (inReturn ? " marked as in the return." : " marked as missing; the next commit writes it."),
           function () { delete prop.notes[nk("resolve:" + l.lineId)]; });
@@ -936,6 +945,7 @@ namespace LacertMCP.Server.Web
       yes.addEventListener("click", function () { resolve(true); });
       no.addEventListener("click", function () { resolve(false); });
       rctl.appendChild(yes); rctl.appendChild(no); rz.appendChild(rctl);
+      errBanner(rz, "resolve:" + l.lineId);
       c.appendChild(rz);
     }
     return c;
@@ -967,7 +977,7 @@ namespace LacertMCP.Server.Web
       pinNotice(ad);
       if (aps.set && aps.changed) ad.appendChild(el("p", "small muted", "Approval PIN last changed " + when(aps.changed) + "."));
       var r1 = el("div", "ctrl");
-      var cn = noteInput("confirmClient", "Type the client number to confirm");
+      var cn = noteInput("confirmClient", "Client number, to confirm");
       cn.maxLength = 64; cn.style.flex = "0 1 220px"; cn.style.minWidth = "160px";
       r1.appendChild(cn);
       var apin = pinInput("Approval PIN");
@@ -981,12 +991,14 @@ namespace LacertMCP.Server.Web
       apb.addEventListener("click", function () {
         var pin = takePin(apin);
         var typed = noteVal("confirmClient").trim();
-        if (!typed) { prop.err = { text: "Type the client number of the return the entries go into." }; renderDetail(); return; }
-        if (!pin) { prop.err = { text: "Enter your approval PIN." }; renderDetail(); return; }
+        if (!typed) { inlineErr("Type the client number of the return the entries go into.", "approve"); return; }
+        if (!pin) { inlineErr("Enter your approval PIN.", "approve"); return; }
         act("approve", { expectedVersion: p.version, clientNumber: typed, pin: pin, note: noteVal("approve") }, "Approved version " + p.version + ". Commit it when you're ready.",
           function () { delete prop.notes[nk("approve")]; delete prop.notes[nk("confirmClient")]; });
       });
-      r1b.appendChild(apb); ad.appendChild(r1b); box.appendChild(ad);
+      r1b.appendChild(apb); ad.appendChild(r1b);
+      errBanner(ad, "approve");
+      box.appendChild(ad);
       if (!st.readyToApprove) blockersList("Can't approve yet:");
     }
 

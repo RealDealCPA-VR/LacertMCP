@@ -189,3 +189,10 @@ Removing detail rows over the Lacerte ODBC driver (DELETE) is UNVERIFIED. Run ev
 - [ ] Second `apply` on the same journal is a no-op (no worker started, "Removed 0").
 - [ ] Failure handling: with the client open in Lacerte's UI (or the data share disconnected), `apply` stops at the first row with a clean message saying nothing was changed (or exactly what to re-enter), and `<journal>.restored.jsonl` records it; after closing the client, `apply` finishes.
 - [ ] Worker on its own: `'{"connectionString":"x","sql":"DELETE FROM [X-Detail]","op":"deleteDetailRow"}' | & "<install>\server\LacertMCP.Server.exe" --detail-write-worker; $LASTEXITCODE` prints one `"ok":false` line and exit code 2. The CLI runs the worker from its own folder (`<install>\cli\LacertMCP.Server.exe`, copied with the CLI) - confirm it is there and no console window flashes during `apply`.
+
+### Proposal + approval PIN live items
+Run on a TEST client after the FP-2 live items pass.
+- [ ] `lacerte-mcp approval-pin set` in a console on the Lacerte PC works; `"1234567" | lacerte-mcp approval-pin set` (piped) is refused; `approval-pin status` shows the change time.
+- [ ] Target identity per module: create a proposal for a test client in each module you use (I and at least one of C / S / P / F). `lacerte_proposal_get` shows `targetReturn.clientName` equal to the name in Lacerte (Individual: first + last from C1_1 + C1_2; entity modules: C1_1). If an entity module shows a blank or wrong name, record which DATA1 column holds the name.
+- [ ] Approve on the control page with a wrong PIN (refused, attempts left shown, activity log "security" entry without the PIN), then the right PIN; the approval record says "approval PIN verified" and names the client.
+- [ ] Commit writes the approved lines and reads them back. Then rename the TEST client in Lacerte, create + approve another proposal from before the rename (or edit the name after approval) and commit: refused with both names shown, nothing written.

@@ -1,5 +1,12 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, late night) — approval PIN + target-return check
+
+- Approving a proposal (and resolving an Uncertain line) now needs the approval PIN, set only by typing `lacerte-mcp approval-pin set` in a console on the Lacerte PC (PBKDF2-SHA256, 5 wrong = 15-minute lock). The reviewer also types the client number.
+- A proposal captures its target return (client number + name, module, year, data folder) at creation; it's in the content hash and the approval record. The commit re-reads the client and refuses (9024, nothing written) if it's gone or renamed.
+- Exercised end to end in the browser against a simulated server: wrong PIN refused (message now shown inside the approve box), right PIN approved, commit written and verified.
+- Tests 2312 passed, 11 skipped (two runs); build 0 warnings. Not pushed. Live check: REGRESSION_CHECKLIST "Proposal + approval PIN live items" (entity-module name column C1_1 is unverified on real data).
+
 ## Last Session Summary (2026-11-18, night) — proposal-then-approve
 
 - Decision: Claude prepares returns into a proposal; only a person approves (DECISIONS 2026-11-18). Built in two worktree agents + coordinator:

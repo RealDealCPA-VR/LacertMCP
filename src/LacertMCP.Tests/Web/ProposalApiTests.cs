@@ -691,7 +691,7 @@ namespace LacertMCP.Tests.Web
             var html = ControlPage.Html;
             Assert.Contains("i.type = \"password\"", html);
             Assert.Contains("\"Entries go into: \"", html);
-            Assert.Contains("Type the client number to confirm", html);
+            Assert.Contains("Client number, to confirm", html);
             Assert.Contains("lacerte-mcp approval-pin set", html);
             Assert.Contains("Approval PIN last changed ", html);
             Assert.Contains("pin: pin", html);                 // approve + resolve send it

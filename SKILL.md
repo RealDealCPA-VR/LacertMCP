@@ -219,7 +219,7 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 
 ### Proposals (10 tools) — how return preparation is done
 
-Prepare returns as a proposal; a person approves it; then commit. You can NEVER approve a proposal (no tool does; approval is on the control page or the CLI), and you must not route around it with the direct write tools. When the server runs with `LACERTE_REQUIRE_APPROVAL=1`, real direct writes return `9023 ApprovalRequired`.
+Prepare returns as a proposal; a person approves it; then commit. You can NEVER approve a proposal (no tool does; the operator approves on the control page or the CLI with their approval PIN, confirming the client number), and you must not route around it with the direct write tools. NEVER ask the operator for their PIN or try to supply one. The proposal records its target return when created (`targetReturn`, `state.entriesGoInto`); the commit refuses (9024) if the client in Lacerte no longer matches it. When the server runs with `LACERTE_REQUIRE_APPROVAL=1`, real direct writes return `9023 ApprovalRequired`.
 
 - `lacerte_proposal_create(clientNumber, title?)` — start one for a client in the active context (status Draft).
 - `lacerte_proposal_add_lines(proposalId, lines[])` — field lines `{kind:"field", table, field, value, subClientId?, stateAbbrev?}` or detail lines `{kind:"detail", detail:{series, code, amount, description, suffix, prefix?, ...}}`, each with `dictionaryId`, `source {document, page?, location?, excerpt?}`, `confidence` (high/medium/low), `reasoning?`. Each is dry-run validated when added; `preview.ok=false` lines can't be approved — fix or remove them.

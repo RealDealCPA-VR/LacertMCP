@@ -754,7 +754,7 @@ The `value` column is always the redacted `"***"` sentinel — disk-scope redact
 
 ### 7i. Proposals (prepare, then a person approves)
 
-Return preparation goes through a **proposal**: Claude puts every intended entry into it, a person reviews and approves it, and only then does Claude commit it to the return. No MCP tool can approve. Approval happens on the control page's **Proposals** tab (from the Lacerte PC itself or the owner's device) or with `lacerte-mcp proposal approve` on the Lacerte PC. The approval is bound to the proposal's version and content hash: any change after approval revokes it. With `LACERTE_REQUIRE_APPROVAL=1` (`install-http.ps1 -RequireApproval`) the direct write tools refuse real writes (9023), so a proposal is the only way agents can change a return.
+Return preparation goes through a **proposal**: Claude puts every intended entry into it, a person reviews and approves it, and only then does Claude commit it to the return. No MCP tool can approve. Approval happens on the control page's **Proposals** tab (from the Lacerte PC itself or the owner's device) or with `lacerte-mcp proposal approve` on the Lacerte PC. Approving needs the **approval PIN** (set once on the Lacerte PC with `lacerte-mcp approval-pin set`) and the client number typed to confirm the target return. The approval is bound to the proposal's version and content hash, which include the target return captured when the proposal was created (client number and name, module, year, data folder): any change after approval revokes it. With `LACERTE_REQUIRE_APPROVAL=1` (`install-http.ps1 -RequireApproval`) the direct write tools refuse real writes (9023), so a proposal is the only way agents can change a return.
 
 Statuses: Draft → Submitted → Approved → Committing → Committed (or PartiallyCommitted / CommitFailed, which can be committed again), plus Rejected and ReturnedForChanges (the agent fixes it and submits again).
 
@@ -777,7 +777,7 @@ Submit for review. The proposal is locked against agent edits until the reviewer
 Read one proposal (lines, sources, previews, decisions, commit results, approval record and `state`: `contentHash`, `approvalCurrent`, `readyToCommit`, `blockers`), or list proposals by `clientNumber?` / `status?`. Both work on read-only devices.
 
 #### `lacerte_proposal_commit`
-Write an approved, unchanged proposal: only the approved lines, in the proposal's own context, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection). Idempotency keys are `proposal-{id}-v{version}-{lineId}`, so a retry never writes twice. Field failures are recorded and the commit continues. A detail line that may already be on the return becomes **Uncertain** and stops the commit: a person checks Lacerte and resolves it (control page or `lacerte-mcp proposal resolve`), then commit again runs only unfinished lines.
+Write an approved, unchanged proposal: only the approved lines, in the proposal's own context, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection). Idempotency keys are `proposal-{id}-v{version}-{lineId}`, so a retry never writes twice. Before writing anything it re-reads the client from Lacerte and refuses (9024, nothing written) if the client is gone or its name no longer matches the approved target. Field failures are recorded and the commit continues. A detail line that may already be on the return becomes **Uncertain** and stops the commit: a person checks Lacerte and resolves it (control page or `lacerte-mcp proposal resolve`), then commit again runs only unfinished lines.
 
 ## 8. Prompts catalog
 
@@ -970,12 +970,24 @@ Review and approve proposals on the Lacerte PC (the same actions as the control 
 | --- | --- |
 | `proposal list [--client N] [--status S]` | Proposals, newest first. |
 | `proposal show <id>` | Every line with target, value, source, reasoning, dry-run preview and decision; manual items; questions; approval record. |
-| `proposal approve <id> [--reject L3 ...] [--version N] [--note X] --confirm` | Approve every line except the `--reject`ed ones (lines whose dry run failed can't be approved). `--version` refuses if the proposal changed since you looked. Without `--confirm` it only prints what would be approved. |
+| `proposal approve <id> [--reject L3 ...] [--version N] [--note X] --confirm` | Shows the target return ("Entries go into: client … · name · form year · folder"), asks you to type the client number and your approval PIN, then approves every line except the `--reject`ed ones (lines whose dry run failed can't be approved). `--version` refuses if the proposal changed since you looked. Without `--confirm` it only prints what would be approved. |
 | `proposal reject <id> --note X --confirm` | Reject it (final). |
 | `proposal return <id> --note X --confirm` | Send it back to the agent for changes. |
-| `proposal resolve <id> --line L --in-return\|--missing --confirm` | Settle an Uncertain detail line after checking the client's detail rows in Lacerte: `--in-return` if the row is there (never written again), `--missing` if not (the next commit writes it once). |
+| `proposal resolve <id> --line L --in-return\|--missing --confirm` | (Asks for the approval PIN.) Settle an Uncertain detail line after checking the client's detail rows in Lacerte: `--in-return` if the row is there (never written again), `--missing` if not (the next commit writes it once). |
 
-Committing is done by the agent (`lacerte_proposal_commit`) or the control page's Commit button, after approval.
+Committing is done by the agent (`lacerte_proposal_commit`) or the control page's Commit button, after approval. The PIN prompts work only when typed in a console; input piped from a script or an agent is refused.
+
+### `lacerte-mcp approval-pin`
+
+The PIN that approves proposals and resolves Uncertain lines. Set it yourself on the Lacerte PC; nobody else (and no agent) should know it.
+
+| Command | What it does |
+| --- | --- |
+| `approval-pin set` | Set or change it (asks for the current PIN when one exists, then the new one twice). 6-64 characters; not one repeated character or a straight digit run like 123456. |
+| `approval-pin status` | Whether one is set, when it last changed, and the wrong-attempt count / lockout. |
+| `approval-pin reset --confirm` | For a forgotten PIN: type RESET to clear it, then `set` a new one. |
+
+`set` and `reset` run only when typed in a console. The PIN is stored as a PBKDF2-SHA256 hash (310,000 iterations) in `approval-pin.json` next to the `proposals` folder, never in plain text. 5 wrong PINs (control page or CLI) lock approvals for 15 minutes. If "last changed" shows a time you didn't change it, someone else did: reset it and set a new one. `--dir` points at the data folder (default `LACERTE_HTTP_DATA_DIR`, else `%APPDATA%\lacerte-mcp`).
 
 ### `lacerte-mcp update`
 
@@ -1152,8 +1164,8 @@ What it takes, and what is in place:
 2. **Client-level fields** listed in the dictionary become writable under the SDK manual's range rules (a literal access-map entry or year overlay still wins).
 3. **Amounts (detail rows)** need live detail writes switched on: after the REGRESSION_CHECKLIST "FP-2 live items" pass, re-run `install-http.ps1 -LiveDetailWrites` (remembered in install.json; it sets `LACERTE_LIVE_DETAIL_WRITES=1`). Even then the server writes only Series/Code listed in the verified dictionary (else 9012). Each client's detail rows are snapshotted before the first write, every write is read back, and a row that may have landed locks its idempotency key so a retry can never append a duplicate. Bulk detail writes need the `previewToken` from a passing dry run of the same entries. To undo the MCP's own rows for a client, use `lacerte-mcp detail-restore plan --journal <file>` then `apply --journal <file> --confirm` (journals sit next to the backups; `detail-restore list` shows them). Rows entered in Lacerte are never touched; try restore on a TEST client first.
 4. **Claude prepares the return as a proposal** with the `lacerte_entity_return_entry` prompt (returnType 1120, 1120S, 1065 or 1041). It stops when the dictionary has no mappings. Otherwise it builds a proposal: every mapped value with its source document, page and box, its reasoning and a confidence; every line dry-run validated; unmapped lines listed for hand entry; questions for you. Then it submits the proposal and tells you its id. Nothing is written yet.
-5. **You review and approve.** On the control page open **Proposals**, review each line beside its source, reject any you disagree with, and approve; or send it back with a note. On the Lacerte PC the same is `lacerte-mcp proposal show <id>` then `lacerte-mcp proposal approve <id> --confirm`. Claude can't approve. To make proposals the only way agents can write, re-run `install-http.ps1 -RequireApproval`.
-6. **Commit.** Claude commits the approved proposal (`lacerte_proposal_commit`), or you press Commit on the control page. Only approved lines are written, each read back. If a detail line is marked Uncertain, check the client's detail rows in Lacerte and resolve it; then commit again. Claude finishes with `lacerte_pre_filing_check`.
+5. **You review and approve.** First, once, set your approval PIN on the Lacerte PC: `lacerte-mcp approval-pin set`. On the control page open **Proposals**, review each line beside its source, reject any you disagree with, then check "Entries go into: client … · name · form year · folder", type the client number and your PIN, and approve; or send it back with a note. On the Lacerte PC the same is `lacerte-mcp proposal show <id>` then `lacerte-mcp proposal approve <id> --confirm`. Claude can't approve and never asks for your PIN. To make proposals the only way agents can write, re-run `install-http.ps1 -RequireApproval`.
+6. **Commit.** Claude commits the approved proposal (`lacerte_proposal_commit`), or you press Commit on the control page. The commit first re-reads the client and writes nothing if it isn't the return you approved. Only approved lines are written, each read back. If a detail line is marked Uncertain, check the client's detail rows in Lacerte and resolve it; then commit again. Claude finishes with `lacerte_pre_filing_check`.
 7. Close and reopen the client in Lacerte to see the changes; Lacerte computes the forms. Enter the manual items. Filing stays in Lacerte.
 
 ---

@@ -741,3 +741,16 @@ Claude Desktop's config file only starts local (stdio) programs, and its remote 
 **Rejected:** direct writes with review afterwards. Faster to build, but approval would come after the data is already in the return.
 
 **Threat model note:** a remote agent (HTTP mode) can't reach the approval channels. An agent running on the Lacerte PC itself with shell access could tamper with files; keep AI agents off the Lacerte PC's shell, or accept that risk knowingly.
+
+## 2026-11-18 — Approval PIN, which also confirms the target return
+
+**Context:** the approval channels (control page from this computer or the owner's device, `lacerte-mcp proposal` on the Lacerte PC) can be reached by an AI agent with shell access on those computers. The operator asked for a PIN that verifies BOTH that a person approved and that the data goes into the right client return.
+
+**Chosen:**
+- An approval PIN, set only by a person typing in a console on the Lacerte PC (`lacerte-mcp approval-pin set`; piped input refused). Stored as PBKDF2-SHA256 (310k iterations, random salt) in `approval-pin.json`; 5 wrong attempts lock approvals for 15 minutes, shared by the server and the CLI. Approving and resolving an Uncertain line need it; reject / return / line decisions don't (they write nothing). No MCP tool can set, check or use it.
+- Target return identity: a proposal captures the client number and name (Individual: C1_1 + C1_2; other modules: C1_1, the same columns the client tools use), module, year and data folder when it's created; it is part of the content hash. Approving shows it ("Entries go into: …"), requires the client number typed back, and records the target with `pinVerified`. The commit re-reads the client in the proposal's own context and refuses (9024, nothing written) if it is gone or its name differs.
+- No new status codes: PIN refusals are 9024 with `context.pinCheck` (HTTP: 403 wrong, 429 locked, 409 not set).
+
+**Rejected:** a cryptographic seal over the approval keyed by the PIN. The commit would need the PIN again to verify it, and a same-user agent that can edit the proposal file can also edit the PIN file, so it would add complexity without closing that gap.
+
+**Remaining risk (accepted, documented):** an agent running as the operator's Windows user can still delete or replace `approval-pin.json` or drive a pseudo-terminal. The "PIN last changed" time on the Proposals tab and `approval-pin status` make that visible. Fully separating agents needs a different Windows account for them.
