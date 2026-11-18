@@ -156,7 +156,7 @@ namespace LacertMCP.Server.Tools
         // same scope language.
         private static string[] WhatThisDoesNotDo() => new[]
         {
-            "Return preparation is limited to what has been mapped and enabled on this install. Every module (1040, 1120, 1120-S, 1065, 1041, ...) can be READ in full and clients can be created. Writing return data needs (a) verified mappings in lacerte_field_dictionary for that module — recorded on the Lacerte PC with `lacerte-mcp map-diff`; never guess field or detail codes — and (b) for income/deduction/K-1 amounts, live detail writes enabled by the operator (LACERTE_LIVE_DETAIL_WRITES=1, otherwise 9202). Use the lacerte_entity_return_entry prompt; when the dictionary is empty, offer to read and summarize instead of promising to prepare the return.",
+            "Return data entry only as far as mapped and enabled: every module can be read; writing needs verified lacerte_field_dictionary mappings (never guess codes) and, for amounts, live detail writes switched on (else 9202). Use the lacerte_entity_return_entry prompt; with an empty dictionary, offer to read and summarize instead.",
             "No e-filing actions. Read-only EF status via lacerte_ef_status (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.",
             "No printing, PDF rendering, or third-party export. DBF read/write + COM field-write only. Use Lacerte's File -> Print or Print to PDF for any rendered output.",
             "No organizer, client portal, letter template, or diagnostics-detail access. Those live in non-DBF Lacerte surfaces this MCP doesn't wire up.",
@@ -344,14 +344,7 @@ namespace LacertMCP.Server.Tools
                 name = "LACERTE_LIVE_DETAIL_WRITES",
                 required = "optional",
                 defaultValue = "off",
-                purpose = "1 lets live detail-row writes (income, deduction, K-1 amounts) through, only for Series/Code in the verified field dictionary; off (9202) until verified on the Lacerte PC. The installer sets it with -LiveDetailWrites.",
-            },
-            new
-            {
-                name = "LACERTE_DETAIL_SNAPSHOT_DIR",
-                required = "optional",
-                defaultValue = "%APPDATA%\\lacerte-mcp\\detail-snapshots",
-                purpose = "Fully qualified folder for the per-client detail-row backups taken before the first live write (taxpayer data).",
+                purpose = "1 enables live detail-row writes (dictionary-mapped Series/Code only). Off until verified on the Lacerte PC.",
             },
         };
 
@@ -411,7 +404,7 @@ namespace LacertMCP.Server.Tools
         // inside the MCP can tell the operator the right next move.
         private static object[] RelatedCli() => new object[]
         {
-            new { name = "lacerte-mcp map-diff snapshot|compare|record", purpose = "Operator, on the Lacerte PC: record verified field-dictionary mappings (one known value entered between two snapshots)." },
+            new { name = "lacerte-mcp map-diff snapshot|compare|record", purpose = "Operator, on the Lacerte PC: record verified field-dictionary mappings." },
             new { name = "lacerte-mcp tools --names-only", purpose = "List every MCP tool the server registers (reflection only, no stdio boot)." },
             new { name = "lacerte-mcp tools --name <tool>", purpose = "Deep-print one tool's full parameter surface incl. per-parameter descriptions." },
             new { name = "lacerte-mcp status --json", purpose = "Snapshot of registration state, mode, storage backend, platform. Zero wire I/O." },
