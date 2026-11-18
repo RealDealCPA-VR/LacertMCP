@@ -193,6 +193,13 @@ if ((Test-Path $mapDir) -and (Get-ChildItem $mapDir -Filter *.json)) {
     $mapKeep = Join-Path $env:TEMP ("LacertMCP-fieldmap-" + [guid]::NewGuid().ToString('N'))
     Copy-Item -Path $mapDir -Destination $mapKeep -Recurse -Force
 }
+# Same for field-dictionary entries recorded on this PC with `lacerte-mcp map-diff record`.
+$dictDir = Join-Path $installDir 'server\Schema\FieldDictionary'
+$dictKeep = $null
+if ((Test-Path $dictDir) -and (Get-ChildItem $dictDir -Filter *.json | Where-Object { $_.Length -gt 0 })) {
+    $dictKeep = Join-Path $env:TEMP ("LacertMCP-dictionary-" + [guid]::NewGuid().ToString('N'))
+    Copy-Item -Path $dictDir -Destination $dictKeep -Recurse -Force
+}
 foreach ($part in 'server', 'cli', 'dumper') {
     if (-not (Test-Path (Join-Path $here $part))) { continue }
     $dest = Join-Path $installDir $part
@@ -218,6 +225,18 @@ if ($mapKeep) {
         New-Item -ItemType Directory -Force -Path (Split-Path $saveTo) | Out-Null
         Move-Item -LiteralPath $mapKeep -Destination $saveTo
         Write-Host "The field-map merge failed; the release's map is in use and your previous one is saved in $saveTo" -ForegroundColor Yellow
+    }
+}
+if ($dictKeep) {
+    $r = Invoke-Native $cliExe @('field-access', 'merge-dictionary', '--from', $dictKeep, '--into', $dictDir)
+    if ($r.Output) { $r.Output -split "`r?`n" | ForEach-Object { Write-Host "    $_" } }
+    if ($r.Code -eq 0) {
+        Remove-Item $dictKeep -Recurse -Force
+    } else {
+        $saveTo = Join-Path $installDir ("backups\fielddictionary-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        New-Item -ItemType Directory -Force -Path (Split-Path $saveTo) | Out-Null
+        Move-Item -LiteralPath $dictKeep -Destination $saveTo
+        Write-Host "The field-dictionary merge failed; the release's dictionary is in use and your recorded entries are saved in $saveTo" -ForegroundColor Yellow
     }
 }
 

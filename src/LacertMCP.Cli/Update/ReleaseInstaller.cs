@@ -40,10 +40,12 @@ namespace LacertMCP.Cli.Update
     /// <summary>Outcome of <see cref="ReleaseInstaller.Apply"/>.</summary>
     public sealed class ApplyResult
     {
-        public ApplyResult(string backupDir, FieldMapMergeResult fieldMap, int filesWritten, int filesRetired)
+        public ApplyResult(string backupDir, FieldMapMergeResult fieldMap, int filesWritten, int filesRetired,
+            FieldDictionaryMergeResult? dictionary = null)
         {
             BackupDir = backupDir;
             FieldMap = fieldMap;
+            Dictionary = dictionary ?? new FieldDictionaryMergeResult(0, 0, Array.Empty<string>(), Array.Empty<string>());
             FilesWritten = filesWritten;
             FilesRetired = filesRetired;
         }
@@ -55,6 +57,9 @@ namespace LacertMCP.Cli.Update
         /// merged into the release's (see <see cref="FieldMapMerge"/>).
         /// </summary>
         public FieldMapMergeResult FieldMap { get; }
+
+        /// <summary>How this PC's recorded field-dictionary entries were carried over (see <see cref="FieldDictionaryMerge"/>).</summary>
+        public FieldDictionaryMergeResult Dictionary { get; }
 
         public int FilesWritten { get; }
         public int FilesRetired { get; }
@@ -272,6 +277,12 @@ namespace LacertMCP.Cli.Update
                 ? new FieldMapMergeResult(Array.Empty<ShardMergeStats>())
                 : FieldMapMerge.Merge(installedBase, stagedBase);
 
+            // Mappings recorded on this PC with `map-diff record` are verified
+            // operator data too; carry them into the release's dictionary.
+            var dictionary = FieldDictionaryMerge.Merge(
+                Path.Combine(installRoot, "server", "Schema", "FieldDictionary"),
+                Path.Combine(stagedRoot, "server", "Schema", "FieldDictionary"));
+
             // From here until the swap completes (or is undone) the install may be
             // a mix of versions; the marker lets the next run put it back.
             WritePending(installRoot, new PendingUpdate(backupDir, currentVersionLabel, targetVersionLabel ?? "unknown"));
@@ -318,7 +329,7 @@ namespace LacertMCP.Cli.Update
             }
 
             PruneBackups(backupsRoot, BackupsToKeep, backupDir);
-            return new ApplyResult(backupDir, fieldMap, written, retired);
+            return new ApplyResult(backupDir, fieldMap, written, retired, dictionary);
         }
 
         /// <summary>

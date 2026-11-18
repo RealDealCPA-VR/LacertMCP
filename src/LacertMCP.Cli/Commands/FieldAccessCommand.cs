@@ -45,6 +45,7 @@ namespace LacertMCP.Cli.Commands
             cmd.AddCommand(BuildSetCommand());
             cmd.AddCommand(BuildDiscoverCommand());
             cmd.AddCommand(BuildMergeCommand());
+            cmd.AddCommand(BuildMergeDictionaryCommand());
 
             return cmd;
         }
@@ -76,6 +77,49 @@ namespace LacertMCP.Cli.Commands
                     Console.Out, Console.Error);
             });
             return merge;
+        }
+
+        private static Command BuildMergeDictionaryCommand()
+        {
+            var merge = new Command("merge-dictionary",
+                "Carry a previous install's recorded field-dictionary entries into a new release's (used by install-http.ps1).")
+            {
+                IsHidden = true,
+            };
+            var fromOpt = new Option<string>("--from", "The previous install's Schema\\FieldDictionary folder.") { IsRequired = true };
+            var intoOpt = new Option<string>("--into", "The new release's Schema\\FieldDictionary folder; rewritten in place.") { IsRequired = true };
+            merge.AddOption(fromOpt);
+            merge.AddOption(intoOpt);
+            merge.SetHandler((context) =>
+            {
+                context.ExitCode = RunMergeDictionary(
+                    context.ParseResult.GetValueForOption(fromOpt)!,
+                    context.ParseResult.GetValueForOption(intoOpt)!,
+                    Console.Out, Console.Error);
+            });
+            return merge;
+        }
+
+        public static int RunMergeDictionary(string fromDir, string intoDir, TextWriter writer, TextWriter stderr)
+        {
+            if (!Directory.Exists(intoDir))
+            {
+                stderr.WriteLine($"--into folder not found: {intoDir}");
+                return 1;
+            }
+            try
+            {
+                var lines = Update.FieldDictionaryMerge.Merge(fromDir, intoDir).Describe();
+                if (lines.Count == 0) writer.WriteLine("Field dictionary: nothing recorded on this PC to carry over.");
+                foreach (var line in lines) writer.WriteLine(line);
+                return 0;
+            }
+            catch (Exception ex) when (ex is Update.UpdateException || ex is IOException || ex is UnauthorizedAccessException
+                                       || ex is System.Text.Json.JsonException || ex is FormatException)
+            {
+                stderr.WriteLine("Field-dictionary merge failed: " + ex.Message);
+                return 1;
+            }
         }
 
         public static int RunMerge(string fromDir, string intoDir, TextWriter writer, TextWriter stderr)

@@ -4,6 +4,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security;
 using System.Security.Principal;
 using System.Text;
@@ -360,7 +361,7 @@ namespace LacertMCP.Cli.Commands
 
                 stdout.WriteLine($"Updated {installedText} -> v{target} ({result.FilesWritten} files written).");
                 stdout.WriteLine($"Previous version backed up to {result.BackupDir}");
-                var mapLines = result.FieldMap.Describe();
+                var mapLines = result.FieldMap.Describe().Concat(result.Dictionary.Describe()).ToList();
                 foreach (var line in mapLines) stdout.WriteLine(line);
                 if (result.FieldMap.KeptFromThisPc > 0)
                 {

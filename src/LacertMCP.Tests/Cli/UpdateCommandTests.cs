@@ -198,6 +198,29 @@ namespace LacertMCP.Tests.Cli
             Assert.False(File.Exists(Path.Combine(install, UpdateCommand.LogFileName)));
         }
 
+        // Mappings recorded on the Lacerte PC with `map-diff record` are verified
+        // operator data: an update must carry them into the new release.
+        [Fact]
+        public async Task ReleaseUpdate_KeepsRecordedFieldDictionaryEntries()
+        {
+            var install = MakeInstall("0.1.0");
+            var dictDir = Directory.CreateDirectory(Path.Combine(install, "server", "Schema", "FieldDictionary")).FullName;
+            var entry = new FieldDictionaryEntry("1120.gross_receipts", "Gross receipts", "1120", "1a", FieldDictionaryLoader.KindField,
+                1, "C1_40", null, null, null, null, false, false, "amount", null, new[] { 2024 },
+                "TY2024 on LACERTE-PC, 2026-11-20", FieldDictionaryLoader.SourceMapDiff);
+            File.WriteAllText(Path.Combine(dictDir, "corporate.json"), FieldDictionaryLoader.Serialize('C', new[] { entry }));
+
+            var (code, output, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", MakeReleaseZip("0.2.0")),
+                Path.Combine(install, "cli"), "0.1.0");
+
+            Assert.True(code == 0, output + err);
+            Assert.Equal("server 0.2.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
+            var kept = FieldDictionaryLoader.ValidateFile(Path.Combine(dictDir, "corporate.json"), 'C', out var error);
+            Assert.True(kept != null, error);
+            Assert.Equal("1120.gross_receipts", Assert.Single(kept!.Entries).Id);
+            Assert.Contains("Kept 1 field-dictionary entry", output);
+        }
+
         [Fact]
         public async Task AlreadyCurrent_Exit0_NoDownload()
         {
