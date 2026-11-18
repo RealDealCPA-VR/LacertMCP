@@ -120,7 +120,30 @@ namespace LacertMCP.Server.Web
   .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 14px; }
   .kv > div:nth-child(odd) { color: var(--muted); }
   .kv > div { overflow-wrap: anywhere; }
+  .panel h3 { font-size: 14.5px; margin: 20px 0 6px; }
+  table.wide { min-width: 760px; }
+  .pline { border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 10px 0; background: var(--panel2); }
+  .pline.dec-Approved { border-left-color: var(--ok); }
+  .pline.dec-Rejected { border-left-color: var(--bad); }
+  .pline.invalid { border-color: var(--bad); }
+  .pline .lh { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pline .lid { font: 700 13px ui-monospace, Consolas, monospace; }
+  .pline .tgt { font: 13px ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+  .pline .val { font-weight: 700; font-size: 15px; margin-top: 4px; overflow-wrap: anywhere; }
+  .meta { display: grid; grid-template-columns: 120px 1fr; gap: 3px 12px; font-size: 13px; margin-top: 8px; }
+  .meta > div { overflow-wrap: anywhere; }
+  .meta > div:nth-child(odd) { color: var(--muted); }
+  .ctrl { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  .ctrl input[type=text] { flex: 1; min-width: 200px; }
+  .excerpt { font-style: italic; }
+  .t-ok { color: var(--ok); } .t-warn { color: var(--warn); } .t-bad { color: var(--bad); font-weight: 600; }
+  .confirm { border: 2px solid var(--bad); border-radius: 10px; padding: 12px 14px; background: var(--bad-bg); margin-top: 10px; }
+  .confirm p { margin: 0 0 8px; }
+  .pact { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 6px; }
+  ul.blockers { margin: 6px 0 0 18px; padding: 0; }
+  details summary { cursor: pointer; color: var(--muted); margin-top: 16px; }
   @media (max-width: 860px) {
+    .meta { grid-template-columns: 1fr; }
     .grid2 { grid-template-columns: 1fr; }
     .tiles { grid-template-columns: repeat(2, 1fr); }
     .kv { grid-template-columns: 1fr; }
@@ -137,6 +160,7 @@ namespace LacertMCP.Server.Web
     </div>
     <nav class="tabs" role="tablist" id="tabs">
       <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+      <button role="tab" data-tab="proposals" aria-selected="false" title="Proposals waiting for your review">Proposals <span class="count" id="cProps">0</span></button>
       <button role="tab" data-tab="access" aria-selected="false">Access <span class="count" id="cAccess">0</span></button>
       <button role="tab" data-tab="agents" aria-selected="false">Agents <span class="count" id="cAgents">0</span></button>
       <button role="tab" data-tab="folders" aria-selected="false">Data folders</button>
@@ -172,6 +196,36 @@ namespace LacertMCP.Server.Web
         <p class="lead">The latest tool calls, connections and changes.</p>
         <div id="recent"></div>
       </div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-proposals">
+    <div class="banner warn" id="propPrivacy">Proposals contain taxpayer data: amounts, descriptions and excerpts from the client's documents. Review them on a screen only you can see.</div>
+    <div class="panel" id="propListPanel">
+      <h2>Proposals</h2>
+      <p class="lead">Entries an agent prepared for a client's return, with where each value came from. Nothing is written to Lacerte until you approve a proposal here and commit it. Decide every line, then approve the proposal; or send it back to the agent with a note.</p>
+      <div class="row" style="margin-bottom:10px">
+        <select id="propStatus" aria-label="Status">
+          <option value="">All statuses</option>
+          <option value="Submitted">Waiting for review</option>
+          <option value="Approved">Approved, not committed</option>
+          <option value="PartiallyCommitted">Partly committed</option>
+          <option value="CommitFailed">Commit failed</option>
+          <option value="Committed">Committed</option>
+          <option value="ReturnedForChanges">Returned for changes</option>
+          <option value="Draft">Draft</option>
+          <option value="Rejected">Rejected</option>
+        </select>
+        <input type="text" id="propClient" placeholder="Client number" maxlength="64" aria-label="Client number">
+        <button id="propRefresh">Refresh</button>
+      </div>
+      <div id="propListMsg"></div>
+      <div class="scroll"><table class="wide"><thead><tr><th>Client</th><th>Title</th><th>Status</th><th>Version</th><th>Lines</th><th>Prepared by</th><th>Updated</th><th></th></tr></thead><tbody id="propRows"></tbody></table></div>
+      <p class="muted small">Kept on this PC in <code id="propFolder"></code>. The command line can review them too: <code>lacerte-mcp proposal show &lt;id&gt;</code>.</p>
+    </div>
+    <div class="panel hidden" id="propDetail">
+      <div class="row" style="justify-content:space-between"><h2 id="pdTitle">Proposal</h2><button id="pdClose">Back to the list</button></div>
+      <div id="pdBody"></div>
     </div>
   </section>
 
@@ -284,6 +338,7 @@ namespace LacertMCP.Server.Web
     chips.appendChild(el("span", "chip " + (s.signedIn ? "ok" : "bad"), s.signedIn ? "Signed in to Lacerte" : "Not signed in"));
     $("cAccess").textContent = s.counts.devicesWithAccess;
     $("cAgents").textContent = s.counts.connections;
+    $("cProps").textContent = s.proposals ? s.proposals.awaitingReview : 0;
     renderOverview(s); renderAccess(s); renderAgents(s); renderFolders(s); renderActivity(s); renderStorage(s);
   }
 
@@ -472,7 +527,7 @@ namespace LacertMCP.Server.Web
 
   function renderActivity(s) {
     var fl = $("filters"); clear(fl);
-    [["all", "All"], ["write", "Writes"], ["tool", "Reads"], ["error", "Problems"], ["access", "Access"], ["connection", "Connections"], ["system", "System"]].forEach(function (f) {
+    [["all", "All"], ["write", "Writes"], ["tool", "Reads"], ["proposal", "Reviews"], ["error", "Problems"], ["access", "Access"], ["connection", "Connections"], ["system", "System"]].forEach(function (f) {
       var b = el("button", null, f[1]); b.setAttribute("aria-pressed", String(filter === f[0]));
       b.addEventListener("click", function () { filter = f[0]; renderActivity(state); });
       fl.appendChild(b);
@@ -493,12 +548,482 @@ namespace LacertMCP.Server.Web
       .forEach(function (p) { k.appendChild(el("div", null, p[0])); k.appendChild(el("div", null, p[1] || "")); });
   }
 
+  // ---- Proposals ------------------------------------------------------------
+  // The open proposal is re-rendered only when its id / version / status /
+  // update time changes (or after the operator's own action), so the 5 s
+  // refresh never wipes a note being typed. Typed notes live in prop.notes,
+  // keyed by proposal + input, and are put back on every render.
+  var activeTab = "overview";
+  var prop = { list: null, listError: null, openId: null, detail: null, renderedKey: null, notes: {}, confirm: false, busy: null, report: null, err: null };
+  var STATUS_LABEL = { Draft: "Draft (agent still working)", Submitted: "Waiting for review", Approved: "Approved, not committed", Rejected: "Rejected", ReturnedForChanges: "Returned for changes", Committing: "Writing to Lacerte", Committed: "Committed", PartiallyCommitted: "Partly committed", CommitFailed: "Commit failed" };
+  var STATUS_TONE = { Submitted: "info", Approved: "ok", Committed: "ok", ReturnedForChanges: "warn", PartiallyCommitted: "bad", CommitFailed: "bad", Committing: "info" };
+  var COMMIT_LABEL = { Running: "Was being written when the server stopped", Succeeded: "Written and verified", SucceededUnverified: "Written, not verified", Failed: "Not written", Uncertain: "May already be on the return", Skipped: "Skipped (the commit stopped earlier)" };
+  var COMMIT_TONE = { Succeeded: "t-ok", SucceededUnverified: "t-warn", Failed: "t-bad", Uncertain: "t-bad", Skipped: "t-warn", Running: "t-warn" };
+
+  function api(method, path, body) {
+    var opts = { method: method, cache: "no-store", headers: { "X-Lacerte-Admin": "1" } };
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        if (!r.ok) { var e = new Error(j.error || ("HTTP " + r.status)); e.data = j; throw e; }
+        return j;
+      });
+    });
+  }
+  function statusChip(st) { return el("span", "chip " + (STATUS_TONE[st] || ""), STATUS_LABEL[st] || st); }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : (many || one + "s")); }
+  function money(a) { return a == null ? "(no amount)" : Number(a).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }); }
+  function describeValue(v) {
+    if (v === null || v === undefined) return "(blank)";
+    if (typeof v === "string") return v === "" ? "(empty text)" : v;
+    return JSON.stringify(v);
+  }
+  function targetText(l) {
+    var t = l.target || {};
+    if (l.kind === "Field") {
+      return "Table " + t.table + " · field " + t.field + (t.subClientId != null ? " · sub-client " + t.subClientId : "") + (t.stateAbbrev ? " · state " + t.stateAbbrev : "");
+    }
+    var d = t.detail || {};
+    var parts = ["Series " + d.series, "Code " + d.code];
+    if (d.prefix) parts.push("Prefix " + d.prefix);
+    if (d.suffix) parts.push("Suffix " + d.suffix);
+    if (d.stateAbbrev) parts.push("State " + d.stateAbbrev);
+    if (d.cityAbbr) parts.push("City " + d.cityAbbr);
+    if (d.tsj) parts.push("TSJ " + d.tsj);
+    if (d.source) parts.push("Source flag " + d.source);
+    return "Detail row · " + parts.join(" · ");
+  }
+  function sourceText(s) {
+    if (!s) return "(none)";
+    var parts = [s.document || "(no document)"];
+    if (s.page != null) parts.push("page " + s.page);
+    if (s.location) parts.push(s.location);
+    return parts.join(", ");
+  }
+  function nk(key) { return (prop.openId || "") + "|" + key; }
+  function noteVal(key, fallback) { var v = prop.notes[nk(key)]; return v !== undefined ? v : (fallback || ""); }
+  function noteInput(key, placeholder, fallback) {
+    var k = nk(key);
+    var i = el("input"); i.type = "text"; i.placeholder = placeholder; i.maxLength = 2000;
+    i.value = noteVal(key, fallback); i.dataset.nk = k;
+    i.addEventListener("input", function () { prop.notes[k] = i.value; });
+    return i;
+  }
+  function metaRow(grid, label, value, cls) { grid.appendChild(el("div", null, label)); grid.appendChild(el("div", cls || null, value)); }
+
+  function refreshProposals() {
+    if (prop.openId) { if (!prop.busy) loadDetail(false); } else loadProposals();
+  }
+
+  function loadProposals() {
+    var q = [], st = $("propStatus").value, cl = $("propClient").value.trim();
+    if (st) q.push("status=" + encodeURIComponent(st));
+    if (cl) q.push("client=" + encodeURIComponent(cl));
+    return api("GET", "/api/proposals" + (q.length ? "?" + q.join("&") : ""))
+      .then(function (j) { prop.list = j; prop.listError = null; renderPropList(); })
+      .catch(function (e) { prop.listError = e.message; renderPropList(); });
+  }
+
+  function renderPropList() {
+    var tb = $("propRows"); clear(tb);
+    var msg = $("propListMsg"); clear(msg);
+    if (prop.listError) { msg.appendChild(el("div", "banner err", "Couldn't load proposals: " + prop.listError)); return; }
+    if (!prop.list) return;
+    $("propFolder").textContent = prop.list.folder || "";
+    var rows = prop.list.proposals || [];
+    if (!rows.length) {
+      var tr0 = el("tr"); var td0 = el("td", "empty", ($("propStatus").value || $("propClient").value.trim()) ? "No proposals match these filters." : "No proposals yet. When an agent submits one, it appears here.");
+      td0.colSpan = 8; tr0.appendChild(td0); tb.appendChild(tr0);
+    }
+    rows.forEach(function (it) {
+      var s = it.summary, st = it.state;
+      var tr = el("tr");
+      tr.appendChild(el("td", null, s.clientNumber));
+      var tc = el("td"); tc.appendChild(el("div", null, s.title)); tc.appendChild(el("div", "muted small", s.context.taxYear + " · module " + s.context.module)); tr.appendChild(tc);
+      var sc = el("td"); sc.appendChild(statusChip(s.status));
+      if (st) {
+        if (st.readyToApprove) sc.appendChild(el("div", "small t-ok", "Ready to approve"));
+        else if (st.readyToCommit) sc.appendChild(el("div", "small t-ok", "Ready to commit"));
+        if (st.uncertainLineIds && st.uncertainLineIds.length) sc.appendChild(el("div", "small t-bad", "Check " + plural(st.uncertainLineIds.length, "line") + " in Lacerte"));
+      }
+      tr.appendChild(sc);
+      tr.appendChild(el("td", null, "v" + s.version));
+      var lc = el("td");
+      lc.appendChild(el("div", null, plural(s.lineCount, "line")));
+      var bits = [s.approvedLineCount + " approved", s.rejectedLineCount + " rejected", s.pendingLineCount + " pending"];
+      if (s.invalidLineCount) bits.push(s.invalidLineCount + " failed dry run");
+      if (s.manualItemCount) bits.push(s.manualItemCount + " by hand");
+      if (s.questionCount) bits.push(plural(s.questionCount, "question"));
+      lc.appendChild(el("div", "muted small", bits.join(" · ")));
+      tr.appendChild(lc);
+      tr.appendChild(el("td", null, s.author));
+      tr.appendChild(el("td", null, ago(s.updatedAt)));
+      var td = el("td"); var b = el("button", s.status === "Submitted" ? "primary" : null, s.status === "Submitted" ? "Review" : "Open");
+      b.addEventListener("click", function () { openProposal(s.id); });
+      td.appendChild(b); tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+  }
+
+  function openProposal(id) {
+    prop.openId = id; prop.detail = null; prop.renderedKey = null; prop.confirm = false; prop.report = null; prop.err = null; prop.busy = null;
+    $("propListPanel").classList.add("hidden");
+    $("propDetail").classList.remove("hidden");
+    $("pdTitle").textContent = "Proposal";
+    var box = $("pdBody"); clear(box); box.appendChild(el("p", "muted", "Loading…"));
+    window.scrollTo(0, 0);
+    loadDetail(true);
+  }
+
+  function closeProposal() {
+    if (prop.busy === "commit") { flash("warn", "A commit is running. Wait for its result before leaving this proposal."); return; }
+    prop.openId = null; prop.detail = null; prop.renderedKey = null; prop.confirm = false; prop.report = null; prop.err = null;
+    $("propDetail").classList.add("hidden");
+    $("propListPanel").classList.remove("hidden");
+    loadProposals();
+  }
+
+  function loadDetail(force) {
+    var id = prop.openId;
+    if (!id) return Promise.resolve();
+    return api("GET", "/api/proposals/" + encodeURIComponent(id))
+      .then(function (j) { if (prop.openId === id) setDetail(j, force); })
+      .catch(function (e) {
+        if (prop.openId !== id) return;
+        prop.err = { text: "Couldn't load the proposal: " + e.message };
+        if (prop.detail) renderDetail();
+        else { var box = $("pdBody"); clear(box); box.appendChild(el("div", "banner err", prop.err.text)); }
+      });
+  }
+
+  function setDetail(view, force) {
+    var p = view.proposal;
+    var key = [p.id, p.version, p.status, p.updatedAt].join("|");
+    var changed = key !== prop.renderedKey;
+    prop.detail = view;
+    if (changed) prop.confirm = false;
+    if (changed || force) { prop.renderedKey = key; renderDetail(); }
+  }
+
+  // Runs one reviewer action; the proposal is re-rendered from the server's answer.
+  function act(action, body, okText, after) {
+    var id = prop.openId;
+    if (!id || prop.busy) return;
+    prop.busy = action; prop.err = null;
+    if (action === "commit") prop.confirm = false;
+    renderDetail();
+    api("POST", "/api/proposals/" + encodeURIComponent(id) + "/" + action, body)
+      .then(function (j) {
+        if (prop.openId !== id) return;
+        prop.busy = null;
+        if (j.report) prop.report = j.report;
+        if (after) after();
+        setDetail(j, true);
+        if (okText) flash("ok", okText);
+        load();
+      })
+      .catch(function (e) {
+        if (prop.openId !== id) return;
+        prop.busy = null;
+        prop.err = { text: e.message, blockers: e.data && e.data.blockers };
+        return loadDetail(true);
+      });
+  }
+
+  function errBanner(box) {
+    if (!prop.err) return;
+    var b = el("div", "banner err", prop.err.text);
+    if (prop.err.blockers && prop.err.blockers.length) {
+      var ul = el("ul", "blockers");
+      prop.err.blockers.forEach(function (x) { ul.appendChild(el("li", null, x)); });
+      b.appendChild(ul);
+    }
+    box.appendChild(b);
+  }
+
+  function renderDetail() {
+    var view = prop.detail;
+    if (!view) return;
+    // Keep the caret in a note box across the rebuild.
+    var a = document.activeElement, fk = a && a.dataset ? a.dataset.nk : null;
+    var ss = fk ? a.selectionStart : null, se = fk ? a.selectionEnd : null;
+    var p = view.proposal, st = view.state, box = $("pdBody");
+    clear(box);
+    $("pdTitle").textContent = p.title;
+
+    var hd = el("div", "kv");
+    function kv(k, v) { hd.appendChild(el("div", null, k)); var d = el("div"); if (v instanceof Node) d.appendChild(v); else d.textContent = v == null ? "" : String(v); hd.appendChild(d); }
+    kv("Client", p.clientNumber);
+    kv("Status", statusChip(p.status));
+    kv("Version", p.version + " (content " + String(st.contentHash || "").slice(0, 12) + ")");
+    kv("Return", p.context.taxYear + " · module " + p.context.module);
+    kv("Data folder", p.context.dataPath);
+    kv("Prepared by", p.author + " · created " + when(p.createdAt) + " · updated " + when(p.updatedAt));
+    if (p.notes) kv("Agent's notes", p.notes);
+    box.appendChild(hd);
+
+    if (p.approval) {
+      var ap = p.approval;
+      var t = "Approved by " + ap.by + " (" + ap.channel + ") on " + when(ap.at) + " for version " + ap.version + (ap.note ? ". Note: " + ap.note : ".");
+      var ab = el("div", "banner " + (st.approvalCurrent ? "ok" : "err"), st.approvalCurrent ? t : t + " OUT OF DATE: the proposal changed after this approval, so it can't be committed until it is approved again.");
+      ab.style.marginTop = "12px"; box.appendChild(ab);
+    }
+    if (p.lastReview && (p.status === "ReturnedForChanges" || p.status === "Rejected")) {
+      var lr = p.lastReview;
+      box.appendChild(el("div", "banner warn", (lr.action === "rejected" ? "Rejected" : "Returned for changes") + " by " + lr.by + " on " + when(lr.at) + (lr.note ? ": " + lr.note : "")));
+    }
+    errBanner(box);
+    var uncertain = st.uncertainLineIds || [];
+    if (uncertain.length) {
+      box.appendChild(el("div", "banner err", "Check " + plural(uncertain.length, "line") + " in Lacerte: " + uncertain.join(", ") + ". An error happened while each was being written, so the row may or may not be on the return. Open the client in Lacerte, look for the row, then press It's in the return or It's missing on the line. These lines are never written again automatically."));
+    }
+
+    // Lines
+    box.appendChild(el("h3", null, "Lines to write (" + p.lines.length + ")"));
+    if (!p.lines.length) box.appendChild(el("p", "empty", "No lines."));
+    var reviewing = p.status === "Submitted";
+    p.lines.forEach(function (l) { box.appendChild(lineCard(p, st, l, reviewing, uncertain.indexOf(l.lineId) >= 0)); });
+
+    // Manual items
+    box.appendChild(el("h3", null, "Enter these by hand in Lacerte (" + p.manualItems.length + ")"));
+    if (!p.manualItems.length) box.appendChild(el("p", "empty", "None."));
+    else box.appendChild(el("p", "muted small", "The agent couldn't map these to a field it may write. The commit does not enter them."));
+    p.manualItems.forEach(function (m) {
+      var c = el("div", "pline");
+      var h = el("div", "lh"); h.appendChild(el("span", "lid", m.itemId)); h.appendChild(el("span", null, m.description)); c.appendChild(h);
+      if (m.amount != null) c.appendChild(el("div", "val", money(m.amount)));
+      var g = el("div", "meta");
+      metaRow(g, "Why by hand", m.reason);
+      if (m.source) { metaRow(g, "Source", sourceText(m.source)); if (m.source.excerpt) metaRow(g, "Excerpt", "“" + m.source.excerpt + "”", "excerpt"); }
+      c.appendChild(g); box.appendChild(c);
+    });
+
+    // Questions
+    box.appendChild(el("h3", null, "Questions from the agent (" + p.questions.length + ")"));
+    if (!p.questions.length) box.appendChild(el("p", "empty", "None."));
+    p.questions.forEach(function (q) {
+      var c = el("div", "pline");
+      var h = el("div", "lh"); h.appendChild(el("span", "lid", q.questionId)); h.appendChild(el("span", null, q.text)); c.appendChild(h);
+      if (q.lineIds && q.lineIds.length) c.appendChild(el("div", "muted small", "About " + q.lineIds.join(", ")));
+      box.appendChild(c);
+    });
+
+    box.appendChild(actions(p, st));
+    if (prop.report && prop.report.proposalId === p.id) box.appendChild(reportView(prop.report));
+
+    var hist = el("details"); hist.appendChild(el("summary", null, "History (" + p.history.length + ")"));
+    p.history.slice().reverse().forEach(function (e) {
+      hist.appendChild(el("div", "small", when(e.at) + " · " + e.action + " · " + e.by + " (" + e.channel + ") · v" + e.version + (e.note ? " · " + e.note : "")));
+    });
+    box.appendChild(hist);
+
+    if (fk) {
+      var inputs = box.querySelectorAll("input");
+      for (var i = 0; i < inputs.length; i++) {
+        if (inputs[i].dataset.nk === fk) { inputs[i].focus(); try { inputs[i].setSelectionRange(ss, se); } catch (x) { } break; }
+      }
+    }
+  }
+
+  function lineCard(p, st, l, reviewing, isUncertain) {
+    var c = el("div", "pline dec-" + l.reviewerDecision + (l.preview.ok ? "" : " invalid"));
+    var h = el("div", "lh");
+    h.appendChild(el("span", "lid", l.lineId));
+    h.appendChild(el("span", "chip", l.kind === "Field" ? "Field" : "Detail row"));
+    h.appendChild(el("span", "chip " + (l.reviewerDecision === "Approved" ? "ok" : l.reviewerDecision === "Rejected" ? "bad" : "warn"), l.reviewerDecision === "Pending" ? "Not decided" : l.reviewerDecision));
+    if (l.confidence === "Low") h.appendChild(el("span", "chip bad", "Low confidence"));
+    if (!l.preview.ok) h.appendChild(el("span", "chip bad", "Dry run failed: can't be approved"));
+    c.appendChild(h);
+    c.appendChild(el("div", "tgt", targetText(l)));
+    if (l.kind === "Field") c.appendChild(el("div", "val", describeValue(l.value)));
+    else { var d = (l.target && l.target.detail) || {}; c.appendChild(el("div", "val", money(d.amount) + (d.description ? " · " + d.description : ""))); }
+
+    var g = el("div", "meta");
+    metaRow(g, "Source", sourceText(l.source));
+    if (l.source && l.source.excerpt) metaRow(g, "Excerpt", "“" + l.source.excerpt + "”", "excerpt");
+    if (l.reasoning) metaRow(g, "Reasoning", l.reasoning);
+    metaRow(g, "Confidence", l.confidence === "Low" ? "Low: check the source carefully" : l.confidence, l.confidence === "Low" ? "t-bad" : null);
+    if (l.dictionaryId) metaRow(g, "Dictionary", l.dictionaryId);
+    var pv = l.preview || {};
+    var pvMsg = pv.message ? String(pv.message).replace(/[.\s]+$/, "") : "";
+    metaRow(g, "Dry run", pv.ok ? "Passed" + (pvMsg ? ": " + pvMsg : "") : "FAILED" + (pv.statusName ? " (" + pv.statusName + ")" : "") + (pvMsg ? ": " + pvMsg : "") + ". Reject it or return the proposal so the agent fixes it.", pv.ok ? "t-ok" : "t-bad");
+    (l.warnings || []).forEach(function (w) { metaRow(g, "Warning", w, "t-warn"); });
+    if (l.reviewerNote) metaRow(g, "Your note", l.reviewerNote);
+    if (l.commit) {
+      var cr = l.commit;
+      metaRow(g, "Commit", (COMMIT_LABEL[cr.status] || cr.status)
+        + (cr.status === "SucceededUnverified" ? ": accepted but not confirmed by a read-back; check it in Lacerte" : "")
+        + (cr.statusName ? " · " + cr.statusName : "") + (cr.note ? " · " + cr.note : ""), COMMIT_TONE[cr.status] || null);
+    }
+    c.appendChild(g);
+
+    if (reviewing) {
+      var ctrl = el("div", "ctrl");
+      ctrl.appendChild(noteInput("line:" + l.lineId, "Note on this line (optional)", l.reviewerNote));
+      var decide = function (dec) {
+        act("line", { lineId: l.lineId, decision: dec, note: noteVal("line:" + l.lineId, l.reviewerNote), expectedVersion: p.version });
+      };
+      var ab = el("button", "primary", "Approve");
+      ab.disabled = !!prop.busy || !l.preview.ok || l.reviewerDecision === "Approved";
+      if (!l.preview.ok) ab.title = "This line failed its dry run and can't be approved.";
+      ab.addEventListener("click", function () { decide("approved"); });
+      var rb = el("button", "danger", "Reject");
+      rb.disabled = !!prop.busy || l.reviewerDecision === "Rejected";
+      rb.addEventListener("click", function () { decide("rejected"); });
+      ctrl.appendChild(ab); ctrl.appendChild(rb);
+      if (l.reviewerDecision !== "Pending") {
+        var ub = el("button", null, "Undo");
+        ub.disabled = !!prop.busy;
+        ub.addEventListener("click", function () { decide("pending"); });
+        ctrl.appendChild(ub);
+      }
+      c.appendChild(ctrl);
+    }
+
+    if (isUncertain) {
+      var rz = el("div", "confirm");
+      var dd = (l.target && l.target.detail) || {};
+      rz.appendChild(el("p", null, "This row may already be on the return. In Lacerte, open client " + p.clientNumber + " and look for: " + targetText(l) + ", amount " + money(dd.amount) + (dd.description ? ", “" + dd.description + "”" : "") + ". Then say what you found."));
+      rz.appendChild(el("p", "small", "It's in the return: marks the line written; it is not written again. It's missing: the next commit writes it once."));
+      var rctl = el("div", "ctrl");
+      rctl.appendChild(noteInput("resolve:" + l.lineId, "What you checked (optional)"));
+      var yes = el("button", null, "It's in the return");
+      var no = el("button", "danger", "It's missing");
+      yes.disabled = no.disabled = !!prop.busy;
+      var resolve = function (inReturn) {
+        act("resolve", { lineId: l.lineId, rowIsInReturn: inReturn, note: noteVal("resolve:" + l.lineId) },
+          l.lineId + (inReturn ? " marked as in the return." : " marked as missing; the next commit writes it."),
+          function () { delete prop.notes[nk("resolve:" + l.lineId)]; });
+      };
+      yes.addEventListener("click", function () { resolve(true); });
+      no.addEventListener("click", function () { resolve(false); });
+      rctl.appendChild(yes); rctl.appendChild(no); rz.appendChild(rctl);
+      c.appendChild(rz);
+    }
+    return c;
+  }
+
+  function actions(p, st) {
+    var box = el("div", "pact");
+    box.appendChild(el("h3", null, "Decision"));
+    if (prop.busy) box.appendChild(el("div", "banner info", prop.busy === "commit" ? "Writing to Lacerte… keep this page open until the result appears." : "Saving…"));
+    var blockersList = function (title) {
+      if (!st.blockers || !st.blockers.length) return;
+      box.appendChild(el("div", "small muted", title));
+      var ul = el("ul", "blockers small");
+      st.blockers.forEach(function (b) { ul.appendChild(el("li", null, b)); });
+      box.appendChild(ul);
+    };
+
+    if (p.status === "Draft") box.appendChild(el("div", "banner info", "The agent is still preparing this proposal. You can review it once it is submitted."));
+    if (p.status === "Rejected") box.appendChild(el("p", "muted", "Rejected. Nothing from it is written; the agent must start a new proposal."));
+    if (p.status === "Committed") box.appendChild(el("div", "banner ok", "Committed: every approved line is written. Close and reopen the client in Lacerte to see the changes."));
+    if (p.status === "Committing") box.appendChild(el("div", "banner info", "A commit is running."));
+
+    if (p.status === "Submitted") {
+      box.appendChild(el("p", null, st.approvedLineCount + " approved · " + st.rejectedLineCount + " rejected · " + st.pendingLineCount + " not decided" + (st.invalidLineCount ? " · " + st.invalidLineCount + " failed dry run" : "")));
+      var r1 = el("div", "ctrl");
+      r1.appendChild(noteInput("approve", "Note for the approval record (optional)"));
+      var apb = el("button", "primary", "Approve proposal (version " + p.version + ")");
+      apb.disabled = !!prop.busy || !st.readyToApprove;
+      apb.addEventListener("click", function () {
+        act("approve", { expectedVersion: p.version, note: noteVal("approve") }, "Approved version " + p.version + ". Commit it when you're ready.",
+          function () { delete prop.notes[nk("approve")]; });
+      });
+      r1.appendChild(apb); box.appendChild(r1);
+      if (!st.readyToApprove) blockersList("Can't approve yet:");
+    }
+
+    var canReturn = p.status === "Submitted" || p.status === "Approved";
+    var canReject = canReturn || p.status === "ReturnedForChanges";
+    if (canReject) {
+      var r2 = el("div", "ctrl");
+      r2.appendChild(noteInput("review", "Note to the agent: what to change, or why it's rejected (required)"));
+      var send = function (action, done) {
+        var note = noteVal("review").trim();
+        if (!note) { prop.err = { text: "Write a note first: the agent needs to know what to change (or why the proposal is rejected)." }; renderDetail(); return; }
+        act(action, { note: note }, done, function () { delete prop.notes[nk("review")]; });
+      };
+      if (canReturn) {
+        var rtb = el("button", null, "Return for changes");
+        rtb.disabled = !!prop.busy;
+        rtb.addEventListener("click", function () { send("return", "Returned to the agent with your note."); });
+        r2.appendChild(rtb);
+      }
+      var rjb = el("button", "danger", "Reject proposal");
+      rjb.disabled = !!prop.busy;
+      rjb.addEventListener("click", function () { send("reject", "Proposal rejected. Nothing was written."); });
+      r2.appendChild(rjb);
+      box.appendChild(r2);
+    }
+
+    if (p.status === "Approved" || p.status === "PartiallyCommitted" || p.status === "CommitFailed") {
+      box.appendChild(el("h3", null, "Write to Lacerte"));
+      box.appendChild(el("p", "small", "Writes the approved lines still to do (" + st.unfinishedApprovedLineCount + ") to client " + p.clientNumber + " in Lacerte. Field values are read back to verify them. Rejected lines are never written."));
+      var cb = el("button", "primary", "Commit to Lacerte…");
+      cb.disabled = !!prop.busy || !st.readyToCommit || prop.confirm;
+      cb.addEventListener("click", function () { prop.confirm = true; prop.err = null; renderDetail(); });
+      box.appendChild(cb);
+      if (!st.readyToCommit) blockersList("Can't commit:");
+      if (prop.confirm && st.readyToCommit) {
+        var cf = el("div", "confirm");
+        cf.appendChild(el("p", null, "Write " + plural(st.unfinishedApprovedLineCount, "approved line") + " to client " + p.clientNumber + "'s " + p.context.taxYear + " return (module " + p.context.module + ", " + p.context.dataPath + ") now?"));
+        cf.appendChild(el("p", "small", "This changes the real return. If the client is open in Lacerte, close it first."));
+        var yes = el("button", "danger", "Yes, write to the return");
+        yes.disabled = !!prop.busy;
+        yes.addEventListener("click", function () { act("commit", { expectedVersion: p.version }, "Commit finished. See the result below."); });
+        var no = el("button", null, "Cancel");
+        no.addEventListener("click", function () { prop.confirm = false; renderDetail(); });
+        var row = el("div", "ctrl"); row.appendChild(yes); row.appendChild(no); cf.appendChild(row);
+        box.appendChild(cf);
+      }
+    }
+    return box;
+  }
+
+  function reportView(r) {
+    var box = el("div");
+    box.appendChild(el("h3", null, "Commit result"));
+    var text = r.status === "Committed"
+      ? "Every approved line is written. Close and reopen the client in Lacerte to see the changes. Lines marked not verified were accepted but not read back: check them in Lacerte."
+      : r.status === "PartiallyCommitted"
+        ? "Some lines are written. Fix the cause shown on each line that wasn't, then commit again: only unfinished lines run. Lines that may already be on the return must be checked and resolved first."
+        : r.status === "CommitFailed" ? "Nothing was written. Fix the cause shown on each line (for example, close the client in Lacerte) and commit again."
+        : "The commit finished with status " + r.status + ".";
+    box.appendChild(el("div", "banner " + (r.status === "Committed" ? "ok" : r.status === "PartiallyCommitted" ? "warn" : "err"), text));
+    box.appendChild(el("p", "small", "This commit ran " + plural(r.ranCount, "line") + ": " + r.succeededCount + " written and verified, " + r.succeededUnverifiedCount + " written but not verified, " + r.failedCount + " not written, " + r.uncertainCount + " may be on the return, " + r.skippedCount + " skipped. " + r.alreadyDoneCount + " were written by an earlier commit."));
+    var tbl = el("table", "wide"); var th = el("thead"); var hr = el("tr");
+    ["Line", "Kind", "This commit", "Result", "Details"].forEach(function (x) { hr.appendChild(el("th", null, x)); });
+    th.appendChild(hr); tbl.appendChild(th);
+    var tb = el("tbody");
+    (r.lines || []).forEach(function (x) {
+      var res = x.result || {};
+      var tr = el("tr");
+      tr.appendChild(el("td", null, x.lineId));
+      tr.appendChild(el("td", null, x.kind === "Field" ? "Field" : "Detail row"));
+      tr.appendChild(el("td", null, x.ran ? "Ran" : "Not run"));
+      tr.appendChild(el("td", COMMIT_TONE[res.status] || null, (COMMIT_LABEL[res.status] || res.status || "") + (res.verified === true ? " (read back)" : "")));
+      tr.appendChild(el("td", "small", (res.statusName ? res.statusName + (res.note ? ": " : "") : "") + (res.note || "")));
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    var sc = el("div", "scroll"); sc.appendChild(tbl); box.appendChild(sc);
+    return box;
+  }
+
   document.querySelectorAll("nav.tabs button").forEach(function (b) {
     b.addEventListener("click", function () {
+      activeTab = b.dataset.tab;
       document.querySelectorAll("nav.tabs button").forEach(function (x) { x.setAttribute("aria-selected", String(x === b)); });
       document.querySelectorAll("section.tab").forEach(function (x) { x.classList.toggle("active", x.id === "tab-" + b.dataset.tab); });
+      if (activeTab === "proposals") refreshProposals();
     });
   });
+  $("propRefresh").addEventListener("click", function () { loadProposals(); });
+  $("propStatus").addEventListener("change", function () { loadProposals(); });
+  $("propClient").addEventListener("change", function () { loadProposals(); });
+  $("propClient").addEventListener("keydown", function (e) { if (e.key === "Enter") loadProposals(); });
+  $("pdClose").addEventListener("click", closeProposal);
   $("btnSignin").addEventListener("click", function () {
     post("/api/signin").then(function (r) { flash("info", r.message); }).catch(function (e) { flash("err", e.message); });
   });
@@ -506,7 +1031,11 @@ namespace LacertMCP.Server.Web
     post("/api/reconnect").then(function (r) { flash(r.ok ? "ok" : "err", r.message || (r.ok ? "Connected." : "Failed.")); load(); }).catch(function (e) { flash("err", e.message); });
   });
   load();
-  setInterval(function () { if (!document.hidden) load(); }, 5000);
+  setInterval(function () {
+    if (document.hidden) return;
+    load();
+    if (activeTab === "proposals") refreshProposals();
+  }, 5000);
 })();
 </script>
 </body>

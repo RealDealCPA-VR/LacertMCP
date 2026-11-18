@@ -37,7 +37,7 @@ namespace LacertMCP.Server.Web
     ///   <item>Anything else: refused.</item>
     /// </list>
     /// </summary>
-    public sealed class HttpServer : IHostedService, IDisposable
+    public sealed partial class HttpServer : IHostedService, IDisposable
     {
         public const int DefaultPort = 8767;
         private const long MaxBodyBytes = 4 * 1024 * 1024;
@@ -101,6 +101,13 @@ namespace LacertMCP.Server.Web
             _sessions = sessions;
             _port = ResolvePort();
         }
+
+        /// <summary>
+        /// Test seam: maps the socket's remote address before the caller is
+        /// identified, so a loopback test can stand in for a tailnet device
+        /// (whois then runs against the fake Tailscale CLI). Never set outside tests.
+        /// </summary>
+        internal Func<IPAddress, IPAddress>? RemoteAddressForTests { get; set; }
 
         /// <summary>Test seam: the port to listen on (set before <see cref="StartAsync"/>).</summary>
         internal int Port
@@ -267,6 +274,7 @@ namespace LacertMCP.Server.Web
                 }
                 var path = req.Url?.AbsolutePath ?? "/";
                 var remote = req.RemoteEndPoint?.Address ?? IPAddress.None;
+                if (RemoteAddressForTests != null) remote = RemoteAddressForTests(remote);
 
                 if (IPAddress.IsLoopback(remote) && IsProxied(req.Headers))
                 {
@@ -334,6 +342,19 @@ namespace LacertMCP.Server.Web
             }
         }
 
+        /// <summary>
+        /// The request came from the control page itself: it carries the
+        /// X-Lacerte-Admin header (a cross-site page can't send a custom header
+        /// without a CORS preflight, which this server never answers) and, when the
+        /// browser sent an Origin, it is this server's own origin.
+        /// </summary>
+        private static bool IsFromControlPage(HttpListenerRequest req)
+        {
+            var origin = req.Headers["Origin"];
+            return req.Headers[AdminHeader] == "1"
+                   && (string.IsNullOrEmpty(origin) || origin == "http://" + req.Headers["Host"]);
+        }
+
         internal static bool IsProxied(System.Collections.Specialized.NameValueCollection headers)
             => ProxyHeaders.Any(h => headers[h] != null);
 
@@ -373,7 +394,7 @@ namespace LacertMCP.Server.Web
             // counts between untagged nodes: if this PC is tagged, no remote device
             // is the owner (this computer itself still is).
             var isOwner = TailnetDevice.SameOwner(_self, who.Device);
-            return (new Caller(false, who.Device.StableId, who.Device.Name, isOwner, remote.ToString()), string.Empty, 0);
+            return (new Caller(false, who.Device.StableId, who.Device.Name, isOwner, remote.ToString(), who.Device.OwnerLogin), string.Empty, 0);
         }
 
         /// <summary>When each tailnet device last ran the workstation setup (shown on the Access tab until it has access).</summary>
@@ -591,6 +612,11 @@ namespace LacertMCP.Server.Web
         {
             var req = ctx.Request;
             var res = ctx.Response;
+            if (IsProposalPath(path))
+            {
+                await HandleProposalApiAsync(ctx, caller, path).ConfigureAwait(false);
+                return;
+            }
             if (req.HttpMethod == "GET" && path == "/api/state")
             {
                 await SendJson(res, 200, await StateAsync().ConfigureAwait(false)).ConfigureAwait(false);
@@ -602,8 +628,7 @@ namespace LacertMCP.Server.Web
                 return;
             }
             // Writes: same-origin page only (custom header can't be sent cross-site without a preflight we never answer).
-            var origin = req.Headers["Origin"];
-            if (req.Headers[AdminHeader] != "1" || (!string.IsNullOrEmpty(origin) && origin != "http://" + req.Headers["Host"]))
+            if (!IsFromControlPage(req))
             {
                 await SendJson(res, 403, new { error = "Refused: this request did not come from the control page." }).ConfigureAwait(false);
                 return;
@@ -989,6 +1014,7 @@ namespace LacertMCP.Server.Web
                 }),
                 // Grants for devices no longer on the tailnet, so they can still be removed.
                 orphanGrants = grants.Where(g => peers.All(p => p.StableId != g.StableId)).Select(g => new { g.StableId, g.Name, g.Level }),
+                proposals = ProposalCounts(),
                 dataRoot = DataRoot(),
                 dataFolders = Tools.SessionTools.DiscoverDatapaths(DataRoot()),
                 activity = _activity.Recent(300),
