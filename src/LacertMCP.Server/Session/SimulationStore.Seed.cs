@@ -10,10 +10,11 @@ namespace LacertMCP.Server.Session
     public sealed partial class SimulationStore
     {
         /// <summary>
-        /// Populates the in-memory store with the 8-client fixture from
+        /// Populates the in-memory store with the 12-client fixture from
         /// <c>docs/research/agents/06-simulation-mode.md</c> §2 — SMIT, JONE,
         /// REJE on TY20 IData; BROW, PEND on TY24 IData; ACME, WIDG on TY24
-        /// CData; PART on TY24 PData. Zero file I/O.
+        /// CData; PART on TY24 PData — plus the FP-5 additions ORCH, HOLW on
+        /// TY24 SData and MAPL, BIRC on TY24 FData. Zero file I/O.
         /// </summary>
         private void Seed()
         {
@@ -21,6 +22,8 @@ namespace LacertMCP.Server.Session
             SeedIndividuals2024();
             SeedCorporates2024();
             SeedPartnership2024();
+            SeedSCorporations2024();
+            SeedFiduciaries2024();
         }
 
         // ----- TY20 individual -----------------------------------------
@@ -61,6 +64,26 @@ namespace LacertMCP.Server.Session
             store.NextClientNumber = 1002; // next after the seeded 1001
 
             SeedPartnershipClient(store, SeedData.PART, SeedData.PartDetails());
+        }
+
+        // ----- TY24 S-Corporation (FP-5) -------------------------------
+        private void SeedSCorporations2024()
+        {
+            var store = GetOrAddModule(SeedData.DataPathSData2024, 2024, 'S');
+            store.NextClientNumber = 1003; // next after the seeded 1001-1002
+
+            SeedEntityClient(store, SeedData.ORCH, SeedData.OrchDetails());
+            SeedEntityClient(store, SeedData.HOLW, SeedData.HolwDetails());
+        }
+
+        // ----- TY24 Fiduciary (FP-5) -----------------------------------
+        private void SeedFiduciaries2024()
+        {
+            var store = GetOrAddModule(SeedData.DataPathFData2024, 2024, 'F');
+            store.NextClientNumber = 1003; // next after the seeded 1001-1002
+
+            SeedEntityClient(store, SeedData.MAPL, SeedData.MaplDetails());
+            SeedEntityClient(store, SeedData.BIRC, SeedData.BircDetails());
         }
 
         // ---------------------------------------------------------------
@@ -228,6 +251,75 @@ namespace LacertMCP.Server.Session
                         ["C2_1"] = p.SubId,
                         ["C2_2"] = p.Name,
                         ["C2_3"] = p.SharePct,
+                    },
+                };
+            }
+
+            store.Details[c.ClientNumber] = details;
+        }
+
+        /// <summary>
+        /// FP-5 — shared shape for the S-Corporation and Fiduciary seeds.
+        /// Same table layout as <see cref="SeedPartnershipClient"/> (DATA1
+        /// entity name in C1_1 / email in C1_3, one DATA5 status row, one
+        /// DATA7 main-form row in C7_1 — the column the pre-filing
+        /// main-form rule reads, DATA2 owner rows keyed by SubId) plus the
+        /// DATA3 state rows from <see cref="SeedCorpClient"/>. Zero owners
+        /// is a legitimate shape (the deliberately incomplete fixtures).
+        /// </summary>
+        private void SeedEntityClient(ModuleStore store, EntityClient c, List<DetailRow> details)
+        {
+            store.Clients[c.ClientNumber] = new DbfRow(c.ClientNumber)
+            {
+                Fields =
+                {
+                    ["C1_0"] = c.ClientNumber,
+                    ["C1_1"] = c.EntityName,
+                    ["C1_3"] = c.Email,
+                    ["ClientID"] = c.ClientID,
+                },
+            };
+
+            store.Statuses[c.ClientNumber] = new DbfRow(c.ClientNumber)
+            {
+                Fields = { ["C5_0"] = c.ClientNumber, ["C5_1"] = "InProgress" },
+            };
+
+            store.Forms[c.ClientNumber] = new List<DbfRow>
+            {
+                new DbfRow(c.ClientNumber)
+                {
+                    Fields = { ["C7_0"] = c.ClientNumber, ["C7_1"] = c.MainForm },
+                },
+            };
+
+            // DATA3 — state abbreviation in the global group column C3_G1
+            // (R7-L1; see SeedCorpClient).
+            foreach (var state in c.States)
+            {
+                store.States[(c.ClientNumber, state)] = new DbfRow(
+                    ClientNumber: c.ClientNumber, StateAbbrev: state)
+                {
+                    Fields =
+                    {
+                        ["C3_0"] = c.ClientNumber,
+                        ["C3_G1"] = state,
+                    },
+                };
+            }
+
+            // DATA2 — one SubClient row per shareholder (S) / beneficiary (F).
+            foreach (var o in c.Owners)
+            {
+                store.SubClients[(c.ClientNumber, o.SubId)] = new DbfRow(
+                    ClientNumber: c.ClientNumber, SubClientID: o.SubId)
+                {
+                    Fields =
+                    {
+                        ["C2_0"] = c.ClientNumber,
+                        ["C2_1"] = o.SubId,
+                        ["C2_2"] = o.Name,
+                        ["C2_3"] = o.SharePct,
                     },
                 };
             }

@@ -246,7 +246,7 @@ namespace LacertMCP.Server.Errors
                 "ContextNotSet",
                 Severity.Error,
                 "A read/write tool was called before lacerte_set_context provided Datapath + TaxYear + ReturnType.",
-                "First call `lacerte_list_datapaths` to discover available (path, year, module) triples, then `lacerte_list_modules` for the module catalog (I/C/P/S/F/R/T/N/B), then `lacerte_set_context(dataPath, taxYear, module)` with the chosen triple. In simulation mode the canonical seeded paths are `C:\\Lacerte\\20Tax\\IData` (TY20 individual), `C:\\Lacerte\\24Tax\\IData` (TY24 individual), `C:\\Lacerte\\24Tax\\CData` (TY24 corp), and `C:\\Lacerte\\24Tax\\PData` (TY24 partnership)."),
+                "First call `lacerte_list_datapaths` to discover available (path, year, module) triples, then `lacerte_list_modules` for the module catalog (I/C/P/S/F/R/T/N/B), then `lacerte_set_context(dataPath, taxYear, module)` with the chosen triple. In simulation mode the canonical seeded paths are `C:\\Lacerte\\20Tax\\IData` (TY20 individual), `C:\\Lacerte\\24Tax\\IData` (TY24 individual), `C:\\Lacerte\\24Tax\\CData` (TY24 corp), `C:\\Lacerte\\24Tax\\PData` (TY24 partnership), `C:\\Lacerte\\24Tax\\SData` (TY24 S-corp), and `C:\\Lacerte\\24Tax\\FData` (TY24 fiduciary)."),
 
             [UnknownFieldAccess] = new StatusInfo(
                 "UnknownFieldAccess",
