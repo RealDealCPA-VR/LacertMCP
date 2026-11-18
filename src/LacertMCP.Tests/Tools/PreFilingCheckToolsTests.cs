@@ -65,15 +65,21 @@ namespace LacertMCP.Tests.Tools
             Assert.True(result.GetProperty("checkedRules").GetArrayLength() >= 6);
         }
 
-        [Fact]
-        public async Task PreFilingCheck_UnsupportedModule_ReturnsUnsupportedWithSupportedSetHint()
+        [Theory]
+        [InlineData('R', "RData")]
+        [InlineData('T', "TData")]
+        [InlineData('N', "NData")]
+        [InlineData('B', "BData")]
+        public async Task PreFilingCheck_UnsupportedModule_ReturnsUnsupportedWithSupportedSetHint(
+            char module, string folder)
         {
-            // R6 module expansion — C/P/S now run the catalog, so the
-            // unsupported-module envelope is exercised via Fiduciary ('F').
-            // The module gate fires BEFORE the existence check (R6-13 gate
-            // order), so an empty FData store still returns the envelope.
+            // R6 module expansion — C/P/S run the catalog, and FP-4 added
+            // Fiduciary ('F'), so the unsupported-module envelope is now
+            // exercised via R/T/N/B (previously via F). The module gate
+            // fires BEFORE the existence check (R6-13 gate order), so an
+            // empty, never-seeded store still returns the envelope.
             var mgr = ToolTestHelpers.NewSimManager();
-            mgr.SetContext(@"C:\Lacerte\24Tax\FData", 2024, 'F');
+            mgr.SetContext(@"C:\Lacerte\24Tax\" + folder, 2024, module);
             var tools = new PreFilingCheckTools(mgr);
             var root = ToolTestHelpers.Parse(
                 await tools.LacertePreFilingCheck("1001"));
@@ -82,18 +88,181 @@ namespace LacertMCP.Tests.Tools
             Assert.Equal("unsupported-module", result.GetProperty("readiness").GetString());
             Assert.False(result.GetProperty("passed").GetBoolean());
             // R6-18 — single-char module code on the wire.
-            Assert.Equal("F", result.GetProperty("module").GetString());
+            Assert.Equal(module.ToString(), result.GetProperty("module").GetString());
             // The hint + skip reason must advertise the full supported set.
             var hint = result.GetProperty("hint").GetString();
             Assert.NotNull(hint);
-            Assert.Contains("I", hint);
-            Assert.Contains("P", hint);
-            Assert.Contains("C", hint);
-            Assert.Contains("S", hint);
+            Assert.Contains("I, P, C, S, and F", hint);
             var reason = result.GetProperty("skippedRules")[0].GetProperty("reason").GetString();
             Assert.NotNull(reason);
             Assert.Contains("Partnership", reason);
             Assert.Contains("S-Corporation", reason);
+            Assert.Contains("Fiduciary", reason);
+        }
+
+        // ----------------------------------------------------------------
+        // FP-4 — S-Corporation (seeded ORCH / HOLW) and Fiduciary (seeded
+        // MAPL / BIRC) catalogs.
+        // ----------------------------------------------------------------
+
+        [Fact]
+        public async Task PreFilingCheck_SCorp_OrchWithShareholders_IsReady()
+        {
+            var result = await RunCheck(SeedData.DataPathSData2024, 'S', SeedData.ORCH.ClientNumber);
+            Assert.Equal("S", result.GetProperty("module").GetString());
+            Assert.Equal("ready", result.GetProperty("readiness").GetString());
+            Assert.True(result.GetProperty("passed").GetBoolean());
+            Assert.Equal(0, result.GetProperty("blockers").GetArrayLength());
+            Assert.Equal(0, result.GetProperty("warnings").GetArrayLength());
+
+            Assert.Equal(
+                new[] { "required-name", "required-email", "forms-at-least-one", "forms-has-1120s", "status-rows-present", "shareholders-present" },
+                ToStringList(result.GetProperty("checkedRules")));
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_SCorp_HolwWithoutShareholders_IsBlocked()
+        {
+            var result = await RunCheck(SeedData.DataPathSData2024, 'S', SeedData.HOLW.ClientNumber);
+            Assert.Equal("blocked", result.GetProperty("readiness").GetString());
+            Assert.False(result.GetProperty("passed").GetBoolean());
+            // The only finding is the missing shareholder roster.
+            Assert.Equal(new[] { "shareholders-present" }, RuleIds(result.GetProperty("blockers")));
+            Assert.Equal(0, result.GetProperty("warnings").GetArrayLength());
+            var blocker = result.GetProperty("blockers")[0];
+            Assert.Equal("DATA2", blocker.GetProperty("field").GetString());
+            Assert.Contains("1120-S", blocker.GetProperty("message").GetString());
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_Fiduciary_MaplWithBeneficiaries_IsReady()
+        {
+            var result = await RunCheck(SeedData.DataPathFData2024, 'F', SeedData.MAPL.ClientNumber);
+            Assert.Equal("F", result.GetProperty("module").GetString());
+            Assert.Equal("ready", result.GetProperty("readiness").GetString());
+            Assert.True(result.GetProperty("passed").GetBoolean());
+
+            Assert.Equal(
+                new[] { "required-name", "required-email", "forms-at-least-one", "forms-has-1041", "status-rows-present", "beneficiaries-present" },
+                ToStringList(result.GetProperty("checkedRules")));
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_Fiduciary_BircWithoutBeneficiaries_WarnsNotBlocks()
+        {
+            // 0 beneficiaries is a WARNING (grantor trusts / estates with no
+            // distributions can legitimately have none), never a blocker.
+            var result = await RunCheck(SeedData.DataPathFData2024, 'F', SeedData.BIRC.ClientNumber);
+            Assert.Equal("warn", result.GetProperty("readiness").GetString());
+            Assert.False(result.GetProperty("passed").GetBoolean());
+            Assert.Equal(0, result.GetProperty("blockers").GetArrayLength());
+            Assert.Equal(new[] { "beneficiaries-present" }, RuleIds(result.GetProperty("warnings")));
+            var message = result.GetProperty("warnings")[0].GetProperty("message").GetString();
+            Assert.Contains("grantor trust", message);
+            Assert.Contains("Schedule K-1", message);
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_Fiduciary_BircStrict_PromotesBeneficiaryWarningToBlocker()
+        {
+            var result = await RunCheck(SeedData.DataPathFData2024, 'F', SeedData.BIRC.ClientNumber, "strict");
+            Assert.Equal("blocked", result.GetProperty("readiness").GetString());
+            Assert.Equal(0, result.GetProperty("warnings").GetArrayLength());
+            var blocker = result.GetProperty("blockers")[0];
+            Assert.Equal("beneficiaries-present", blocker.GetProperty("ruleId").GetString());
+            Assert.True(blocker.GetProperty("promoted").GetBoolean());
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_Fiduciary_FreshClient_ReportsMissing1041AndWarns()
+        {
+            // A client minted through CreateClient has DATA1 only — the 1041
+            // main-form rule must block, the missing status row and missing
+            // beneficiaries warn.
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(SeedData.DataPathFData2024, 2024, 'F');
+            var created = await mgr.CreateClient(new CreateClientArgs(
+                "ASPN", "1041",
+                FirstName: "Aspen Grove Trust",
+                EmailId: "trustee@aspengrove.example.com"));
+            Assert.NotNull(created.ClientNumber);
+
+            var root = ToolTestHelpers.Parse(
+                await new PreFilingCheckTools(mgr).LacertePreFilingCheck(created.ClientNumber!));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            var result = root.GetProperty("result");
+            Assert.Equal("blocked", result.GetProperty("readiness").GetString());
+            var blockerIds = RuleIds(result.GetProperty("blockers"));
+            Assert.Contains("forms-at-least-one", blockerIds);
+            Assert.Contains("forms-has-1041", blockerIds);
+            Assert.DoesNotContain("beneficiaries-present", blockerIds);
+            var warningIds = RuleIds(result.GetProperty("warnings"));
+            Assert.Contains("status-rows-present", warningIds);
+            Assert.Contains("beneficiaries-present", warningIds);
+        }
+
+        [Theory]
+        [InlineData('I', "partners-present", "shareholders-present", "beneficiaries-present")]
+        [InlineData('C', "partners-present", "shareholders-present", "beneficiaries-present")]
+        [InlineData('P', "shareholders-present", "beneficiaries-present", null)]
+        [InlineData('S', "partners-present", "beneficiaries-present", null)]
+        [InlineData('F', "partners-present", "shareholders-present", null)]
+        public async Task PreFilingCheck_OwnerRosterRules_SkippedOnEveryOtherModule(
+            char module, string skipA, string skipB, string? skipC)
+        {
+            var (path, client) = SeededTarget(module);
+            var result = await RunCheck(path, module, client);
+            var skippedIds = SkippedRuleIds(result);
+            var checkedRules = ToStringList(result.GetProperty("checkedRules"));
+
+            var expectedSkipped = new[] { skipA, skipB, skipC }.Where(s => s != null).Cast<string>().ToList();
+            var allOwnerRules = new[] { "partners-present", "shareholders-present", "beneficiaries-present" };
+            foreach (var rule in allOwnerRules)
+            {
+                if (expectedSkipped.Contains(rule))
+                {
+                    Assert.Contains(rule, skippedIds);
+                    Assert.DoesNotContain(rule, checkedRules);
+                }
+                else
+                {
+                    // The module's own roster rule runs and is never skipped.
+                    Assert.Contains(rule, checkedRules);
+                    Assert.DoesNotContain(rule, skippedIds);
+                }
+            }
+
+            // Every not-applicable skip carries a reason naming the module.
+            foreach (var skip in result.GetProperty("skippedRules").EnumerateArray())
+            {
+                var id = skip.GetProperty("ruleId").GetString();
+                if (!allOwnerRules.Contains(id)) continue;
+                Assert.Contains("Not applicable to module '" + module + "'", skip.GetProperty("reason").GetString());
+            }
+
+            // Individual-only rules stay skipped on every entity module.
+            if (module != 'I')
+            {
+                Assert.Contains("required-last-name", skippedIds);
+                Assert.Contains("dependents-have-description", skippedIds);
+            }
+            // F5 deferrals are present everywhere.
+            Assert.Contains("status-locked", skippedIds);
+            Assert.Contains("ef-ready-flag", skippedIds);
+        }
+
+        [Fact]
+        public async Task PreFilingCheck_SCorp_OwnershipTotalRule_IsDeferredNotRun()
+        {
+            // Ownership % summing to 100 needs the verified FP-3 field
+            // dictionary — it must surface as a skipped deferral on S only.
+            var sResult = await RunCheck(SeedData.DataPathSData2024, 'S', SeedData.ORCH.ClientNumber);
+            Assert.Contains("shareholder-ownership-totals-100", SkippedRuleIds(sResult));
+            Assert.DoesNotContain("shareholder-ownership-totals-100",
+                ToStringList(sResult.GetProperty("checkedRules")));
+
+            var fResult = await RunCheck(SeedData.DataPathFData2024, 'F', SeedData.MAPL.ClientNumber);
+            Assert.DoesNotContain("shareholder-ownership-totals-100", SkippedRuleIds(fResult));
         }
 
         [Fact]
@@ -153,10 +322,11 @@ namespace LacertMCP.Tests.Tools
         [Fact]
         public async Task PreFilingCheck_SCorp_FreshClient_ReportsHonestBlockers()
         {
-            // No S-Corp seed exists, so mint one through the session's
-            // CreateClient path (DATA1 row + empty detail file only — no
-            // DATA7 forms, no DATA5 status). The catalog must report the
-            // missing pieces honestly: forms blockers + status warning.
+            // Mint a fresh S-Corp through the session's CreateClient path
+            // (DATA1 row + empty detail file only — no DATA7 forms, no DATA5
+            // status, no DATA2 shareholders) alongside the FP-5 seeded
+            // ORCH/HOLW. The catalog must report the missing pieces
+            // honestly: forms + shareholder blockers + status warning.
             var mgr = ToolTestHelpers.NewSimManager();
             mgr.SetContext(@"C:\Lacerte\24Tax\SData", 2024, 'S');
             var created = await mgr.CreateClient(new CreateClientArgs(
@@ -179,6 +349,7 @@ namespace LacertMCP.Tests.Tools
             var blockerIds = RuleIds(result.GetProperty("blockers"));
             Assert.Contains("forms-at-least-one", blockerIds);
             Assert.Contains("forms-has-1120s", blockerIds);
+            Assert.Contains("shareholders-present", blockerIds);
             // Name + email were supplied at create time — not blockers.
             Assert.DoesNotContain("required-name", blockerIds);
             Assert.DoesNotContain("required-email", blockerIds);
@@ -278,6 +449,29 @@ namespace LacertMCP.Tests.Tools
         // ----------------------------------------------------------------
         // Helpers
         // ----------------------------------------------------------------
+
+        /// <summary>Set context, run the check on one client, return `result`.</summary>
+        private static async Task<JsonElement> RunCheck(
+            string dataPath, char module, string clientNumber, string severity = "normal")
+        {
+            var mgr = ToolTestHelpers.NewSimManager();
+            mgr.SetContext(dataPath, 2024, module);
+            var root = ToolTestHelpers.Parse(
+                await new PreFilingCheckTools(mgr).LacertePreFilingCheck(clientNumber, severity));
+            Assert.True(root.GetProperty("success").GetBoolean());
+            return root.GetProperty("result");
+        }
+
+        /// <summary>A fully-populated seeded client for each supported module.</summary>
+        private static (string Path, string ClientNumber) SeededTarget(char module) => module switch
+        {
+            'I' => (SeedData.DataPathIData2024, SeedData.BROW.ClientNumber),
+            'C' => (SeedData.DataPathCData2024, SeedData.ACME.ClientNumber),
+            'P' => (SeedData.DataPathPData2024, SeedData.PART.ClientNumber),
+            'S' => (SeedData.DataPathSData2024, SeedData.ORCH.ClientNumber),
+            'F' => (SeedData.DataPathFData2024, SeedData.MAPL.ClientNumber),
+            _ => throw new System.ArgumentOutOfRangeException(nameof(module)),
+        };
 
         /// <summary>Project a JSON string array into a List&lt;string&gt;.</summary>
         private static List<string> ToStringList(JsonElement array)

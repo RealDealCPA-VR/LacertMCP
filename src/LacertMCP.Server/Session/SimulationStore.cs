@@ -171,7 +171,7 @@ namespace LacertMCP.Server.Session
 
         /// <summary>
         /// Default ctor: reads the <c>LACERTE_SIM_EXPIRED</c> env var, then
-        /// calls <see cref="Seed"/> to populate the 8-client fixture.
+        /// calls <see cref="Seed"/> to populate the 12-client fixture.
         /// </summary>
         public SimulationStore()
             : this(Environment.GetEnvironmentVariable("LACERTE_SIM_EXPIRED") == "1")
