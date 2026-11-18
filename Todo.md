@@ -1598,3 +1598,13 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
 - [x] Updater/installer: per-entry field-map merge (shared by installer via `field-access merge`); installer no longer copied into the install root and refuses to run from it; health-check rollback; `.update-pending` recovery; de-elevated launcher (explorer) + stop planning; current-session process matching; scheduled task via XML (StartWhenAvailable); clean launcher environment; catch-all logging; exact asset + post-swap version check; prerelease tags; git runner timeouts; backup pruning; installer persists options, writes LACERTE_DATA_ROOT, Unicode VBS, complete uninstall.
 - [ ] Bridge concurrency (one message at a time) — needs a runspace-based reader in PS 5.1.
 - [ ] Live-box items: REGRESSION_CHECKLIST "Round-8 live items"; installer/updater live checks (elevated install → non-elevated `update --force`; task shows "run as soon as possible after a missed start").
+
+### Filing preparation — 1120 / 1120-S / 1065 / 1041 (planned 2026-11-18; plan: docs/plans/filing-preparation.md)
+Today the MCP reads every return type and creates clients, but can't prepare returns: live mode writes only 3 DATA1 fields (I/P), detail rows can't be written (9202), there is no field dictionary, and no 1041 pre-filing check.
+- [ ] FP-0 Decisions: writable-field policy (adopt the SDK manual's range rules, gated by the dictionary?) and detail-write safety (per-client detail-file backup + read-back + mandatory bulk dry run).
+- [ ] FP-1 Writable-field coverage: (a) loader fallback to the SDK range rules; (b) implement the dumper's `--live` probe (currently a stub that always fails — docs corrected 2026-11-18).
+- [ ] FP-2 Live detail-row writes over ODBC with backup, read-back and restore.
+- [ ] FP-3 Field/code dictionary per return type, built on the Lacerte PC with a map-diff helper; `lacerte_field_dictionary` tool; confirm the sim Series IDs.
+- [ ] FP-4 Return-type prompts + pre-filing rules for 1041, 1120-S and the 1120 balance sheet.
+- [ ] FP-5 Simulation fixtures for S-corps and trusts; parity tests.
+- [ ] FP-6 Live acceptance per return type on the Lacerte PC.

@@ -104,8 +104,8 @@ Write-Host "==> Releasing v$Version" -ForegroundColor Cyan
 # ---- 3. Stage Server + verify Schema/FieldAccessMap tree --------------
 $serverBin = Join-Path $script:RepoRoot 'src/LacertMCP.Server/bin/x64/Release'
 $cliBin = Join-Path $script:RepoRoot 'src/LacertMCP.Cli/bin/x64/Release'
-# The dumper builds the writable-field map on the Lacerte PC; install-http.ps1 installs it
-# and prints the exact command. Without it field writes stay refused (the map ships empty).
+# The field-map dumper ships for the future live probe (not implemented yet: its --live
+# mode fails with a pointer to `lacerte-mcp field-access set`). install-http.ps1 installs it.
 $dumperBin = Join-Path $script:RepoRoot 'src/LacertMCP.FieldAccessDumper/bin/x64/Release'
 
 foreach ($p in @($serverBin, $cliBin, $dumperBin)) {

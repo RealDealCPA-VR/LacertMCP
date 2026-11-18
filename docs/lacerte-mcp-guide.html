@@ -330,7 +330,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
   <div class="hero">
     <div class="eyebrow"><span>Operator guide</span><span>Intuit Lacerte TY18+</span><span>Model Context Protocol</span></div>
     <h1>Let Claude read and update Lacerte returns, safely.</h1>
-    <p class="lede">Lacerte MCP runs on the PC that has Lacerte installed and gives AI assistants like <strong>Claude Desktop, Claude Code and Codex</strong> a set of well-defined tools: list clients, read any return table, check e-file status, and write fields with every change checked and confirmed. Your data never leaves your network.</p>
+    <p class="lede">Lacerte MCP runs on the PC that has Lacerte installed and gives AI assistants like <strong>Claude Desktop, Claude Code and Codex</strong> a set of well-defined tools: list clients, read any return table, check e-file status, create clients, and write the fields you've enabled, with every change checked and confirmed. Your data never leaves your network. <strong>It reads returns; it doesn't prepare them yet</strong> (see the table in Part I).</p>
     <div class="facts">
       <span class="fact"><b>42</b> tools</span>
       <span class="fact"><b>9</b> return modules (I C P S F R T N B)</span>
@@ -427,15 +427,30 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
       </div>
       <div class="panel card">
         <span class="tag warn">Writes</span>
-        <h3>Field writes and new clients</h3>
-        <p>Single and bulk field writes, detail rows and client creation. Every field write is read back from Lacerte and only reported as done when the stored value matches.</p>
+        <h3>Enabled fields and new clients</h3>
+        <p>Client creation, plus single and bulk writes to fields enabled in the field map. Only a few fields are enabled out of the box. Every field write is read back from Lacerte and only reported as done when the stored value matches.</p>
       </div>
       <div class="panel card">
         <span class="tag bad">Out of scope</span>
-        <h3>What it never does</h3>
-        <p>No e-file submission, printing, PDFs, organizers or archived files. Lacerte's editor shows a change after you close and reopen that client.</p>
+        <h3>What it doesn't do</h3>
+        <p>It doesn't prepare returns yet, and it never e-files, prints, makes PDFs, or opens organizers or archived files. Lacerte's editor shows a change after you close and reopen that client.</p>
       </div>
     </div>
+
+    <h3 style="margin:26px 0 10px;font-size:var(--step-1)">By return type, against real Lacerte data</h3>
+    <div class="panel scroll-x">
+      <table class="matrix" style="min-width:640px">
+        <thead><tr><th>What Claude can do</th><th>1040</th><th>1120</th><th>1120-S</th><th>1065</th><th>1041</th></tr></thead>
+        <tbody>
+          <tr><td>Read clients, partners / shareholders / beneficiaries, states, forms, detail rows, e-file status</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Create the client</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Client-level fields writable out of the box</td><td class="mono">3</td><td class="mono">0</td><td class="mono">0</td><td class="mono">3</td><td class="mono">0</td></tr>
+          <tr><td>Enter income, deductions or K-1 amounts (detail rows)</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td></tr>
+          <tr><td>Pre-filing readiness check</td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot n" title="no"></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption">More fields can be enabled one at a time (Part IV, step 4). Detail-row writes work in simulation only for now. Return preparation for these forms is planned work, not a current feature.</p>
   </section>
 
   <!-- ============================================================ PART II -->
@@ -570,8 +585,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
             <div class="cmd"><pre>powershell -ExecutionPolicy Bypass -File .\install-http.ps1</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Sign in to Lacerte</h4><p>Open <code>http://localhost:8767/</code> and choose <b>Sign in to Lacerte</b>, or run the one-time registration. Intuit's sign-in lasts 24 hours; use <b>Reconnect</b> or <code>lacerte-mcp login</code> to renew it.</p>
             <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" register</pre><button class="copy" type="button">Copy</button></div></div></li>
-          <li><div><h4>Build the writable-field map</h4><p>Out of the box only a handful of built-in fields are writable; the rest are refused until Lacerte itself has told the server which fields can be written. Run this once per tax year you use, then sign out of Windows and back in. The control page's <em>Writable fields</em> check shows when it's done.</p>
-            <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\dumper\LacertMCP.FieldAccessDumper.exe" --live --year 2024 --out "$env:LOCALAPPDATA\LacertMCP\server\Schema\FieldAccessMap\base"</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Enable the fields agents may write</h4><p>Out of the box only 3 client fields are writable (1040 and 1065 only), and every other field is refused. Enable each field you want agents to change, one at a time, after confirming in Lacerte that it's an input field. Change <code>--module</code> (I, C, S, P, F…), <code>--table</code> and <code>--field</code> to suit. An automatic builder for the whole map isn't available yet.</p>
+            <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" field-access set --module I --table 1 --field C1_15 --access ReadWrite</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Turn on nightly updates</h4><p>Optional, and no admin needed. Installs each new release at 03:00; if the PC was asleep or off then, it runs as soon as you're signed in again. Every run is written to <code>update.log</code>.</p>
             <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" update --schedule daily</pre><button class="copy" type="button">Copy</button></div></div></li>
         </ol>
@@ -674,7 +689,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
 
     <div class="grid cols-3" style="margin-top:16px">
       <div class="panel card"><span class="tag">Network</span><h3>Tailnet only</h3><p>The server listens on the Lacerte PC's Tailscale address and <code>localhost</code> only, and the firewall admits Tailscale addresses only. Each caller is identified by <code>tailscale whois</code>, never by a header. Requests relayed through a proxy on the PC are refused, and tagged devices are never treated as the owner.</p></div>
-      <div class="panel card"><span class="tag">Fail closed</span><h3>Unknown fields are refused</h3><p>A field is writable only if the field-access map says so for that module and year. A fresh install refuses every write until you run the dumper.</p></div>
+      <div class="panel card"><span class="tag">Fail closed</span><h3>Unknown fields are refused</h3><p>A field is writable only if the field-access map says so for that module and year. A fresh install allows just 3 built-in fields; you enable others one at a time.</p></div>
       <div class="panel card"><span class="tag">Proof</span><h3>Writes are read back</h3><p>Every field write is re-read over a fresh connection. A mismatch returns 9022 instead of a false success.</p></div>
       <div class="panel card"><span class="tag">Preview</span><h3>Dry runs and read-only contexts</h3><p><code>dryRun: true</code> shows what would change without writing. A context set with <code>readOnly: true</code> blocks every write with 9001.</p></div>
       <div class="panel card"><span class="tag">No doubles</span><h3>Idempotency keys</h3><p>A retried write with the same key returns the first result. Bulk writes use a key per row, so a half-finished batch can be safely resent.</p></div>
@@ -715,7 +730,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
 
     <div style="margin-top:20px">
       <details class="faq" open><summary>9007 LoginExpired or 203 NotSignedIn</summary><div class="body"><p>Intuit's sign-in lasts 24 hours. Click <b>Reconnect</b> on the control page, or run <code>lacerte-mcp login</code> on the Lacerte PC, then retry.</p></div></details>
-      <details class="faq"><summary>9012 UnknownFieldAccess on every write</summary><div class="body"><p>The writable-field map has no rule for that field and year. Run the field-map dumper for that tax year (Part IV, step 4) and sign out and back in. The Overview tab's <em>Writable fields</em> check warns while only the built-in rules are loaded.</p></div></details>
+      <details class="faq"><summary>9012 UnknownFieldAccess on every write</summary><div class="body"><p>The field isn't enabled for writing. Confirm in Lacerte that it's an input field, enable it with <code>lacerte-mcp field-access set</code> (Part IV, step 4), then ask Claude to call <code>lacerte_reload_schema</code> or sign out and back in. The Overview tab's <em>Writable fields</em> check warns while only the built-in fields are enabled.</p></div></details>
       <details class="faq"><summary>Claude says it has to set its context again</summary><div class="body"><p>The connection was closed, for example after an hour idle, a server restart or an update, so its tax year and folder were forgotten. Ask Claude to set the context again. Writes can never land in the wrong file because of this; they're refused until the context is set.</p></div></details>
       <details class="faq"><summary>9022 WriteNotVerified</summary><div class="body"><p>Lacerte accepted the write, but reading it back returned a different value. A common cause is the return being open in Lacerte. Close it and retry; the retry really rewrites the field, even with the same idempotency key.</p></div></details>
       <details class="faq"><summary>9001 FieldIsReadOnly</summary><div class="body"><p>The context was set read-only, the field or table is read-only (for example DATA6 and DATA7), or this device has <em>Read only</em> access on the control page.</p></div></details>
@@ -867,8 +882,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
     ["Writes", "lacerte_field_write", "write", "Write one field, then read it back to confirm."],
     ["Writes", "lacerte_update_return", "write", "Same as field write, named after the 2021+ SDK call."],
     ["Writes", "lacerte_field_write_bulk", "write", "Many field writes in one call (up to 500), with per-row replay keys."],
-    ["Writes", "lacerte_detail_write", "write", "Add a detail row (series, code, amount, description)."],
-    ["Writes", "lacerte_detail_write_bulk", "write", "Add many detail rows, e.g. seeding W-2s from intake."],
+    ["Writes", "lacerte_detail_write", "write", "Add a detail row (series, code, amount, description). Simulation only for now."],
+    ["Writes", "lacerte_detail_write_bulk", "write", "Add many detail rows, e.g. seeding W-2s from intake. Simulation only for now."],
     ["E-file", "lacerte_ef_status", "read", "E-file status for the active year and module (2019+), with \"since\" polling."],
     ["Dashboards", "lacerte_firm_dashboard", "read", "Firm-wide counts across every year and module, without changing your context."],
     ["Accelerators", "lacerte_diff_clients", "read", "Field-by-field comparison of two clients."],

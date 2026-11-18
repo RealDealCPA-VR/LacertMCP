@@ -196,7 +196,7 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 
 ### Schema reload (1 tool)
 
-- `lacerte_reload_schema() → { modulesReloaded, overlaysReloaded, schemaRoot }` — drop in-process FieldAccessMap caches so freshly written shards take effect WITHOUT restarting the server (which would invalidate the Intuit 24h auth ticket). Call after running `LacertMCP.FieldAccessDumper.exe`.
+- `lacerte_reload_schema() → { modulesReloaded, overlaysReloaded, schemaRoot }` — drop in-process FieldAccessMap caches so freshly written shards take effect WITHOUT restarting the server (which would invalidate the Intuit 24h auth ticket). Call after the operator adds fields with `lacerte-mcp field-access set`.
 
 ### Observability (5 tools)
 
@@ -391,7 +391,7 @@ Use when the operator says "just looking" or "audit mode" or you're driving a re
 | 9007 | LoginExpired                  | 24h ticket lapsed (proactive)                                    | Operator: run `lacerte-mcp login`.                                       |
 | 9008 | DetailWriteInvalid           | Client-side validation failed (Series/Code/Amount shape)         | Read per-field `reason`; fix and retry.                                  |
 | 9009 | ContextNotSet                | No `lacerte_set_context` yet                                     | Call `lacerte_list_datapaths` → `lacerte_set_context`.                   |
-| 9012 | UnknownFieldAccess           | Field absent from access map shard                               | `lacerte_field_access_map` to confirm what IS writable. Operator: dumper + `lacerte_reload_schema`. |
+| 9012 | UnknownFieldAccess           | Field absent from access map shard                               | `lacerte_field_access_map` to confirm what IS writable. Operator: `lacerte-mcp field-access set` + `lacerte_reload_schema` (the dumper's live probe isn't implemented). |
 | 9013 | InvalidDataPath              | `dataPath` rejected by `PathValidation`                          | Pass absolute local path; OR set `LACERTE_ALLOW_UNC=1`.                  |
 | 9014 | TaxYearTooNew                | `taxYear > DateTime.Today.Year + 1`                              | Pass current/prior year.                                                  |
 | 9015 | FieldWriteInvalid            | `value` not a scalar (array/object rejected)                     | Pass string/number/bool/null. Use `lacerte_detail_write` for rows.       |

@@ -262,7 +262,7 @@ namespace LacertMCP.FieldAccessDumper
                 new Dictionary<string, object?>
                 {
                     ["op"] = "ProbeLiveAccess",
-                    ["reason"] = "Live probing requires Windows + Lacerte SDK + a registered ITPRegistration. Run this dumper on the Lacerte box and re-run with --live.",
+                    ["reason"] = "Live probing is not implemented yet (Todo \"Filing preparation\" FP-1). Until it is, add fields one at a time with `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access ReadWrite` after confirming each in Lacerte.",
                 });
         }
 

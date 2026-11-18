@@ -38,7 +38,7 @@ namespace LacertMCP.Server.Tools
     public sealed class SchemaReloadTools
     {
         [McpServerTool]
-        [Description("Drop the in-process FieldAccessMap caches so freshly written shards on disk take effect. Call this after running LacertMCP.FieldAccessDumper.exe so the new shards take effect without restarting the server (which would invalidate the Intuit 24h auth ticket). Returns { modulesReloaded, overlaysReloaded, schemaRoot } — the counts are how many cached entries were evicted (NOT how many shards exist on disk); the next field-write or lookup will lazily repopulate the cache from disk. The outer envelope's `success: true` already indicates the reload itself succeeded.")]
+        [Description("Drop the in-process FieldAccessMap caches so freshly written shards on disk take effect. Call this after the operator adds fields with `lacerte-mcp field-access set` (or edits a shard) so the change takes effect without restarting the server (which would invalidate the Intuit 24h auth ticket). Returns { modulesReloaded, overlaysReloaded, schemaRoot } — the counts are how many cached entries were evicted (NOT how many shards exist on disk); the next field-write or lookup will lazily repopulate the cache from disk. The outer envelope's `success: true` already indicates the reload itself succeeded.")]
         public Task<string> LacerteReloadSchema()
         {
             return WrapToolHandler.Run(() =>

@@ -410,7 +410,7 @@ namespace LacertMCP.Cli.Commands
                 Console.Out.WriteLine(
                     "  (the dumper probes all known modules/tables itself — there are no --module/--table flags;");
                 Console.Out.WriteLine(
-                    "  --live requires Windows + the Lacerte SDK; project lives under src/LacertMCP.FieldAccessDumper/).");
+                    "  its --live probe is NOT implemented yet — add fields with `field-access set` meanwhile).");
                 Console.Out.WriteLine();
                 Console.Out.WriteLine(
                     "To set entries by hand off-box: `lacerte-mcp field-access set --module <X> --table <N> " +

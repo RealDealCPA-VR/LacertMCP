@@ -14,6 +14,7 @@ A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as t
 
 Bounding expectations up front saves a triage loop with the LLM:
 
+* **Not a return-preparation tool yet** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created, but in live mode only a few built-in fields are writable (3 DATA1 fields for Individual/Partnership, none for Corporate/S-Corp/Fiduciary) and detail rows (income, deductions, K-1 items) can't be written yet. Return data is entered in Lacerte. See Todo "Filing preparation" for what it would take.
 * **No e-filing actions** — read-only EF status via `lacerte_ef_status` (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.
 * **No printing, PDF rendering, or third-party export** — DBF read/write + COM field-write only. Use Lacerte's File → Print or Print to PDF for any rendered output.
 * **No organizer, client portal, letter template, or diagnostics-detail access** — those live in non-DBF Lacerte surfaces this MCP doesn't wire up.
@@ -460,7 +461,7 @@ Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<modu
 
 - `list --module <I|C|P|S|F|R|T|N|B> --table <1..7> [--year YYYY] [--schema-dir <dir>]` — print every entry for a module/table at the requested year (overlays applied).
 - `set --module <X> --table <N> --field <F> --access <ReadWrite|ReadOnly|Hidden|NotExposed|NotSupported|Unknown> [--data-type ...] [--max-length ...] [--source manual|spec|introspect] [--note ...] [--schema-dir <dir>]` — upsert one field entry into the base map (re-serialized sorted so PR diffs stay stable). Both commands target, in order: `--schema-dir`, the sibling `..\server\Schema\FieldAccessMap` (release-zip layout — the tree the server actually reads), else the CLI's own folder; the resolved path is printed.
-- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]` (it probes all known modules/tables itself — there are no `--module`/`--table` flags; `--live` needs Windows + the Lacerte SDK).
+- `discover` — **redirect stub; always exits 3** (distinct from doctor's exit 2 = env-skip). Prints a pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe [--overwrite] [--live] [--year <yyyy>] [--out <dir>]` (it would probe all known modules/tables itself; its `--live` probe is **not implemented yet** — add fields with `field-access set` meanwhile).
 
 ### `lacerte-mcp doctor`
 
@@ -549,9 +550,11 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 - **Diagnosis:** The Lacerte SDK installer registers the DSN under the 64-bit ODBC hive (`HKLM\SOFTWARE\ODBC\ODBC.INI\LacerteDSII`). 32-bit `odbcad32.exe` (the one in `C:\Windows\SysWOW64`) won't see it.
 - **Fix:** Confirm via the 64-bit `odbcad32.exe` at `C:\Windows\System32\odbcad32.exe` → "System DSN" tab. If absent, reinstall the 64-bit Lacerte SDK MSI.
 
-### Writes return `UnknownFieldAccess (9012)` after running `LacertMCP.FieldAccessDumper.exe`
+### Writes return `UnknownFieldAccess (9012)`
 
-- **Symptom:** The standalone introspector produced fresh per-module shards under `Schema/FieldAccessMap/base/`, but writes still fail with `9012 UnknownFieldAccess`.
+> **Current limit:** only a few built-in fields are writable (3 DATA1 fields for Individual and Partnership; none for Corporate, S-Corp or Fiduciary). The field-map dumper's `--live` probe is **not implemented yet** (it always fails), so fields are added one at a time: confirm in Lacerte that the field is an input field, then run `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access ReadWrite`. See Todo "Filing preparation".
+
+- **Symptom:** You added a field with `field-access set` (or edited a shard under `Schema/FieldAccessMap/base/`), but writes still fail with `9012 UnknownFieldAccess`.
 - **Diagnosis:** The server caches the shards at startup and does NOT re-scan disk on every write. A naive fix would be to restart the server — but that invalidates the Intuit 24h auth ticket and forces the 5-minute consent ceremony.
 - **Fix:** Call the `lacerte_reload_schema` MCP tool. It drops the in-process `FieldAccessMap` caches so fresh shards take effect immediately; the cached AppID + auth ticket are preserved. Returns `{ modulesReloaded, overlaysReloaded, schemaRoot }`. Do **not** restart the server for this purpose.
 

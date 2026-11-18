@@ -1,5 +1,12 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18) — return-preparation capability check
+
+- Asked whether the MCP can prepare 1120 / 1120-S / 1065 / 1041 filings: **no, not today.** It reads every module and creates clients, but live mode writes only 3 DATA1 fields (I/P; none for C/S/F), live detail-row writes are unwired (9202), there is no field dictionary, and there is no 1041 pre-filing check.
+- Found that `LacertMCP.FieldAccessDumper.exe --live` is a stub that always fails, while the README, manual, SKILL, installer, control-page health hint, 9012 remediation and operator guide all told people to run it. All corrected to the working path (`lacerte-mcp field-access set`, one field at a time). `lacerte_help(topic:"limits")` and the README "does NOT do" list now state the preparation limit. Guide republished with a by-return-type table.
+- Plan: `docs/plans/filing-preparation.md`; Todo "Filing preparation" FP-0..FP-6. FP-0 needs operator decisions.
+- Tests 1831 passed, 0 failed. Nothing pushed (local master is ahead of origin).
+
 ## Last Session Summary (2026-11-17) — Round-8 deep review (HTTP mode, live path, updater) + operator guide
 
 - Reviewed everything that landed after the R7 review (4c36372..5f615ed, ~6.3k lines never reviewed) in four independent lanes, then fixed every confirmed finding (Todo "Round-8 review"; DECISIONS 2026-11-17). HTTP and updater fixes were made in isolated worktrees and merged; an independent confirmation review of the combined fixes followed.

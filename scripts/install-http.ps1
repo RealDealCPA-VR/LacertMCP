@@ -312,13 +312,14 @@ if (Test-Path $tailscale) {
     if ($r.Code -eq 0 -and $r.Output) { $ip = ($r.Output -split "`r?`n" | Select-Object -First 1).Trim() }
 }
 if (-not $ip) { $ip = "<this PC's Tailscale IP>" }
-$dumper = Join-Path $installDir 'dumper\LacertMCP.FieldAccessDumper.exe'
 Write-Host ''
 Write-Host "Data root: $DataRoot   (the server only opens Lacerte clients under it; re-run with -DataRoot to change it)"
 Write-Host ''
-Write-Host 'To allow field writes, build the writable-field map once per tax year you use (then restart by signing out/in, or re-run this installer):'
-Write-Host "  & '$dumper' --live --year 2024 --out '$mapDir'"
-Write-Host '  (re-running this installer or `lacerte-mcp update` keeps the entries you have built)'
+Write-Host 'Field writes: only a few built-in fields are writable (none for Corporate, S-Corp or Fiduciary).'
+Write-Host 'To allow another field, confirm in Lacerte that it is an input field, then:'
+Write-Host "  & '$cliExe' field-access set --module I --table 1 --field <field> --access ReadWrite"
+Write-Host '  (the automatic field-map builder is not available yet; re-running this installer or'
+Write-Host '   `lacerte-mcp update` keeps the fields you add)'
 Write-Host ''
 Write-Host 'To update later (no admin needed; keeps your field map):'
 Write-Host "  & '$cliExe' update                    # now"

@@ -156,6 +156,7 @@ namespace LacertMCP.Server.Tools
         // same scope language.
         private static string[] WhatThisDoesNotDo() => new[]
         {
+            "Not a return-preparation tool yet. Every module (1040, 1120, 1120-S, 1065, 1041, ...) can be READ in full, and clients can be created, but in live mode only a few built-in fields are writable (3 DATA1 fields for Individual/Partnership, none for Corporate/S-Corp/Fiduciary) and detail rows (income, deductions, K-1 items) can't be written yet (9202). Don't promise to prepare or complete a return; enter return data in Lacerte. An operator can enable more fields with `lacerte-mcp field-access set`.",
             "No e-filing actions. Read-only EF status via lacerte_ef_status (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.",
             "No printing, PDF rendering, or third-party export. DBF read/write + COM field-write only. Use Lacerte's File -> Print or Print to PDF for any rendered output.",
             "No organizer, client portal, letter template, or diagnostics-detail access. Those live in non-DBF Lacerte surfaces this MCP doesn't wire up.",

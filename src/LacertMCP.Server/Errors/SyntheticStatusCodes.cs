@@ -37,9 +37,10 @@ namespace LacertMCP.Server.Errors
         // 9012 — field not in access map (follow-up F3). Distinct from 9001:
         // 9001 means "ReadOnly/Hidden/NotExposed/ReadOnly-session" — the field
         // is known and is intentionally non-writable. 9012 means "we have no
-        // entry for this field" — the operator can populate the map with
-        // `LacertMCP.FieldAccessDumper.exe` then call the `lacerte_reload_schema`
+        // entry for this field" — the operator can add it with
+        // `lacerte-mcp field-access set` then call the `lacerte_reload_schema`
         // MCP tool, or call `lacerte_field_access_map` to see what IS writable.
+        // (The dumper's live probe is a stub — Todo "Filing preparation" FP-1.)
         // P16-001/P16-016: previous remediation pointed at the deprecated
         // `lacerte-mcp field-access discover` CLI verb (now exits 3) and at a
         // `force:true` parameter that is not exposed on any MCP tool — both
@@ -250,8 +251,8 @@ namespace LacertMCP.Server.Errors
             [UnknownFieldAccess] = new StatusInfo(
                 "UnknownFieldAccess",
                 Severity.Error,
-                "Field not in access map — the per-module shard has no entry for this (module, table, field). The v1 base shards ship empty for many modules.",
-                "To recover in-session: call `lacerte_field_access_map(module, table, taxYear)` to see what IS writable for this slot — if the field is genuinely supported but uncataloged, pick a mapped field. To permanently populate the map: run `LacertMCP.FieldAccessDumper.exe --module <I|C|P|S|F|R|T|N|B> --table <1..7>` on a Windows + live-Lacerte box, then call the `lacerte_reload_schema` MCP tool so the new shards take effect without restarting (restart would invalidate the 24h Intuit auth ticket)."),
+                "Field not in access map — the per-module shard has no entry for this (module, table, field). Only a few built-in fields are writable today (none for Corporate, S-Corp or Fiduciary); every other field is refused until it is added.",
+                "To recover in-session: call `lacerte_field_access_map(module, table, taxYear)` to see what IS writable for this slot. To enable this field: the operator confirms on the Lacerte PC that it is an input field Lacerte accepts, runs `lacerte-mcp field-access set --module <I|C|P|S|F|R|T|N|B> --table <1..7> --field <field> --access ReadWrite`, then calls the `lacerte_reload_schema` MCP tool so it takes effect without a restart. (The automatic map builder, `LacertMCP.FieldAccessDumper.exe --live`, is not implemented yet.)"),
 
             [InvalidDataPath] = new StatusInfo(
                 "InvalidDataPath",

@@ -832,9 +832,9 @@ namespace LacertMCP.Server.Web
 
         /// <summary>
         /// Field writes are refused for any field not in the access map (fail
-        /// closed). The shipped base shards are empty until FieldAccessDumper is
-        /// run against the real SDK, so surface that instead of letting every
-        /// write fail with 9012 and nobody knowing why.
+        /// closed). The shipped base shards hold only a few curated writable rows
+        /// (none for C/S/F), so surface that instead of letting every write fail
+        /// with 9012 and nobody knowing why.
         /// </summary>
         private static HealthCheck WritableFieldCheck()
             => WritableFieldCheck(Path.Combine(Schema.FieldAccessMapLoader.GetSchemaRoot(), "base"));
@@ -844,11 +844,11 @@ namespace LacertMCP.Server.Web
 
         /// <summary>
         /// Counts real field rules (shard entries: "M|table|field" → { access, source, … }),
-        /// how many are ReadWrite, and how many were produced on this PC by the dumper
-        /// (any source other than the curated release rows). The release ships only a
-        /// handful of curated ReadWrite rows, so until the dumper has run nearly every
-        /// write is refused; warn about that instead of reporting the curated rows as
-        /// a loaded map.
+        /// how many are ReadWrite, and how many were added on this PC (any source other
+        /// than the curated release rows — `field-access set`, or the dumper once its
+        /// live probe exists). The release ships only a handful of curated ReadWrite
+        /// rows, so until fields are added nearly every write is refused; warn about
+        /// that instead of reporting the curated rows as a loaded map.
         /// </summary>
         internal static HealthCheck WritableFieldCheck(string dir)
         {
@@ -877,11 +877,15 @@ namespace LacertMCP.Server.Web
             {
                 return new HealthCheck("Writable fields", "warn", "Couldn't read the field access map.", null);
             }
-            var fix = "On this PC run dumper\\LacertMCP.FieldAccessDumper.exe --live --year <year> --out \"" + dir + "\" for each tax year you use, then restart the server.";
+            // The dumper's live probe is not implemented yet (it always fails), so
+            // the only working way to add a field is field-access set, one at a time.
+            var fix = "Add each field agents should write, after confirming in Lacerte that it is an input field: " +
+                      "lacerte-mcp field-access set --module <I|C|P|S|F|...> --table <1-4> --field <field> --access ReadWrite, " +
+                      "then call lacerte_reload_schema (or restart). The automatic map builder is not available yet.";
             if (probed > 0)
                 return new HealthCheck("Writable fields", "ok", entries + " field rules loaded (" + writable + " writable); writes to any other field are refused.", null);
             if (entries > 0)
-                return new HealthCheck("Writable fields", "warn", "Only the " + entries + " built-in field rules are loaded (" + writable + " writable), so almost every field write is refused (reads work). The field map hasn't been generated on this PC yet.", fix);
+                return new HealthCheck("Writable fields", "warn", "Only the " + entries + " built-in field rules are loaded (" + writable + " writable), so almost every field write is refused (reads work). No fields have been added on this PC yet.", fix);
             return new HealthCheck("Writable fields", "warn", "The field access map is empty, so every field write is refused (reads work).", fix);
         }
 

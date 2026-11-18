@@ -602,7 +602,7 @@ Returns the resolved field access map for `(module, table, taxYear)`. Includes t
 - Required: `module: string` (length 1), `table: int` (1-7), `taxYear: int` (≥ 2018).
 - Response: `{ module, moduleName, table, taxYear, count, fields: { fieldName: accessEnum } }`. Access enum values: `ReadWrite, ReadOnly, Hidden, NotExposed, NotSupported, Unknown`.
 
-The v1 base shards ship empty for many modules — only `C{t}_0` is cataloged ReadOnly until `LacertMCP.FieldAccessDumper.exe` populates them.
+The base shards ship with only a few writable fields (3 DATA1 fields for Individual and Partnership; none for Corporate, S-Corp or Fiduciary). The field-map dumper's live probe is not implemented yet, so the operator adds fields one at a time with `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access ReadWrite` after confirming each in Lacerte.
 
 #### `lacerte_return_codes`
 
@@ -630,7 +630,7 @@ The CLI offers a richer reflection-based tool listing without booting stdio. See
 
 #### `lacerte_reload_schema`
 
-Drops the in-process `FieldAccessMap` caches so freshly written shards on disk take effect without restarting the server (which would invalidate the Intuit 24h auth ticket). Use this after running `LacertMCP.FieldAccessDumper.exe`.
+Drops the in-process `FieldAccessMap` caches so freshly written shards on disk take effect without restarting the server (which would invalidate the Intuit 24h auth ticket). Use this after adding fields with `lacerte-mcp field-access set`.
 
 - Parameters: none.
 - Response: `{ modulesReloaded, overlaysReloaded, schemaRoot }`. Counts reflect cache entries evicted, not shards on disk. The next field-write or lookup lazily repopulates the cache from disk.
@@ -915,7 +915,7 @@ Operator surface for the per-field access map (`Schema/FieldAccessMap/base/<modu
 | `--note` | string | no | — | Description / note |
 | `--force` | bool | no | `false` | Override the field-name shape check |
 
-**`field-access discover`** — redirect stub; always exits **3**. Prints a one-line pointer to the standalone introspector: `LacertMCP.FieldAccessDumper.exe --module <X> --table <N>` (Windows + live SDK).
+**`field-access discover`** — redirect stub; always exits **3**. Prints a pointer to the standalone introspector `LacertMCP.FieldAccessDumper.exe`, whose `--live` probe is not implemented yet; use `field-access set` meanwhile.
 
 ### `lacerte-mcp doctor [--json]`
 
@@ -1082,11 +1082,11 @@ For the polling cadence, pass `sinceUtc` to either `lacerte_firm_dashboard` or `
 4. **Field-history audit** — `lacerte_field_history(clientNumber, field)` reads the WireLog JSONL records for outer `op="WriteField"` entries on that pair (requires `LACERTE_DEBUG_WIRE=1`).
 5. **Cache state probe** — for 9102 conflicts near eviction pressure, call `lacerte_cache_state` to inspect `idempotency.count/cap/nearCap/peakCount`.
 
-### Workflow G — Hot-reloading the field-access schema after running the dumper
+### Workflow G — Enabling a field and hot-reloading the field-access schema
 
-When you fix `UnknownFieldAccess (9012)` by running the standalone introspector, do **not** restart the server (that invalidates the Intuit 24h auth ticket).
+When you fix `UnknownFieldAccess (9012)` by adding a field, do **not** restart the server (that invalidates the Intuit 24h auth ticket). (The automatic builder, `LacertMCP.FieldAccessDumper.exe --live`, is not implemented yet.)
 
-1. On a Windows + live-Lacerte box, run: `LacertMCP.FieldAccessDumper.exe --module I --table 1` — produces fresh per-module shards under `Schema/FieldAccessMap/base/`.
+1. Confirm in Lacerte that the field is an input field, then run `lacerte-mcp field-access set --module <X> --table <N> --field <F> --access ReadWrite` — it writes the entry into the server's `Schema/FieldAccessMap/base/` shard.
 2. From your MCP host, call `lacerte_reload_schema` — drops the in-process caches. Returns `{ modulesReloaded, overlaysReloaded, schemaRoot }`.
 3. Re-attempt the write that failed with 9012. The next field-write or lookup lazily repopulates the cache from disk.
 
@@ -1157,7 +1157,7 @@ Source: `src/LacertMCP.Server/Errors/SyntheticStatusCodes.cs`.
 | 9007 | LoginExpired | preflight | 24h Intuit auth ticket lapsed (proactive probe). | Run `lacerte-mcp login`; restart the MCP server. |
 | 9008 | DetailWriteInvalid | preflight | `lacerte_detail_write` failed client-side validation. | Fix the failed field per the validation message. |
 | 9009 | ContextNotSet | preflight | Read/write tool called before `lacerte_set_context`. | Call `lacerte_list_datapaths` + `lacerte_list_modules` + `lacerte_set_context`. |
-| 9012 | UnknownFieldAccess | preflight | Field not in access map. | In-session: call `lacerte_field_access_map`. Permanent fix: run `LacertMCP.FieldAccessDumper.exe` then `lacerte_reload_schema`. |
+| 9012 | UnknownFieldAccess | preflight | Field not in access map. | In-session: call `lacerte_field_access_map`. Permanent fix: operator confirms the field in Lacerte, runs `lacerte-mcp field-access set ... --access ReadWrite`, then `lacerte_reload_schema`. |
 | 9013 | InvalidDataPath | preflight | dataPath failed validation (relative, `..` traversal, control chars, UNC without `LACERTE_ALLOW_UNC=1`, outside `LACERTE_DATA_ROOT`). | Pass an absolute local path under the Lacerte install root. |
 | 9014 | TaxYearTooNew | preflight | Tax year exceeds installed Lacerte coverage (above current year + 1). | Pass a `taxYear` at or before current calendar year. |
 | 9015 | FieldWriteInvalid | preflight | `lacerte_field_write` `value` was not a JSON-serializable scalar. | Pass a scalar — string, number, bool, or null. Use `lacerte_detail_write` for multi-field row payloads. |
@@ -1179,7 +1179,7 @@ Source: `src/LacertMCP.Server/Errors/SyntheticStatusCodes.cs`.
 | --- | --- | --- |
 | Tool calls all fail right after install | 9006 AppNotRegistered | Run `lacerte-mcp register`. |
 | Tool calls were working, now fail with auth-flavored error | 9007 LoginExpired / 203 NotSignedIn / 9101 ReAuthRequired | Run `lacerte-mcp login`. |
-| Write returns "field is unknown" | 9012 UnknownFieldAccess | `lacerte_field_access_map` to confirm; then dumper + `lacerte_reload_schema` if shard is empty. |
+| Write returns "field is unknown" | 9012 UnknownFieldAccess | `lacerte_field_access_map` to confirm; then `field-access set` + `lacerte_reload_schema`. |
 | Write returns `success: true` but Lacerte UI shows old value | none (UI staleness) | Close & reopen the client in Lacerte. The write actually landed; verify via `lacerte_client_read`. |
 | Replaying a write returns success without going to the wire | (idempotency cache hit) | Expected. Different idempotency key needed for a genuinely-new operation. |
 | Replaying returns 9102 | 9102 IdempotencyConflict | Different payload with the same key. Pick a fresh key OR replay the original payload byte-for-byte. |
@@ -1434,7 +1434,7 @@ Either `LACERTE_DATA_ROOT` is not set and the install isn't under `C:\Lacerte`, 
 
 Set `LACERTE_DATA_ROOT=C:\path\to\your\Lacerte\root` in the MCP client config and restart.
 
-### "Writes return `UnknownFieldAccess (9012)` after running the dumper"
+### "Writes return `UnknownFieldAccess (9012)` after adding a field"
 
 The server caches shards at startup and does **not** re-scan disk on every write. A restart would invalidate the Intuit 24h ticket. Call `lacerte_reload_schema` instead — see Workflow G.
 

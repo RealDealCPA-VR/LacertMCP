@@ -319,7 +319,7 @@ namespace LacertMCP.Tests.Web
         }
 
         [Fact]
-        public void CuratedRowsOnly_WarnsToRunTheDumper()
+        public void CuratedRowsOnly_WarnsToAddFields()
         {
             File.WriteAllText(Path.Combine(_dir, "individual.json"),
                 @"{""I|1|C1_G1"":{""access"":""ReadOnly"",""source"":""sdk-pdf"",""description"":""x"",""addedAt"":""2026-11-15""},
@@ -328,7 +328,10 @@ namespace LacertMCP.Tests.Web
             Assert.Equal("warn", c.Status);
             Assert.Contains("2 built-in", c.Summary);
             Assert.Contains("1 writable", c.Summary);
-            Assert.Contains("FieldAccessDumper", c.Fix);
+            // The dumper's live probe is a stub, so the fix must point at the
+            // one path that works: field-access set, one field at a time.
+            Assert.Contains("field-access set", c.Fix);
+            Assert.DoesNotContain("FieldAccessDumper", c.Fix);
         }
 
         [Fact]
