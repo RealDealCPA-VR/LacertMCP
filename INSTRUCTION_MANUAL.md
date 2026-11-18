@@ -170,9 +170,9 @@ You don't need Windows or a Lacerte install to kick the tires. The server ships 
 }
 ```
 
-**Step 3.** Restart Claude Desktop (or your host). Type `/` and confirm that `lacerte_client_intake`, `lacerte_review_ef_status`, `lacerte_field_write_bulk`, and `lacerte_csv_intake` appear in the prompt picker.
+**Step 3.** Restart Claude Desktop (or your host). Type `/` and confirm that `lacerte_client_intake`, `lacerte_review_ef_status`, `lacerte_field_write_bulk`, `lacerte_csv_intake` and `lacerte_entity_return_entry` appear in the prompt picker.
 
-**Step 4.** Drive the four seeded datapaths. Type these prompts verbatim:
+**Step 4.** Drive the seeded datapaths (six in all; the S-corp `SData` and trust `FData` paths are listed in the seed table below). Type these prompts verbatim:
 
 | Prompt | What the LLM calls | Seeded ClientIDs returned |
 | --- | --- | --- |
@@ -181,7 +181,7 @@ You don't need Windows or a Lacerte install to kick the tires. The server ships 
 | "Switch to 2024 Corporate at `C:\Lacerte\24Tax\CData`, then list every client and show me the state rows for ACME." | `lacerte_set_context` + `lacerte_client_list` + `lacerte_state_read` | `ACME` (CA + NY), `WIDG` (TX) |
 | "Switch to 2024 Partnership at `C:\Lacerte\24Tax\PData`, then list every client and read PART's subclients." | `lacerte_set_context` + `lacerte_client_list` + `lacerte_subclient_read` | `PART` (3 partners) |
 
-All 8 seeded ClientIDs (`SMIT`, `JONE`, `REJE`, `BROW`, `PEND`, `ACME`, `WIDG`, `PART`) live across these 4 sim datapaths. Anything that works here works against a real Lacerte install once you flip `LACERTE_LIVE=1`.
+All 12 seeded ClientIDs (`SMIT`, `JONE`, `REJE`, `BROW`, `PEND`, `ACME`, `WIDG`, `PART`, `ORCH`, `HOLW`, `MAPL`, `BIRC`) live across 6 sim datapaths (S-corps `ORCH`/`HOLW` under `C:\Lacerte\24Tax\SData`, trusts `MAPL`/`BIRC` under `C:\Lacerte\24Tax\FData`). Anything that works here works against a real Lacerte install once you flip `LACERTE_LIVE=1`.
 
 ### 4b. Production install
 
@@ -332,7 +332,7 @@ To switch from live to sim mode, drop `LACERTE_LIVE` + `LACERTE_DATA_PATH` and a
 
 ## 7. Tool catalog
 
-The server registers 43 MCP tools (the authoritative categorization is `HelpTools.ToolsByCategory()`, kept in lock-step with the registered surface by a bidirectional parity test — `lacerte_help(topic: "tools")` reports the same 42). Each tool method is decorated with `[McpServerTool]` and lives under `src/LacertMCP.Server/Tools/` (plus `Prompts/PromptsCatalogTool.cs` for `lacerte_prompts`). The exact tool name on the wire is the snake_case form of the C# method name (e.g. `LacerteClientList` → `lacerte_client_list`). Discovery happens via `WithToolsFromAssembly()` in `Program.cs`.
+The server registers 43 MCP tools (the authoritative categorization is `HelpTools.ToolsByCategory()`, kept in lock-step with the registered surface by a bidirectional parity test — `lacerte_help(topic: "tools")` reports the same 43). Each tool method is decorated with `[McpServerTool]` and lives under `src/LacertMCP.Server/Tools/` (plus `Prompts/PromptsCatalogTool.cs` for `lacerte_prompts`). The exact tool name on the wire is the snake_case form of the C# method name (e.g. `LacerteClientList` → `lacerte_client_list`). Discovery happens via `WithToolsFromAssembly()` in `Program.cs`.
 
 Every tool returns one of two JSON envelope shapes (see `Errors/WrapToolHandler.cs`):
 
@@ -721,11 +721,11 @@ Pre-filing readiness check. Runs a catalog of rules against one client in the ac
 - Response: `{ clientNumber, module, readiness: "ready"|"blocked"|"warn"|"unsupported-module", passed, blockers[], warnings[], checkedRules[], skippedRules[] }` (`module` is the single-character DBF code).
 
 Rule catalog:
-- **Module-agnostic** (run on I/P/C/S/F): required-name (C1_1 — first name for I, entity name for P/C/S), required-email (C1_3), forms-at-least-one, main-form presence (`forms-has-1040` / `forms-has-1065` / `forms-has-1120` / `forms-has-1120s` per module), status-rows-present (DATA5 returns at least one row — surfaces "never ran F4 status" as a warning, not a blocker).
-- **Individual-only**: required-last-name (C1_2), dependents-have-description (every Series=14 detail row has non-empty Description). On P/C/S these are reported in `skippedRules` with a not-applicable reason — never silently passed.
+- **Module-agnostic** (run on I/P/C/S/F): required-name (C1_1 — first name for I, entity name for P/C/S/F), required-email (C1_3), forms-at-least-one, main-form presence (`forms-has-1040` / `forms-has-1065` / `forms-has-1120` / `forms-has-1120s` / `forms-has-1041` per module; hyphens and spaces in the stored form id are ignored), status-rows-present (DATA5 returns at least one row — surfaces "never ran F4 status" as a warning, not a blocker).
+- **Individual-only**: required-last-name (C1_2), dependents-have-description (every Series=14 detail row has non-empty Description). On P/C/S/F these are reported in `skippedRules` with a not-applicable reason — never silently passed.
 - **Partnership-only**: partners-present (DATA2 partner rows — 0 rows is a blocker; exactly 1 row warns, since a 1065 needs at least two partners).
 - **S-Corporation-only**: shareholders-present (DATA2 shareholder rows — 0 rows is a blocker). Ownership totals wait for verified field-dictionary mappings and are listed in `skippedRules`.
-- **Fiduciary-only**: beneficiaries-present (DATA2 beneficiary rows — 0 rows is a warning, since grantor trusts and trusts with no distributions can have none) and `forms-has-1041`.
+- **Fiduciary-only**: beneficiaries-present (DATA2 beneficiary rows — 0 rows is a warning, since grantor trusts and trusts with no distributions can have none).
 
 Gate order is fixed regardless of module — input validation, then context (9009), then module support, then existence — so the response shape never depends on which gate fired. An unknown `clientNumber` returns a success envelope `{ clientNumber, found: false, hint }` (same shape as `lacerte_client_read`), not an SDK error.
 
@@ -1107,7 +1107,7 @@ What it takes, and what is in place:
    - `lacerte-mcp map-diff record --before before.json --after after.json --id 1120.gross_receipts --concept "Gross receipts or sales" --form 1120 --line 1a --expect 12345` saves the mapping (refused unless exactly one cell or detail row changed).
    - Ask Claude to call `lacerte_reload_schema`. Recorded entries survive `lacerte-mcp update` and installer re-runs. Copy them into the source tree to ship them in a release.
 2. **Client-level fields** listed in the dictionary become writable under the SDK manual's range rules (a literal access-map entry or year overlay still wins).
-3. **Amounts (detail rows)** need live detail writes switched on: set `LACERTE_LIVE_DETAIL_WRITES=1` for the server after the REGRESSION_CHECKLIST "FP-2 live items" pass. Each client's detail rows are snapshotted before the first write, and every write is read back.
+3. **Amounts (detail rows)** need live detail writes switched on: after the REGRESSION_CHECKLIST "FP-2 live items" pass, re-run `install-http.ps1 -LiveDetailWrites` (remembered in install.json; it sets `LACERTE_LIVE_DETAIL_WRITES=1`). Even then the server writes only Series/Code listed in the verified dictionary (else 9012). Each client's detail rows are snapshotted before the first write, every write is read back, and a row that may have landed locks its idempotency key so a retry can never append a duplicate.
 4. **Enter the return** with the `lacerte_entity_return_entry` prompt (returnType 1120, 1120S, 1065 or 1041). It stops when the dictionary has no mappings, shows a source-to-field table for approval, dry-runs every write, and finishes with `lacerte_pre_filing_check`.
 5. Close and reopen the client in Lacerte to see the changes; Lacerte computes the forms. Filing stays in Lacerte.
 

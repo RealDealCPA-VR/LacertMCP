@@ -14,7 +14,7 @@ A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as t
 
 Bounding expectations up front saves a triage loop with the LLM:
 
-* **Return preparation only as far as it's mapped and enabled** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created. Writing return data needs verified field-dictionary mappings for that module (recorded on the Lacerte PC with `lacerte-mcp map-diff`; the dictionaries ship empty) and, for income/deduction/K-1 amounts, live detail writes switched on with `LACERTE_LIVE_DETAIL_WRITES=1` after the checks in REGRESSION_CHECKLIST "FP-2 live items". Until then return data is entered in Lacerte. See `docs/plans/filing-preparation.md`.
+* **Return preparation only as far as it's mapped and enabled** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created. Income/deduction/K-1 amounts (detail rows) are written only when live detail writes are switched on (`install-http.ps1 -LiveDetailWrites`, i.e. `LACERTE_LIVE_DETAIL_WRITES=1`, after REGRESSION_CHECKLIST "FP-2 live items") AND their Series/Code is in the verified field dictionary — the server refuses anything else (9012). Client-level fields are writable when the access map enables them (3 built in, `field-access set`) or the dictionary maps them. The dictionaries ship empty; they're recorded on the Lacerte PC with `lacerte-mcp map-diff`. Until then return data is entered in Lacerte. See `docs/plans/filing-preparation.md`.
 * **No e-filing actions** — read-only EF status via `lacerte_ef_status` (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.
 * **No printing, PDF rendering, or third-party export** — DBF read/write + COM field-write only. Use Lacerte's File → Print or Print to PDF for any rendered output.
 * **No organizer, client portal, letter template, or diagnostics-detail access** — those live in non-DBF Lacerte surfaces this MCP doesn't wire up.
@@ -45,7 +45,7 @@ You don't need Windows or a Lacerte install to kick the tires — the MCP ships 
 | "Switch to 2024 Corporate at `C:\Lacerte\24Tax\CData`, then list every client and show me the state rows for ACME." | `lacerte_set_context` + `lacerte_client_list` + `lacerte_state_read` | `ACME` (CA + NY), `WIDG` (TX) |
 | "Switch to 2024 Partnership at `C:\Lacerte\24Tax\PData`, then list every client and read PART's subclients." | `lacerte_set_context` + `lacerte_client_list` + `lacerte_subclient_read` | `PART` (3 partners: Alice / Bob / Carol) |
 
-All 8 seeded ClientIDs (`SMIT`, `JONE`, `REJE`, `BROW`, `PEND`, `ACME`, `WIDG`, `PART`) live across the four sim datapaths. The simulation store is observationally identical to live mode for the happy path (CLAUDE.md two-mode discipline) so anything that works here works against a real Lacerte install once you flip `LACERTE_LIVE=1`.
+All 12 seeded ClientIDs (`SMIT`, `JONE`, `REJE`, `BROW`, `PEND`, `ACME`, `WIDG`, `PART`, `ORCH`, `HOLW`, `MAPL`, `BIRC`) live across the six sim datapaths. The simulation store is observationally identical to live mode for the happy path (CLAUDE.md two-mode discipline) so anything that works here works against a real Lacerte install once you flip `LACERTE_LIVE=1`.
 
 ## Quick start (dev / simulation mode)
 

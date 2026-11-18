@@ -1600,7 +1600,7 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
 - [ ] Live-box items: REGRESSION_CHECKLIST "Round-8 live items"; installer/updater live checks (elevated install → non-elevated `update --force`; task shows "run as soon as possible after a missed start").
 
 ### Filing preparation — 1120 / 1120-S / 1065 / 1041 (planned 2026-11-18; plan: docs/plans/filing-preparation.md)
-Today the MCP reads every return type and creates clients, but can't prepare returns: live mode writes only 3 DATA1 fields (I/P), detail rows can't be written (9202), there is no field dictionary, and no 1041 pre-filing check.
+Starting point (2026-11-18 morning): reads every return type and creates clients, but couldn't prepare returns. Built since: see the checked items and docs/plans/filing-preparation.md "Status".
 - [x] FP-0 Decisions taken as recommended (2026-11-18): range rules only for dictionary-listed fields; detail writes snapshot + read back.
 - [x] FP-1a Gated range-rule fallback (FieldAccessMapLoader.ResolveFieldAccess, source `sdk-range-rule`).
 - [ ] FP-1b Implement the dumper's `--live` probe (Lacerte PC).

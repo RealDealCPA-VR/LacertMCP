@@ -1,5 +1,12 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, review) — independent review of the filing-prep code
+
+- Three independent reviewers (detail writes; dictionary + map-diff; prompt/fixtures/docs). All confirmed findings fixed; tests 2095 passed, 11 skipped, 0 failed (two runs); build 0 warnings.
+- Most important: a live detail row that may have landed (9022, or a worker failure with rowWritten yes/unknown) now PINS its idempotency key, so a retry can't append a duplicate; live detail writes are server-gated to dictionary-mapped Series/Code (9012 otherwise) and need a Suffix; map-diff record requires --expect and can't record a coincidental change; the range-rule fallback skips fields any year's overlay withdraws; the dictionary merge no longer aborts on a case-only id difference.
+- Installer: -LiveDetailWrites (remembered). Release zip ships REGRESSION_CHECKLIST.md. Guide republished.
+- Still to verify on the Lacerte PC: REGRESSION_CHECKLIST "FP-2 live items" and "Round-8 live items"; then record mappings and run FP-6.
+
 ## Last Session Summary (2026-11-18, later) — filing-prep build (everything that doesn't need the Lacerte PC)
 
 - Built FP-1a, FP-2, FP-3 tooling, FP-4 and FP-5 (three worktree agents + coordinator; details in docs/plans/filing-preparation.md "Status" and Todo "Filing preparation").

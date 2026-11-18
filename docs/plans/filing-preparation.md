@@ -2,7 +2,7 @@
 
 **Goal.** Claude can enter a corporate (1120), S-corporation (1120-S), partnership (1065) or trust (1041) return's data into Lacerte from source documents (trial balance, K-1 packages, prior-year return), with every write validated, read back and reversible. Lacerte still computes the forms; filing stays in Lacerte.
 
-**Today (2026-11-18).** Every module can be read in full and clients can be created. In live mode, only 3 DATA1 fields are writable (1040 and 1065 only), detail rows can't be written (9202), Claude has no map from tax concepts to Lacerte fields, and there is no 1041 pre-filing check. See the capability table in `docs/lacerte-mcp-guide.html`, Part I.
+**Before this work (2026-11-18 morning).** Every module could be read and clients created, but live mode wrote only 3 DATA1 fields (1040/1065), detail rows couldn't be written, there was no field dictionary and no 1041 pre-filing check. See **Status** below for what is built now.
 
 ## Status (2026-11-18)
 

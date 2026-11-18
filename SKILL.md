@@ -44,7 +44,7 @@ The server runs in one of two modes; identical wire shape, different backend:
 
 | Mode         | Triggered by                                      | Notes                                                                                              |
 | ------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `simulation` | default off-Windows; `LACERTE_SIMULATION=1` forces | 8 seeded clients across 4 datapaths; safe for any operation that doesn't probe live SDK semantics. |
+| `simulation` | default off-Windows; `LACERTE_SIMULATION=1` forces | 12 seeded clients across 6 datapaths; safe for any operation that doesn't probe live SDK semantics. |
 | `live`       | `LACERTE_LIVE=1` on Windows with SDK installed    | Real ODBC reads + COM writes. Requires `lacerte-mcp register` + 24h auth ticket.                   |
 
 Sim seed roster (verbatim ClientIDs you may see back):
@@ -55,6 +55,8 @@ Sim seed roster (verbatim ClientIDs you may see back):
 | `C:\Lacerte\24Tax\IData`  | 2024     | Individual  | `BROW` (joint, 2 deps), `PEND` (EF Transmitted) |
 | `C:\Lacerte\24Tax\CData`  | 2024     | Corporate   | `ACME` (CA + NY), `WIDG` (TX)                  |
 | `C:\Lacerte\24Tax\PData`  | 2024     | Partnership | `PART` (3 partners: Alice / Bob / Carol)       |
+| `C:\Lacerte\24Tax\SData`  | 2024     | S-Corp      | `ORCH` (2 shareholders), `HOLW` (no shareholders) |
+| `C:\Lacerte\24Tax\FData`  | 2024     | Fiduciary   | `MAPL` (2 beneficiaries), `BIRC` (no beneficiaries) |
 
 Always call `lacerte_session_status` first to confirm mode, registration, active context, and any auto-emitted `nextSteps` bootstrap hints.
 
