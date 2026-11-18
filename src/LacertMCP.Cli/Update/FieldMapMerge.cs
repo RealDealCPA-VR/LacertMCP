@@ -84,7 +84,9 @@ namespace LacertMCP.Cli.Update
     /// Per ENTRY, starting from the release's shard:
     /// </para>
     /// <list type="bullet">
-    ///   <item><description>an installed entry the release doesn't have is kept;</description></item>
+    ///   <item><description>an installed entry built on this PC that the release doesn't have is kept;
+    ///   an installed CURATED entry the release no longer ships is dropped (the release removed it on
+    ///   purpose — keeping it would freeze a retracted classification);</description></item>
     ///   <item><description>an installed entry built on this PC — any <c>source</c> other than the
     ///   curated release sources (<see cref="ReleaseSources"/>: <c>sdk-pdf</c>, and <c>spec</c>, the
     ///   <see cref="FieldEntry"/> default) — overrides the release's entry for that field. That covers
@@ -163,6 +165,12 @@ namespace LacertMCP.Cli.Update
                 {
                     if (!release.TryGetValue(kv.Key, out var incoming))
                     {
+                        if (IsReleaseSource(kv.Value.Source))
+                        {
+                            // A curated row the release no longer ships was retracted.
+                            updated++;
+                            continue;
+                        }
                         merged[kv.Key] = kv.Value;
                         kept++;
                     }

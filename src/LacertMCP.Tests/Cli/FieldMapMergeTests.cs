@@ -57,6 +57,27 @@ namespace LacertMCP.Tests.Cli
             ShardJson.Row("I|1|C1_G12", "ReadOnly", "sdk-pdf", addedAt: "2026-11-20"),   // corrected from ReadWrite
             ShardJson.Row("I|1|C1_G13", "ReadWrite", "sdk-pdf"));
 
+        // A curated row the release no longer ships was retracted on purpose;
+        // keeping the installed copy would freeze it forever. Rows built on
+        // this PC that the release lacks are still kept.
+        [Fact]
+        public void CuratedRowRetractedByRelease_IsDropped_PcRowsKept()
+        {
+            File.WriteAllText(Path.Combine(_installed, "individual.json"), ShardJson.Shard(
+                ShardJson.Row("I|1|C1_G1", "ReadOnly", "sdk-pdf"),
+                ShardJson.Row("I|1|C1_G99", "ReadWrite", "sdk-pdf"),                          // retracted upstream
+                ShardJson.Row("I|1|C1_40", "ReadWrite", "live-probe", null, "2026-11-18")));  // dumper on this PC
+            File.WriteAllText(Path.Combine(_release, "individual.json"), ShardJson.Shard(
+                ShardJson.Row("I|1|C1_G1", "ReadOnly", "sdk-pdf")));
+
+            FieldMapMerge.Merge(_installed, _release);
+
+            var merged = ShardJson.Load(Path.Combine(_release, "individual.json"));
+            Assert.False(merged.ContainsKey("I|1|C1_G99"));
+            Assert.Equal(FieldAccess.ReadWrite, merged["I|1|C1_40"].Access);
+            Assert.Equal(2, merged.Count);
+        }
+
         [Fact]
         public void CuratedFixArrives_DumperAndManualEntriesKept()
         {
