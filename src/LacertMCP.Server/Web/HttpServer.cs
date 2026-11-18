@@ -31,8 +31,8 @@ namespace LacertMCP.Server.Web
     ///
     /// <para>Who may do what:</para>
     /// <list type="bullet">
-    ///   <item>This computer: everything.</item>
-    ///   <item>Tailnet devices owned by the same Tailscale login as this PC: may open the control page (and grant access).</item>
+    ///   <item>This computer: everything (unless the request was relayed by a local proxy: refused).</item>
+    ///   <item>Untagged tailnet devices owned by the same Tailscale login as this (untagged) PC: may open the control page (and grant access).</item>
     ///   <item>Any tailnet device: may use /mcp only after it is granted Read or Read&amp;write on the Access tab. Read devices can never write.</item>
     ///   <item>Anything else: refused.</item>
     /// </list>
@@ -41,7 +41,22 @@ namespace LacertMCP.Server.Web
     {
         public const int DefaultPort = 8767;
         private const long MaxBodyBytes = 4 * 1024 * 1024;
+        private const long MaxApiBodyBytes = 64 * 1024;
         private const string AdminHeader = "X-Lacerte-Admin";
+
+        /// <summary>Repeats of the same refused / setup event from one device are logged at most this often.</summary>
+        internal static readonly TimeSpan RepeatEventWindow = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// Headers a reverse proxy or tunnel adds. A loopback request carrying any
+        /// of them was relayed from somewhere else (tailscale serve, ssh -L, a local
+        /// hub), so it must not inherit "this computer" (full access).
+        /// </summary>
+        internal static readonly string[] ProxyHeaders =
+        {
+            "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "Via", "X-Real-IP",
+            "Tailscale-User-Login", "Tailscale-User-Name",
+        };
 
         private readonly LacerteSessionManager _session;
         private readonly IServiceProvider _services;
@@ -52,7 +67,7 @@ namespace LacertMCP.Server.Web
         private readonly DeviceAccess _access;
         private readonly ActivityLog _activity;
         private readonly McpHttpSessions _sessions;
-        private readonly int _port;
+        private int _port;
 
         private HttpListener? _listener;
         private readonly HashSet<string> _boundTailnetIps = new HashSet<string>();
@@ -61,6 +76,7 @@ namespace LacertMCP.Server.Web
         private Task _maintenance = Task.CompletedTask;
         private TailnetDevice? _self;
         private string? _bindError;
+        private string? _lastRecordedBindError;
         private bool _tailscaleWasFailing;
         private readonly DateTime _startedAt = DateTime.UtcNow;
 
@@ -84,6 +100,13 @@ namespace LacertMCP.Server.Web
             _activity = activity;
             _sessions = sessions;
             _port = ResolvePort();
+        }
+
+        /// <summary>Test seam: the port to listen on (set before <see cref="StartAsync"/>).</summary>
+        internal int Port
+        {
+            get => _port;
+            set => _port = value;
         }
 
         public static int ResolvePort()
@@ -187,13 +210,19 @@ namespace LacertMCP.Server.Web
                     _listener.Prefixes.Add($"http://{ip}:{_port}/");
                     lock (_boundTailnetIps) _boundTailnetIps.Add(ip);
                     _bindError = null;
+                    _lastRecordedBindError = null;
                     _activity.Record("success", "system", "Listening on the tailnet at http://" + ip + ":" + _port + "/");
                 }
                 catch (Exception ex)
                 {
                     _bindError = "Couldn't listen on the tailnet address " + ip + ": " + ex.Message
                         + ". Run the installer (it adds the URL reservation `netsh http add urlacl url=http://+:" + _port + "/ user=<you>`).";
-                    _activity.Record("error", "system", "Couldn't listen on the tailnet address " + ip, null, ex.Message);
+                    // Retried every 30s: record it once per distinct failure, like the Tailscale-failure path.
+                    if (_lastRecordedBindError != _bindError)
+                    {
+                        _activity.Record("error", "system", "Couldn't listen on the tailnet address " + ip, null, ex.Message);
+                        _lastRecordedBindError = _bindError;
+                    }
                 }
             }
         }
@@ -238,6 +267,14 @@ namespace LacertMCP.Server.Web
                 }
                 var path = req.Url?.AbsolutePath ?? "/";
                 var remote = req.RemoteEndPoint?.Address ?? IPAddress.None;
+
+                if (IPAddress.IsLoopback(remote) && IsProxied(req.Headers))
+                {
+                    _activity.RecordThrottled("proxied", RepeatEventWindow, "warn", "security",
+                        "Refused a request relayed to this computer through a proxy or tunnel", null, path);
+                    await SendJson(res, 403, new { error = "Refused: this request was relayed through a proxy or tunnel on the Lacerte PC (it carries forwarding headers), so it can't be treated as this computer. Connect directly to this PC's Tailscale address instead." }).ConfigureAwait(false);
+                    return;
+                }
 
                 if (path == "/healthz")
                 {
@@ -297,6 +334,9 @@ namespace LacertMCP.Server.Web
             }
         }
 
+        internal static bool IsProxied(System.Collections.Specialized.NameValueCollection headers)
+            => ProxyHeaders.Any(h => headers[h] != null);
+
         private bool HostAllowed(HttpListenerRequest req)
         {
             var host = (req.Headers["Host"] ?? string.Empty).ToLowerInvariant();
@@ -316,7 +356,7 @@ namespace LacertMCP.Server.Web
             if (IPAddress.IsLoopback(remote)) return (Caller.Local(remote.ToString()), string.Empty, 0);
             if (!Tailscale.IsTailnetAddress(remote))
             {
-                _activity.Record("warn", "security", "Refused a request from outside the tailnet", remote.ToString());
+                _activity.RecordThrottled("outside:" + remote, RepeatEventWindow, "warn", "security", "Refused a request from outside the tailnet", remote.ToString());
                 return (null, "Only this computer and devices on its tailnet may connect.", 403);
             }
             var who = await _tailscale.WhoisAsync(remote).ConfigureAwait(false);
@@ -329,8 +369,10 @@ namespace LacertMCP.Server.Web
             {
                 return (null, "No tailnet device answers to " + remote + ".", 403);
             }
-            var ownerId = _self?.OwnerId;
-            var isOwner = !string.IsNullOrEmpty(ownerId) && who.Device.OwnerId == ownerId;
+            // Tagged nodes all share one "tagged-devices" user, so ownership only
+            // counts between untagged nodes: if this PC is tagged, no remote device
+            // is the owner (this computer itself still is).
+            var isOwner = TailnetDevice.SameOwner(_self, who.Device);
             return (new Caller(false, who.Device.StableId, who.Device.Name, isOwner, remote.ToString()), string.Empty, 0);
         }
 
@@ -342,6 +384,27 @@ namespace LacertMCP.Server.Web
             var level = LevelFor(caller);
             if (path == "/access-check")
             {
+                // Only the setup script calls this, after it has started: the install
+                // path asks for the device's access, the uninstall path says it
+                // removed itself (?uninstall=1). Fetching /setup.ps1 alone records
+                // nothing, because the uninstall flag lives on the workstation.
+                if (!caller.IsLocal)
+                {
+                    if (req.QueryString["uninstall"] == "1")
+                    {
+                        _setupRuns.TryRemove(caller.StableId, out _);
+                        _activity.RecordThrottled("unsetup:" + caller.StableId, RepeatEventWindow, "info", "access",
+                            "Workstation setup removed from this device", caller.Name);
+                    }
+                    else
+                    {
+                        _setupRuns[caller.StableId] = DateTime.UtcNow;
+                        _activity.RecordThrottled("setup:" + caller.StableId, RepeatEventWindow,
+                            level == AccessLevel.None ? "warn" : "info", "access",
+                            level == AccessLevel.None ? "Workstation setup ran. Give this device access on the Access tab." : "Workstation setup ran",
+                            caller.Name);
+                    }
+                }
                 await SendJson(res, 200, new { device = caller.Name, level = level.ToString().ToLowerInvariant() }).ConfigureAwait(false);
                 return;
             }
@@ -352,13 +415,6 @@ namespace LacertMCP.Server.Web
             }
             // HostAllowed already checked the Host header is this PC's tailnet IP (or loopback) + port.
             var baseUrl = "http://" + req.Headers["Host"];
-            if (!caller.IsLocal)
-            {
-                _setupRuns[caller.StableId] = DateTime.UtcNow;
-                _activity.Record(level == AccessLevel.None ? "warn" : "info", "access",
-                    level == AccessLevel.None ? "Workstation setup ran. Give this device access on the Access tab." : "Workstation setup ran",
-                    caller.Name);
-            }
             await SendText(res, 200, "text/plain; charset=us-ascii", WorkstationSetup.SetupScript(baseUrl)).ConfigureAwait(false);
         }
 
@@ -382,7 +438,7 @@ namespace LacertMCP.Server.Web
             var level = LevelFor(caller);
             if (level == AccessLevel.None)
             {
-                _activity.Record("warn", "security", "Refused an agent: this device has no Lacerte access yet", caller.Name);
+                _activity.RecordThrottled("noaccess:" + caller.StableId, RepeatEventWindow, "warn", "security", "Refused an agent: this device has no Lacerte access yet", caller.Name);
                 await SendJsonRpcError(res, 403,
                     "This device (" + caller.Name + ") hasn't been given access to Lacerte. On the Lacerte PC open the Lacerte MCP control page, Access tab, and choose Read only or Read & write for it.").ConfigureAwait(false);
                 return;
@@ -395,7 +451,13 @@ namespace LacertMCP.Server.Web
                     await HandleMcpPostAsync(ctx, caller, level, sessionId).ConfigureAwait(false);
                     return;
                 case "GET":
-                    await HandleMcpGetAsync(ctx, caller, sessionId).ConfigureAwait(false);
+                    // No standalone server-to-client SSE stream: this server never sends
+                    // unsolicited messages, and HttpListener never notices a dead GET
+                    // client, so a held-open stream pinned its session (never reaped or
+                    // evicted) until the cap refused every new agent. The Streamable
+                    // HTTP spec allows 405 here; clients then use POST responses only.
+                    res.Headers["Allow"] = "POST, DELETE";
+                    await SendJsonRpcError(res, 405, "Method Not Allowed: this server does not offer a server-to-client event stream; use POST.").ConfigureAwait(false);
                     return;
                 case "DELETE":
                     if (!string.IsNullOrEmpty(sessionId) && _sessions.TryGet(sessionId!, out var del) && SameCaller(del, caller))
@@ -424,7 +486,15 @@ namespace LacertMCP.Server.Web
             JsonRpcMessage? message;
             try
             {
-                message = await JsonSerializer.DeserializeAsync<JsonRpcMessage>(req.InputStream, McpJsonUtilities.DefaultOptions).ConfigureAwait(false);
+                // The cap is enforced on the bytes actually read, so a chunked body
+                // (no Content-Length) can't bypass it and exhaust memory.
+                using var body = new LimitedReadStream(req.InputStream, MaxBodyBytes);
+                message = await JsonSerializer.DeserializeAsync<JsonRpcMessage>(body, McpJsonUtilities.DefaultOptions).ConfigureAwait(false);
+            }
+            catch (RequestTooLargeException)
+            {
+                await SendJsonRpcError(res, 413, "Request too large.").ConfigureAwait(false);
+                return;
             }
             catch (JsonException)
             {
@@ -444,13 +514,14 @@ namespace LacertMCP.Server.Web
                     await SendJsonRpcError(res, 400, "Bad Request: start with an initialize request (no Mcp-Session-Id header was sent).").ConfigureAwait(false);
                     return;
                 }
-                if (!await _sessions.EnsureCapacityAsync().ConfigureAwait(false))
+                session = CreateSession(caller);
+                if (!await _sessions.TryAddAsync(session).ConfigureAwait(false))
                 {
-                    await SendJsonRpcError(res, 503, "Too many agent connections are busy right now (limit " + McpHttpSessions.MaxSessions + "). Try again shortly.").ConfigureAwait(false);
+                    await session.DisposeAsync().ConfigureAwait(false);
+                    await SendJsonRpcError(res, 503, "Too many agent connections are busy right now (limit " + McpHttpSessions.MaxSessionsPerDevice
+                        + " per device, " + McpHttpSessions.MaxSessions + " in all). Try again shortly.").ConfigureAwait(false);
                     return;
                 }
-                session = CreateSession(caller);
-                _sessions.Add(session);
                 _activity.Record("info", "connection", "Agent connected (" + (level == AccessLevel.Read ? "read only" : "read & write") + ")", caller.Name);
             }
             else if (!_sessions.TryGet(sessionId!, out session) || !SameCaller(session, caller))
@@ -476,41 +547,18 @@ namespace LacertMCP.Server.Web
                     var wrote = await session.Transport.HandlePostRequestAsync(message, res.OutputStream, _stop.Token).ConfigureAwait(false);
                     if (!wrote)
                     {
+                        // On net48, turning SendChunked off leaves ContentLength64 at -1 and
+                        // HttpListener then sends "Content-Length: -1", which Node's fetch
+                        // (the MCP TypeScript SDK) and curl reject as malformed.
                         res.SendChunked = false;
                         res.ContentType = null;
+                        res.ContentLength64 = 0;
                         res.StatusCode = 202;
                     }
                 }
                 finally
                 {
                     SessionScope.Current = null;
-                }
-            }
-        }
-
-        private async Task HandleMcpGetAsync(HttpListenerContext ctx, Caller caller, string? sessionId)
-        {
-            var res = ctx.Response;
-            if (string.IsNullOrEmpty(sessionId) || !_sessions.TryGet(sessionId!, out var session) || !SameCaller(session, caller))
-            {
-                await SendJsonRpcError(res, 404, "Session not found.", -32001).ConfigureAwait(false);
-                return;
-            }
-            res.ContentType = "text/event-stream";
-            res.Headers["Cache-Control"] = "no-cache,no-store";
-            res.SendChunked = true;
-            using (session.Enter())
-            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, session.Stop.Token))
-            {
-                try
-                {
-                    await session.Transport.HandleGetRequestAsync(res.OutputStream, cts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) { /* client or server closed */ }
-                catch (HttpListenerException) { /* client went away */ }
-                catch (InvalidOperationException)
-                {
-                    // Second concurrent GET for the same session.
                 }
             }
         }
@@ -560,7 +608,7 @@ namespace LacertMCP.Server.Web
                 await SendJson(res, 403, new { error = "Refused: this request did not come from the control page." }).ConfigureAwait(false);
                 return;
             }
-            if (req.ContentLength64 > 64 * 1024)
+            if (req.ContentLength64 > MaxApiBodyBytes)
             {
                 await SendJson(res, 413, new { error = "Request too large." }).ConfigureAwait(false);
                 return;
@@ -568,8 +616,14 @@ namespace LacertMCP.Server.Web
             JsonElement body;
             try
             {
-                using var doc = await JsonDocument.ParseAsync(req.InputStream).ConfigureAwait(false);
+                using var limited = new LimitedReadStream(req.InputStream, MaxApiBodyBytes);
+                using var doc = await JsonDocument.ParseAsync(limited).ConfigureAwait(false);
                 body = doc.RootElement.Clone();
+            }
+            catch (RequestTooLargeException)
+            {
+                await SendJson(res, 413, new { error = "Request too large." }).ConfigureAwait(false);
+                return;
             }
             catch
             {
@@ -590,14 +644,9 @@ namespace LacertMCP.Server.Web
                     }
                     _access.Set(stableId, name, level, caller.Name);
                     var label = level == AccessLevel.Write ? "read & write" : level == AccessLevel.Read ? "read only" : "no access";
-                    _activity.Record(level == AccessLevel.None ? "warn" : "success", "access", "Set " + name + " to " + label, caller.Name);
-                    // Close the device's live connections when access is removed, so it takes effect now.
-                    if (level == AccessLevel.None)
-                    {
-                        foreach (var s in _sessions.All.Where(s => s.Caller.StableId == stableId))
-                            await _sessions.RemoveAsync(s.Id, "access removed").ConfigureAwait(false);
-                    }
-                    await SendJson(res, 200, new { ok = true }).ConfigureAwait(false);
+                    var note = await ApplyAccessToLiveSessionsAsync(stableId, level).ConfigureAwait(false);
+                    _activity.Record(level == AccessLevel.None ? "warn" : "success", "access", "Set " + name + " to " + label, caller.Name, note);
+                    await SendJson(res, 200, new { ok = true, note }).ConfigureAwait(false);
                     return;
                 }
                 case "/api/disconnect":
@@ -631,6 +680,31 @@ namespace LacertMCP.Server.Web
                     await SendJson(res, 404, new { error = "Not found." }).ConfigureAwait(false);
                     return;
             }
+        }
+
+        /// <summary>
+        /// Makes an access change take effect on the device's live connections now,
+        /// not just on its next request: removing access closes them; any other
+        /// level updates their read-only flag at once, so a downgrade to Read stops
+        /// an in-flight bulk write at its next row. Returns a note for the operator
+        /// when an upgrade can't fully apply by itself (a context opened while the
+        /// device was read only stays read only until the agent sets it again).
+        /// </summary>
+        internal async Task<string?> ApplyAccessToLiveSessionsAsync(string stableId, AccessLevel level)
+        {
+            var live = _sessions.ForDevice(stableId);
+            if (level == AccessLevel.None)
+            {
+                foreach (var s in live)
+                    await _sessions.RemoveAsync(s.Id, "access removed").ConfigureAwait(false);
+                return null;
+            }
+            foreach (var s in live) s.Scope.ReadOnlyAccess = level == AccessLevel.Read;
+            if (level == AccessLevel.Write && live.Any(s => s.Scope.Context?.ReadOnly == true))
+            {
+                return "Agents already connected from this device opened their client file read only; each must call lacerte_set_context again (or reconnect) before it can write.";
+            }
+            return null;
         }
 
         private async Task<object> TestFolderAsync(string path, int taxYear, string module)
@@ -763,17 +837,39 @@ namespace LacertMCP.Server.Web
         /// write fail with 9012 and nobody knowing why.
         /// </summary>
         private static HealthCheck WritableFieldCheck()
+            => WritableFieldCheck(Path.Combine(Schema.FieldAccessMapLoader.GetSchemaRoot(), "base"));
+
+        /// <summary>The source the shipped, hand-curated shard rows carry (from the SDK PDF).</summary>
+        internal const string CuratedFieldSource = "sdk-pdf";
+
+        /// <summary>
+        /// Counts real field rules (shard entries: "M|table|field" → { access, source, … }),
+        /// how many are ReadWrite, and how many were produced on this PC by the dumper
+        /// (any source other than the curated release rows). The release ships only a
+        /// handful of curated ReadWrite rows, so until the dumper has run nearly every
+        /// write is refused; warn about that instead of reporting the curated rows as
+        /// a loaded map.
+        /// </summary>
+        internal static HealthCheck WritableFieldCheck(string dir)
         {
-            int entries = 0;
+            int entries = 0, writable = 0, probed = 0;
             try
             {
-                var dir = Path.Combine(Schema.FieldAccessMapLoader.GetSchemaRoot(), "base");
                 if (Directory.Exists(dir))
                 {
                     foreach (var f in Directory.GetFiles(dir, "*.json"))
                     {
                         using var doc = JsonDocument.Parse(File.ReadAllText(f));
-                        entries += CountLeaves(doc.RootElement);
+                        if (doc.RootElement.ValueKind != JsonValueKind.Object) continue;
+                        foreach (var p in doc.RootElement.EnumerateObject())
+                        {
+                            if (p.Value.ValueKind != JsonValueKind.Object) continue;
+                            var access = Prop(p.Value, "access");
+                            if (access.Length == 0) continue;
+                            entries++;
+                            if (string.Equals(access, "ReadWrite", StringComparison.OrdinalIgnoreCase)) writable++;
+                            if (!string.Equals(Prop(p.Value, "source"), CuratedFieldSource, StringComparison.OrdinalIgnoreCase)) probed++;
+                        }
                     }
                 }
             }
@@ -781,21 +877,22 @@ namespace LacertMCP.Server.Web
             {
                 return new HealthCheck("Writable fields", "warn", "Couldn't read the field access map.", null);
             }
-            return entries > 0
-                ? new HealthCheck("Writable fields", "ok", entries + " field rules loaded; writes to any other field are refused.", null)
-                : new HealthCheck("Writable fields", "warn", "The field access map is empty, so every field write is refused (reads work).",
-                    "On this PC run dumper\\LacertMCP.FieldAccessDumper.exe --live --year <year> --out \"" + Path.Combine(Schema.FieldAccessMapLoader.GetSchemaRoot(), "base") + "\" for each tax year you use, then restart the server.");
+            var fix = "On this PC run dumper\\LacertMCP.FieldAccessDumper.exe --live --year <year> --out \"" + dir + "\" for each tax year you use, then restart the server.";
+            if (probed > 0)
+                return new HealthCheck("Writable fields", "ok", entries + " field rules loaded (" + writable + " writable); writes to any other field are refused.", null);
+            if (entries > 0)
+                return new HealthCheck("Writable fields", "warn", "Only the " + entries + " built-in field rules are loaded (" + writable + " writable), so almost every field write is refused (reads work). The field map hasn't been generated on this PC yet.", fix);
+            return new HealthCheck("Writable fields", "warn", "The field access map is empty, so every field write is refused (reads work).", fix);
         }
 
-        private static int CountLeaves(JsonElement e)
+        private static string Prop(JsonElement e, string name)
         {
-            switch (e.ValueKind)
+            foreach (var p in e.EnumerateObject())
             {
-                case JsonValueKind.Object: return e.EnumerateObject().Sum(p => CountLeaves(p.Value));
-                case JsonValueKind.Array: return e.EnumerateArray().Sum(CountLeaves);
-                case JsonValueKind.String: return 1;
-                default: return 0;
+                if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.String)
+                    return p.Value.GetString() ?? string.Empty;
             }
+            return string.Empty;
         }
 
         private List<string> BoundIps()
@@ -830,7 +927,8 @@ namespace LacertMCP.Server.Web
             var health = await HealthAsync(deep: false).ConfigureAwait(false);
             var (self, peers, tsError) = await _tailscale.StatusAsync().ConfigureAwait(false);
             var grants = _access.All;
-            var today = DateTime.UtcNow.Date;
+            // "Today" is the operator's day on this PC, not the UTC day (events are stored in UTC).
+            var today = DateTime.Now.Date.ToUniversalTime();
             var urls = new List<string>();
             lock (_boundTailnetIps) urls.AddRange(_boundTailnetIps.Select(ip => "http://" + ip + ":" + _port + "/mcp"));
 
@@ -854,7 +952,7 @@ namespace LacertMCP.Server.Web
                     connections = _sessions.Count,
                     devicesWithAccess = grants.Count(g => g.Parsed != AccessLevel.None),
                     toolCallsToday = _activity.CountSince(today, e => e.Category == "tool" || e.Category == "write"),
-                    writesToday = _activity.CountSince(today, e => e.Category == "write" && e.Level == "success"),
+                    writesToday = _activity.CountSince(today, e => e.Category == "write" && e.Level == "success" && e.Verified),
                     problemsToday = _activity.CountSince(today, e => e.Level == "error"),
                 },
                 connections = _sessions.All.Select(s => new
@@ -880,7 +978,8 @@ namespace LacertMCP.Server.Web
                     os = p.Os,
                     online = p.Online,
                     address = p.Addresses.FirstOrDefault(a => a.Contains('.')),
-                    sameOwner = self != null && p.OwnerId == self.OwnerId,
+                    sameOwner = TailnetDevice.SameOwner(self, p),
+                    tagged = p.IsTagged,
                     level = (grants.FirstOrDefault(g => g.StableId == p.StableId)?.Parsed ?? AccessLevel.None).ToString().ToLowerInvariant(),
                     setupAt = _setupRuns.TryGetValue(p.StableId, out var ranAt) ? ranAt : (DateTime?)null,
                 }),

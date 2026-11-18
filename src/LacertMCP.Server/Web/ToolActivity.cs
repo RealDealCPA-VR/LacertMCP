@@ -67,10 +67,35 @@ namespace LacertMCP.Server.Web
             else if (write) message = tool + (verified == true ? " (verified)" : verified == null && tool.Contains("field") ? " (not verifiable)" : string.Empty);
             else message = tool + (dryRun ? " (dry run)" : string.Empty);
 
-            activity.Record(ok ? (write ? "success" : "info") : "error", write ? "write" : "tool", message, device, target);
+            activity.Append(new ActivityEvent
+            {
+                At = DateTime.UtcNow,
+                Level = ok ? (write ? "success" : "info") : "error",
+                Category = write ? "write" : "tool",
+                Message = message,
+                Device = device,
+                Detail = target,
+                Verified = ok && write && verified == true,
+            });
         }
 
-        private static string Plain(JsonElement v)
-            => v.ValueKind == JsonValueKind.String ? v.GetString() ?? string.Empty : v.ToString();
+        private const int MaxTargetChars = 64;
+
+        /// <summary>
+        /// An argument as it may appear in the activity file: identifier-safe
+        /// characters only (letters, digits, _ - .), at most 64 of them, and an
+        /// SSN-shaped value (some firms number clients by SSN) masked to its last
+        /// four digits. Applies to refused writes too: whatever the agent sent
+        /// lands on disk in plain text otherwise.
+        /// </summary>
+        internal static string Plain(JsonElement v)
+        {
+            var raw = v.ValueKind == JsonValueKind.String ? v.GetString() ?? string.Empty : v.ToString();
+            var safe = new string(raw.Where(c => (c < 128 && char.IsLetterOrDigit(c)) || c == '_' || c == '-' || c == '.').ToArray());
+            var digits = new string(safe.Where(char.IsDigit).ToArray());
+            if (digits.Length == 9 && safe.All(c => char.IsDigit(c) || c == '-'))
+                return "*****" + digits.Substring(5);
+            return safe.Length > MaxTargetChars ? safe.Substring(0, MaxTargetChars) + "..." : safe;
+        }
     }
 }

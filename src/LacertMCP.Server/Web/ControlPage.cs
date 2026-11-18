@@ -247,6 +247,8 @@ namespace LacertMCP.Server.Web
   "use strict";
   var state = null;
   var filter = "all";
+  var testResults = {};
+  var lastSetupKey = null;
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; }
   function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
@@ -343,7 +345,7 @@ namespace LacertMCP.Server.Web
         if (level === o[0]) return;
         if (o[0] === "write" && !confirm("Let agents on " + name + " change data on your Lacerte returns?")) return;
         post("/api/access", { stableId: stableId, name: name, level: o[0] })
-          .then(function () { flash("ok", name + ": " + o[1].toLowerCase()); load(); })
+          .then(function (r) { flash(r.note ? "info" : "ok", name + ": " + o[1].toLowerCase() + (r.note ? ". " + r.note : "")); load(); })
           .catch(function (e) { flash("err", e.message); });
       });
       seg.appendChild(b);
@@ -365,7 +367,7 @@ namespace LacertMCP.Server.Web
       var tr = el("tr");
       var n = el("td"); var nm = el("div", null, d.name);
       if (d.setupAt && d.level === "none") { var bd = el("span", "badge", "Ran setup " + ago(d.setupAt)); bd.title = "This workstation ran the setup line and is waiting for access."; nm.appendChild(bd); }
-      n.appendChild(nm); n.appendChild(el("div", "muted small", (d.os || "") + (d.address ? " · " + d.address : "") + (d.sameOwner ? "" : " · different Tailscale login")));
+      n.appendChild(nm); n.appendChild(el("div", "muted small", (d.os || "") + (d.address ? " · " + d.address : "") + (d.tagged ? " · tagged device" : d.sameOwner ? "" : " · different Tailscale login")));
       tr.appendChild(n);
       tr.appendChild(el("td", null, d.online ? "Online" : "Offline"));
       var c = el("td"); c.appendChild(levelControl(d.stableId, d.name, d.level)); tr.appendChild(c);
@@ -418,6 +420,11 @@ namespace LacertMCP.Server.Web
       td.appendChild(b); tr.appendChild(td); tb.appendChild(tr);
     });
     var url = s.mcpUrls[0] || s.localUrl;
+    // The addresses and setup lines rarely change: rebuild them only when they do,
+    // so the 5 s refresh doesn't wipe out a text selection the operator is copying.
+    var setupKey = JSON.stringify([s.mcpUrls, s.localUrl, s.setupUrls]);
+    if (setupKey === lastSetupKey) return;
+    lastSetupKey = setupKey;
     var u = $("urls"); clear(u);
     (s.mcpUrls.length ? s.mcpUrls : [s.localUrl]).forEach(function (x) { u.appendChild(el("code", null, x)); u.appendChild(document.createTextNode(" ")); });
     var sc = $("setupCmds"); clear(sc);
@@ -442,15 +449,25 @@ namespace LacertMCP.Server.Web
       tr.appendChild(el("td", null, f.taxYear));
       tr.appendChild(el("td", null, f.moduleName));
       var td = el("td"); var b = el("button", null, "Test read"); var out = el("div", "small muted");
+      var key = f.path + "|" + f.taxYear + "|" + f.module;
+      showTest(b, out, testResults[key]);
       b.addEventListener("click", function () {
-        b.disabled = true; out.textContent = "Reading…";
+        // Results live in testResults, not in the row: the 5 s refresh rebuilds this table.
+        testResults[key] = { busy: true, text: "Reading…" };
+        showTest(b, out, testResults[key]);
         post("/api/test-folder", { path: f.path, taxYear: f.taxYear, module: f.module })
-          .then(function (r) { out.textContent = r.message + (r.remediation ? " " + r.remediation : ""); out.style.color = r.ok ? "var(--ok)" : "var(--bad)"; })
-          .catch(function (e) { out.textContent = e.message; })
-          .then(function () { b.disabled = false; });
+          .then(function (r) { testResults[key] = { text: r.message + (r.remediation ? " " + r.remediation : ""), color: r.ok ? "var(--ok)" : "var(--bad)" }; })
+          .catch(function (e) { testResults[key] = { text: e.message, color: "var(--bad)" }; })
+          .then(function () { if (state) renderFolders(state); });
       });
       td.appendChild(b); td.appendChild(out); tr.appendChild(td); tb.appendChild(tr);
     });
+  }
+
+  function showTest(b, out, r) {
+    b.disabled = !!(r && r.busy);
+    out.textContent = r ? r.text : "";
+    out.style.color = r && r.color ? r.color : "";
   }
 
   function renderActivity(s) {

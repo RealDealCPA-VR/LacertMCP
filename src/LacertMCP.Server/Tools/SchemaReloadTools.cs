@@ -1,7 +1,9 @@
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using LacertMCP.Server.Errors;
 using LacertMCP.Server.Schema;
+using LacertMCP.Server.Session;
 using ModelContextProtocol.Server;
 
 namespace LacertMCP.Server.Tools
@@ -41,6 +43,16 @@ namespace LacertMCP.Server.Tools
         {
             return WrapToolHandler.Run(() =>
             {
+                // Reloading changes which fields are writable for every agent, so a
+                // read-only HTTP device may not trigger it (same 9001 as a refused write).
+                if (SessionScope.Current?.ReadOnlyAccess == true)
+                {
+                    throw new LacerteSDKError(SyntheticStatusCodes.FieldIsReadOnly, new Dictionary<string, object?>
+                    {
+                        ["operation"] = "ReloadSchema",
+                        ["reason"] = "Read-only session: ReloadSchema rejected.",
+                    });
+                }
                 var (modules, overlays) = FieldAccessMapLoader.ReloadCaches();
                 return Task.FromResult<object>(new
                 {
