@@ -28,6 +28,8 @@ namespace LacertMCP.Server.Schema
     ///   <item><description>Universal rule: <c>field == "C{table}_0"</c> (case-insensitive) → <see cref="FieldAccess.ReadOnly"/>.</description></item>
     ///   <item><description>Overlay (e.g. <c>ty21-not-supported.json</c>) — wins over base.</description></item>
     ///   <item><description>Base module map.</description></item>
+    ///   <item><description>FP-1a: the SDK range rules (<see cref="SdkRangeRuleAccess"/>), ONLY for a field the module's
+    ///   field dictionary (<see cref="FieldDictionaryLoader"/>) lists for the tax year.</description></item>
     ///   <item><description><see cref="FieldAccess.Unknown"/> fallback (makes the lookup total).</description></item>
     /// </list>
     ///
@@ -168,13 +170,62 @@ namespace LacertMCP.Server.Schema
         /// overlay lookups cannot be bypassed by a lowercased field name.
         /// </summary>
         public static FieldAccess GetFieldAccess(char module, int table, string field, int taxYear)
+            => ResolveFieldAccess(module, table, field, taxYear).Access;
+
+        // ---- FP-1a provenance ------------------------------------------------------
+
+        /// <summary>Provenance: the universal <c>C{table}_0 → ReadOnly</c> rule.</summary>
+        public const string SourceUniversalRule = "universal-rule";
+        /// <summary>Provenance: the exact-year overlay file.</summary>
+        public const string SourceOverlay = "overlay";
+        /// <summary>Provenance: the module's base shard.</summary>
+        public const string SourceBase = "base";
+        /// <summary>
+        /// Provenance: FP-1a — no literal entry, but the field is named in the
+        /// module's field dictionary, so the SDK manual's range rules decided.
+        /// </summary>
+        public const string SourceSdkRangeRule = "sdk-range-rule";
+        /// <summary>Provenance: nothing matched (<see cref="FieldAccess.Unknown"/>).</summary>
+        public const string SourceUnknown = "unknown";
+
+        /// <summary>
+        /// The resolved access for one field plus where it came from
+        /// (<see cref="SourceUniversalRule"/>, <see cref="SourceOverlay"/>,
+        /// <see cref="SourceBase"/>, <see cref="SourceSdkRangeRule"/> or
+        /// <see cref="SourceUnknown"/>). <see cref="DictionaryId"/> names the
+        /// field-dictionary entry that gated a range-rule result.
+        /// </summary>
+        public readonly struct FieldAccessResolution
         {
-            if (field == null) return FieldAccess.Unknown;
+            public FieldAccessResolution(FieldAccess access, string source, string? dictionaryId = null)
+            {
+                Access = access;
+                Source = source;
+                DictionaryId = dictionaryId;
+            }
+
+            public FieldAccess Access { get; }
+            public string Source { get; }
+            public string? DictionaryId { get; }
+        }
+
+        /// <summary>
+        /// <see cref="GetFieldAccess"/> with provenance. Lookup order:
+        /// universal rule → exact-year overlay → base shard → (FP-1a) SDK range
+        /// rules, ONLY when the module's field dictionary lists this exact
+        /// (table, field) for the year → <see cref="FieldAccess.Unknown"/>.
+        /// Literal entries (overlay or base) always win, so an overlay
+        /// <c>NotSupported</c> still blocks a dictionary-listed field. With no
+        /// dictionary entry the result is identical to the pre-FP-1a loader.
+        /// </summary>
+        public static FieldAccessResolution ResolveFieldAccess(char module, int table, string field, int taxYear)
+        {
+            if (field == null) return new FieldAccessResolution(FieldAccess.Unknown, SourceUnknown);
 
             // 1. Universal rule — allocation-free, case-insensitive, applies
             //    to every module/table. Must run BEFORE the map lookup so the
             //    rule stays unconditional even when the base shards populate.
-            if (IsClientNumberField(field, table)) return FieldAccess.ReadOnly;
+            if (IsClientNumberField(field, table)) return new FieldAccessResolution(FieldAccess.ReadOnly, SourceUniversalRule);
 
             // Normalize field once so the universal rule (above) and the
             // base/overlay map keys (below) agree on case. Base shards are
@@ -194,18 +245,106 @@ namespace LacertMCP.Server.Schema
             var overlay = LoadOverlay(snap, taxYear);
             if (overlay != null && overlay.Overrides.TryGetValue(key, out var o))
             {
-                return o.Access;
+                return new FieldAccessResolution(o.Access, SourceOverlay);
             }
 
             // 3. Base map.
             var baseMap = LoadModule(snap, module);
             if (baseMap.TryGetValue(key, out var entry))
             {
-                return entry.Access;
+                return new FieldAccessResolution(entry.Access, SourceBase);
             }
 
-            // 4. Unknown fallback.
-            return FieldAccess.Unknown;
+            // 4. FP-1a — gated SDK range-rule fallback. Only a field the
+            //    module's dictionary names (so Claude can explain what it is)
+            //    may be classified by the manual's range rules; everything
+            //    else stays fail-closed Unknown (9012). Any failure reading
+            //    the dictionary also stays Unknown.
+            FieldDictionaryEntry? dictEntry;
+            try
+            {
+                dictEntry = FieldDictionaryLoader.FindFieldEntry(module, table, normField, taxYear);
+            }
+            catch (Exception)
+            {
+                dictEntry = null;
+            }
+            if (dictEntry != null)
+            {
+                var ruled = SdkRangeRuleAccess(table, normField);
+                if (ruled.HasValue)
+                {
+                    return new FieldAccessResolution(ruled.Value, SourceSdkRangeRule, dictEntry.Id);
+                }
+            }
+
+            // 5. Unknown fallback.
+            return new FieldAccessResolution(FieldAccess.Unknown, SourceUnknown);
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex RangeRuleFieldPattern =
+            new System.Text.RegularExpressions.Regex("^C([1-7])_(G?)([0-9]{1,6})\\z",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// FP-1a — the SDK Developer Instructions' range rules ("Database Field
+        /// Access"), for a field with no literal entry. Returns null when no
+        /// rule covers the field (wrong shape, wrong table, <c>_0</c>, <c>G0</c>,
+        /// or the structural <c>C{2,3,4}_G1</c> columns, which ship as literal
+        /// entries). Pure; <see cref="ResolveFieldAccess"/> only consults it for
+        /// dictionary-listed fields.
+        /// <list type="bullet">
+        ///   <item><description><c>C1_n</c>, <c>C3_n</c> (n ≥ 1) → ReadWrite.</description></item>
+        ///   <item><description><c>C2_n</c>, <c>C4_n</c> (n ≥ 2) → ReadWrite; <c>C2_1</c>, <c>C4_1</c> (subclient number) → ReadOnly.</description></item>
+        ///   <item><description><c>C5_n</c>, <c>C6_n</c>, <c>C7_n</c> (n ≥ 1) → ReadOnly.</description></item>
+        ///   <item><description>Unlisted <c>C1_G*</c>, <c>C2_G2+</c>, <c>C3_G2+</c>, <c>C4_G2+</c>, <c>C6_G*</c>, <c>C7_G*</c> → Hidden.</description></item>
+        ///   <item><description>Unlisted <c>C5_G*</c> → ReadWrite.</description></item>
+        /// </list>
+        /// </summary>
+        public static FieldAccess? SdkRangeRuleAccess(int table, string field)
+        {
+            if (string.IsNullOrEmpty(field)) return null;
+            var m = RangeRuleFieldPattern.Match(field.ToUpperInvariant());
+            if (!m.Success) return null;
+            if (m.Groups[1].Value[0] - '0' != table) return null;
+            var global = m.Groups[2].Value.Length > 0;
+            var n = int.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+            if (n < 1) return null;
+
+            if (!global)
+            {
+                switch (table)
+                {
+                    case 1:
+                    case 3:
+                        return FieldAccess.ReadWrite;
+                    case 2:
+                    case 4:
+                        return n >= 2 ? FieldAccess.ReadWrite : FieldAccess.ReadOnly;
+                    case 5:
+                    case 6:
+                    case 7:
+                        return FieldAccess.ReadOnly;
+                    default:
+                        return null;
+                }
+            }
+
+            switch (table)
+            {
+                case 1:
+                case 6:
+                case 7:
+                    return FieldAccess.Hidden;
+                case 2:
+                case 3:
+                case 4:
+                    return n >= 2 ? FieldAccess.Hidden : (FieldAccess?)null;
+                case 5:
+                    return FieldAccess.ReadWrite;
+                default:
+                    return null;
+            }
         }
 
         /// <summary>
@@ -225,7 +364,8 @@ namespace LacertMCP.Server.Schema
         /// </summary>
         public static void AssertWritable(char module, int table, string field, int taxYear, bool force = false)
         {
-            var access = GetFieldAccess(module, table, field, taxYear);
+            var resolution = ResolveFieldAccess(module, table, field, taxYear);
+            var access = resolution.Access;
             var context = new Dictionary<string, object?>
             {
                 { "module", module.ToString() },
@@ -233,6 +373,14 @@ namespace LacertMCP.Server.Schema
                 { "field", field },
                 { "taxYear", taxYear },
             };
+            // FP-1a — when the SDK range rules (gated by a field-dictionary
+            // entry) decided, say so; literal-entry refusals keep their
+            // original context shape.
+            if (resolution.Source == SourceSdkRangeRule)
+            {
+                context["accessSource"] = SourceSdkRangeRule;
+                context["dictionaryId"] = resolution.DictionaryId;
+            }
 
             // P15-069: replace the duplicated prose "reason" string with
             // structured, machine-readable keys. The StatusInfo for each code
@@ -302,6 +450,17 @@ namespace LacertMCP.Server.Schema
             Collect(LoadModule(snap, module).Keys);
             var overlay = LoadOverlay(snap, taxYear);
             if (overlay != null) Collect(overlay.Overrides.Keys);
+            // FP-1a — dictionary-listed fields are resolvable through the
+            // range-rule fallback, so list them too (callers resolve each name
+            // through GetFieldAccess). Empty dictionaries add nothing.
+            try
+            {
+                foreach (var e in FieldDictionaryLoader.GetFieldEntries(module, table, taxYear))
+                {
+                    names.Add(e.Field!.ToUpperInvariant());
+                }
+            }
+            catch (Exception) { /* dictionary unreadable — fail closed (not listed) */ }
             return names.ToList();
         }
 
@@ -585,6 +744,12 @@ namespace LacertMCP.Server.Schema
             // Atomic single-pointer swap. Readers already inside GetFieldAccess
             // captured the previous snapshot at entry and finish their lookup
             // against it — no torn (base, overlay) blend is observable.
+            // FP-1a — the field dictionary gates the range-rule fallback, so a
+            // schema reload must also pick up newly recorded dictionary
+            // entries. Swapped first: a lookup racing the reload can at worst
+            // see the NEW dictionary with the OLD access map, and literal
+            // entries win over the dictionary either way.
+            FieldDictionaryLoader.ReloadCaches();
             var fresh = new AccessMapSnapshot();
             var prior = Interlocked.Exchange(ref _snapshot, fresh);
             return (prior.Modules.Count, prior.Overlays.Count);

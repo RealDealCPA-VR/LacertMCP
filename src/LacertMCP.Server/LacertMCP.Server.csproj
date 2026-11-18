@@ -47,6 +47,12 @@
     <Content Include="Schema\FieldAccessMap\**\*.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+    <!-- FP-3 field dictionary (Schema/FieldDictionary/<module>.json) — read by
+         FieldDictionaryLoader next to the access map; it gates the FP-1a
+         range-rule fallback. Always, for the same stale-copy reason as above. -->
+    <Content Include="Schema\FieldDictionary\*.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

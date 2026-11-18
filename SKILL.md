@@ -6,7 +6,7 @@ description: |
 
 # Lacerte MCP — operator skill
 
-You drive Intuit Lacerte tax software through a stdio MCP server exposing 42 tools, all named `lacerte_*`. This skill grounds you in the conventions, the catalog, the error space, and the recovery recipes so you can use the surface deterministically without trial and error.
+You drive Intuit Lacerte tax software through a stdio MCP server exposing 43 tools, all named `lacerte_*`. This skill grounds you in the conventions, the catalog, the error space, and the recovery recipes so you can use the surface deterministically without trial and error.
 
 ---
 
@@ -144,7 +144,7 @@ Error:
 
 ---
 
-## Tool catalog (42 tools)
+## Tool catalog (43 tools)
 
 Format: `lacerte_<name>(args) → return shape — purpose`.
 
@@ -187,9 +187,10 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 - `lacerte_client_create(clientId: string, taxType: string, firstName: string, lastName: string, emailId: string, dryRun: bool = false, idempotencyKey?: string) → { statusCode, statusName, clientNumber, clientId, dryRun }` — create new client. `clientId` ≤8 alphanumeric, normalized to uppercase. `taxType` must match the active module (e.g. `"Individual"` or `"1040"` for module I); accepted aliases canonicalize to the spec ReturnType. firstName/lastName/emailId all required per spec §4.
 - `lacerte_client_create_bulk(entries: [{ clientId, taxType, firstName, lastName, emailId }], dryRun: bool = false, continueOnError: bool = false, idempotencyKey?: string) → { requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[] }` — bulk-create N clients in one call (CSV-roster bootstrap). Each entry runs the identical single-create validation + TaxType canonicalization. Capped at 100 entries by default (creates are heavier than field writes; override `LACERTE_BULK_CREATE_MAX`). Per-row key shape: `{prefix}-{index}-{clientId}` (POSITIONAL) — a batch retry replays already-created rows from cache with their original clientNumbers instead of minting duplicates. Dry-run rows report `wouldCreate=true` with `clientNumber=null` (a dry run cannot mint a real ClientNumber).
 
-### Discovery & schema (4 tools)
+### Discovery & schema (5 tools)
 
 - `lacerte_field_access_map(module: string, table: int, taxYear: int) → { module, moduleName, table, taxYear, count, fields: { [fieldCode]: "ReadOnly"|"ReadWrite"|"Hidden"|"NotExposed"|"NotSupported"|"Unknown" } }` — per-(module,table,year) field access map. Includes universal `C{t}_0 → ReadOnly`. Call BEFORE writing to confirm the field is writable.
+- `lacerte_field_dictionary(module: string, search?: string, taxYear?: int) → { module, moduleName, taxYear, search, count, totalEntries, entries: [{ id, concept, form, line?, kind: "field"|"detail", table?, field?, series?, code?, prefix?, suffix?, needsSubclient, needsState, dataType, notes?, taxYears?, verifiedOn, source }], note?, loadError? }` — verified map from a tax concept (1120 gross receipts, a K-1 box, ...) to the DATA1-4 column or detail Series/Code that holds it. `module` takes I/C/P/S/F/R/T/N/B or an alias (1120, 1065, 1041, ...). When `note` says there are no verified mappings, do NOT guess field or detail codes; mappings are recorded on the Lacerte PC with `lacerte-mcp map-diff` (then `lacerte_reload_schema`). A listed field with no literal access-map entry is classified by the SDK range rules.
 - `lacerte_return_codes() → { count, rows: [{ code, name, severity, userMessage, remediation, origin, originGroup }], codes }` — full code catalog. `origin` ∈ {TAPIStatus, TPSDKStatus, Synthetic}; `originGroup` ∈ {sdk, synthetic} matches the error envelope's `origin`.
 - `lacerte_help(topic?: string) → various by topic` — distilled README inline. Topics: `null`/`""` (full overview), `"modes"`, `"tools"`, `"env"`, `"limits"` (the killer payload — what this MCP does NOT do), `"first-call"`, `"prompts"`. Aliases: `"quickstart"`→`first-call`, `"envvars"`/`"environment"`→`env`, etc. Pure static content; safe pre-context.
 - `lacerte_prompts(name?: string) → catalog rows or { found, name, description, whenToUse, body }` — list/fetch the 4 canonical workflow recipes. Use when host MCP doesn't expose Prompts UI (Cursor pre-0.47, Windsurf, generic stdio).

@@ -232,7 +232,7 @@ If the first call returns `success: false` with `statusCode: 9007 LoginExpired` 
 
 ## Tools
 
-The server registers **42 MCP tools**, grouped below by the same categories `lacerte_help(topic: "tools")` reports (`HelpTools.ToolsByCategory()` is the authoritative categorization; a bidirectional parity test keeps it in lock-step with the registered surface). Paginated read envelopes return `rows`, `total`, `limit`, `offset`, `returnedCount`, `hasMore`, `nextOffset` (legacy `count` + per-domain aliases retained until v0.2).
+The server registers **43 MCP tools**, grouped below by the same categories `lacerte_help(topic: "tools")` reports (`HelpTools.ToolsByCategory()` is the authoritative categorization; a bidirectional parity test keeps it in lock-step with the registered surface). Paginated read envelopes return `rows`, `total`, `limit`, `offset`, `returnedCount`, `hasMore`, `nextOffset` (legacy `count` + per-domain aliases retained until v0.2).
 
 ### Session (6)
 
@@ -311,14 +311,15 @@ The server registers **42 MCP tools**, grouped below by the same categories `lac
 | `lacerte_resource_usage` | none | Process telemetry (memory, handles, threads, GC). |
 | `lacerte_active_locks` | `limit?` | Currently-held idempotency write semaphores. |
 
-### Meta (5)
+### Meta (6)
 
 | Tool | Params | What it does |
 | --- | --- | --- |
 | `lacerte_field_access_map` | `module`, `table`, `taxYear` | Per-field ReadOnly/ReadWrite/Hidden/NotExposed access map. |
+| `lacerte_field_dictionary` | `module`, `search?`, `taxYear?` | Verified map from tax concepts (e.g. 1120 gross receipts, K-1 boxes) to DATA1-4 columns or detail Series/Code, recorded on the Lacerte PC with `lacerte-mcp map-diff`. Empty modules return a `note`: don't guess field or detail codes. A listed field with no literal access-map entry is classified by the SDK range rules. |
 | `lacerte_return_codes` | none | All 28 TAPIStatus + 5 TPSDKStatus + synthetic 9xxx codes with `origin`/`originGroup` discriminators. |
 | `lacerte_reload_schema` | none | Drop in-process FieldAccessMap caches so fresh shards take effect without a restart (a restart invalidates the 24h auth ticket). |
-| `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 42 tools by category, env vars, limits, first-call, prompts. |
+| `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 43 tools by category, env vars, limits, first-call, prompts. |
 | `lacerte_prompts` | `name?` | List or fetch the 4 canonical workflow prompt bodies inline. |
 
 ## Prompts
@@ -527,7 +528,7 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 - **Diagnosis:** Three independent failure modes — boot crash, broken assembly registration, or host-config mismatch — present with the same silent symptom because most MCP hosts swallow the spawned process's stderr by default.
 - **Fix (3-step diagnostic ladder):**
   1. **Confirm the server binary actually boots.** From PowerShell on the same machine the host is running on, run `& "C:\path\to\LacertMCP.Server.exe"` directly (use the absolute path you put in the host config). If it exits immediately with a CLR loader error, jump to the `BadImageFormatException` entry above (App.config missing or modified). If it hangs waiting for stdio input, that is healthy — Ctrl+C and continue to step 2.
-  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists 42 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
+  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists 43 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
   3. **Inspect the host's stderr capture for the spawned process.** Claude Desktop writes spawned-MCP stderr to `%APPDATA%\Claude\logs\mcp*.log` (one file per server, named after the `mcpServers` key). Cursor writes to its own `~/.cursor/logs/` tree; Windsurf surfaces it in its log pane. The exit code and any uncaught exception will be there. If the log is empty, the host may not be invoking the binary at all — re-check the config path on disk.
 
 ### `lacerte_field_write` returned success but my change is not visible in Lacerte

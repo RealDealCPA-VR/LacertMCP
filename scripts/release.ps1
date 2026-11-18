@@ -119,8 +119,10 @@ foreach ($p in @($serverBin, $cliBin, $dumperBin)) {
 $schemaManifest = Join-Path $serverBin 'Schema/FieldAccessMap/manifest.json'
 $schemaBase = Join-Path $serverBin 'Schema/FieldAccessMap/base'
 $schemaOverlays = Join-Path $serverBin 'Schema/FieldAccessMap/overlays'
+# FP-3 field dictionary — gates the range-rule fallback and backs lacerte_field_dictionary.
+$schemaDictionary = Join-Path $serverBin 'Schema/FieldDictionary/individual.json'
 
-foreach ($required in @($schemaManifest, $schemaBase, $schemaOverlays)) {
+foreach ($required in @($schemaManifest, $schemaBase, $schemaOverlays, $schemaDictionary)) {
     if (-not (Test-Path -LiteralPath $required)) {
         Write-Host "Missing load-bearing schema file: $required" -ForegroundColor Red
         Write-Host "The MCP will silently fail at first field-write without this." -ForegroundColor Red

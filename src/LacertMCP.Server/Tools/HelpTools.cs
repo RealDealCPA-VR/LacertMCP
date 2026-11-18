@@ -257,6 +257,7 @@ namespace LacertMCP.Server.Tools
             ["meta"] = new[]
             {
                 "lacerte_field_access_map",
+                "lacerte_field_dictionary",
                 "lacerte_return_codes",
                 "lacerte_reload_schema",
                 "lacerte_help",
