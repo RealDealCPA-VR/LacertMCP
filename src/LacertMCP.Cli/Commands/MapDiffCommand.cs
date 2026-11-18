@@ -219,7 +219,7 @@ namespace LacertMCP.Cli.Commands
                 "amount | text | date | bool | integer | percent. Default: inferred from the new value.");
             var notesOpt = new Option<string?>("--notes", () => null, "Optional notes.");
             var expectOpt = new Option<string?>("--expect", () => null,
-                "The value you entered in Lacerte. When given, record checks the changed cell (or the detail row's amount/description) holds it. Required with --allow-read-errors.");
+                "REQUIRED: the value you entered in Lacerte. record checks that the one changed cell (or the detail row's changed amount/description) holds it, so a coincidental change can't be recorded.");
             var allYearsOpt = new Option<bool>("--all-years", () => false,
                 "Record the mapping for every tax year (default: only the snapshots' year).");
             var replaceOpt = new Option<bool>("--replace", () => false,
@@ -303,6 +303,14 @@ namespace LacertMCP.Cli.Commands
             }
             var module = b.Module[0];
 
+            // A recorded field entry grants write access (range rules), so the
+            // change must be proven to be the value the operator typed.
+            if (string.IsNullOrWhiteSpace(o.Expect))
+            {
+                stderr.WriteLine("--expect <the value you entered in Lacerte> is required, so a coincidental change can't be recorded as this mapping.");
+                return 1;
+            }
+
             // Validate the entry text up front so a typo never costs a re-snapshot.
             var id = (o.Id ?? string.Empty).Trim();
             var concept = (o.Concept ?? string.Empty).Trim();
@@ -345,7 +353,12 @@ namespace LacertMCP.Cli.Commands
             var diff = MapDiff.Compute(b, a, o.Ignore);
             var valueCells = diff.CellChanges.Where(c => !c.InRemovedRow).ToList();
             var single = diff.CellChanges.Count + diff.DetailAdded.Count + diff.DetailChanged.Count + diff.DetailRemoved.Count == 1
-                         && diff.RowsRemoved.Count == 0;
+                         && diff.RowsRemoved.Count == 0
+                         // An added DATA2-4 row is part of the change: allowed only
+                         // when the one changed cell is inside that same new row.
+                         && (diff.RowsAdded.Count == 0
+                             || (diff.RowsAdded.Count == 1 && valueCells.Count == 1 && valueCells[0].InAddedRow
+                                 && valueCells[0].Table == diff.RowsAdded[0].Table && valueCells[0].RowKey == diff.RowsAdded[0].RowKey));
             CellChange? cell = null;
             DetailChange? detail = null;
             if (single)
@@ -367,13 +380,31 @@ namespace LacertMCP.Cli.Commands
                 return 1;
             }
 
-            // Optional (or required, with --allow-read-errors) proof that the
-            // change IS the value the operator typed.
-            if (!string.IsNullOrWhiteSpace(o.Expect))
+            // Proof that the change IS the value the operator typed. For a detail
+            // row the value must be in a column that actually changed (a row
+            // whose only change is Source/TSJ must not pass on its old amount).
             {
-                var ok = cell != null
-                    ? MapDiff.ValueMatches(cell.New, o.Expect!)
-                    : MapDiff.ValueMatches(detail!.After!.Amount, o.Expect!) || MapDiff.ValueMatches(detail.After!.Description, o.Expect!);
+                bool ok;
+                if (cell != null)
+                {
+                    ok = MapDiff.ValueMatches(cell.New, o.Expect!);
+                }
+                else
+                {
+                    var afterRow = detail!.After!;
+                    var beforeRow = detail.Before;
+                    bool amountChanged = beforeRow == null || !Equals(beforeRow.Amount, afterRow.Amount);
+                    bool descriptionChanged = beforeRow == null
+                        || !string.Equals((beforeRow.Description ?? string.Empty).Trim(), (afterRow.Description ?? string.Empty).Trim(), StringComparison.Ordinal);
+                    if (!amountChanged && !descriptionChanged)
+                    {
+                        stderr.WriteLine("Refusing: the changed detail row's amount and description are unchanged (only a column such as Source/TSJ changed), so it can't be the value you entered:");
+                        WriteDiff(diff, stderr);
+                        return 1;
+                    }
+                    ok = (amountChanged && MapDiff.ValueMatches(afterRow.Amount, o.Expect!))
+                         || (descriptionChanged && MapDiff.ValueMatches(afterRow.Description, o.Expect!));
+                }
                 if (!ok)
                 {
                     stderr.WriteLine($"Refusing: the only change does not hold the expected value '{o.Expect}':");
@@ -507,7 +538,7 @@ namespace LacertMCP.Cli.Commands
                              (entry.TaxYears.Count == 0 ? "every tax year" : "TY" + string.Join(",", entry.TaxYears)));
             stdout.WriteLine("  A running MCP server caches the dictionary - call the lacerte_reload_schema tool to pick this up without a restart.");
             stdout.WriteLine("  This is an install / build-output copy: copy the entry into src\\LacertMCP.Server\\Schema\\FieldDictionary\\" +
-                             Path.GetFileName(path) + " and commit it, or a rebuild / `lacerte-mcp update` will replace it.");
+                             Path.GetFileName(path) + " and commit it to ship it in a release. On an install, `lacerte-mcp update` and installer re-runs keep it; a dev rebuild of the server output replaces it.");
             return 0;
         }
 

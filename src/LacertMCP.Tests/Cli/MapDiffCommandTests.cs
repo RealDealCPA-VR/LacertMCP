@@ -91,6 +91,8 @@ namespace LacertMCP.Tests.Cli
                 MachineName = "TEST-PC",
                 Today = new DateTime(2026, 11, 20),
                 ExeDir = _dir,
+                // R8-review: --expect is required; most fixtures enter 123457.
+                Expect = "123457",
             };
 
         private IReadOnlyList<FieldDictionaryEntry> Corporate()
@@ -390,10 +392,39 @@ namespace LacertMCP.Tests.Cli
         public void Record_DetailRowChanged_IsAccepted()
         {
             var (b, a) = Pair(s => s.DetailRows[0].Amount = "999");
-            var r = Run((w, e) => MapDiffCommand.RunRecord(Opts(b, a, "1120.wages"), w, e));
+            var o = Opts(b, a, "1120.wages");
+            o.Expect = "999";
+            var r = Run((w, e) => MapDiffCommand.RunRecord(o, w, e));
             Assert.True(r.exit == 0, r.stderr);
             Assert.Contains("detail row changed", r.stdout);
             Assert.Equal(11, Assert.Single(Corporate()).Series);
+        }
+
+        // R8-review — a detail row whose only change is a non-value column
+        // (Source/TSJ) can't be "the value you entered", even if its unchanged
+        // amount happens to equal --expect.
+        [Fact]
+        public void Record_DetailRowOnlySourceChanged_IsRefused()
+        {
+            var (b, a) = Pair(s => s.DetailRows[0].Source = "Nonsource");
+            var o = Opts(b, a, "1120.wages");
+            o.Expect = Before().DetailRows[0].Amount; // the unchanged amount
+            var r = Run((w, e) => MapDiffCommand.RunRecord(o, w, e));
+            Assert.Equal(1, r.exit);
+            Assert.Contains("amount and description are unchanged", r.stderr);
+            Assert.Empty(Corporate());
+        }
+
+        [Fact]
+        public void Record_WithoutExpect_IsRefused()
+        {
+            var (b, a) = Pair(s => Row(s, 1, "client").Cells["C1_37"] = "123457");
+            var o = Opts(b, a);
+            o.Expect = null;
+            var r = Run((w, e) => MapDiffCommand.RunRecord(o, w, e));
+            Assert.Equal(1, r.exit);
+            Assert.Contains("--expect", r.stderr);
+            Assert.Empty(Corporate());
         }
 
         [Fact]
@@ -471,9 +502,10 @@ namespace LacertMCP.Tests.Cli
 
             var o = Opts(b, a);
             o.AllowReadErrors = true;
+            o.Expect = null;
             var noExpect = Run((w, e) => MapDiffCommand.RunRecord(o, w, e));
             Assert.Equal(1, noExpect.exit);
-            Assert.Contains("requires --expect", noExpect.stderr);
+            Assert.Contains("--expect", noExpect.stderr);
 
             o.Expect = "123457.00";
             var ok = Run((w, e) => MapDiffCommand.RunRecord(o, w, e));

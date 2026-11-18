@@ -269,7 +269,7 @@ namespace LacertMCP.Server.Schema
             {
                 dictEntry = null;
             }
-            if (dictEntry != null)
+            if (dictEntry != null && !NotSupportedInAnyYear(snap, key))
             {
                 var ruled = SdkRangeRuleAccess(table, normField);
                 if (ruled.HasValue)
@@ -282,8 +282,43 @@ namespace LacertMCP.Server.Schema
             return new FieldAccessResolution(FieldAccess.Unknown, SourceUnknown);
         }
 
+        /// <summary>
+        /// True when any year's "Not Supported" overlay lists this field with a
+        /// non-ReadWrite access. A field the SDK withdrew in one year is not
+        /// range-rule-writable in other years either: overlays are exact-year,
+        /// so a dictionary entry for TY22+ would otherwise fail OPEN (the same
+        /// reason C1_G38 has no ReadWrite base entry). It stays Unknown; enable
+        /// it for a verified year with an overlay or `field-access set`.
+        /// </summary>
+        private static bool NotSupportedInAnyYear(AccessMapSnapshot snap, string key)
+        {
+            string dir;
+            try
+            {
+                dir = Path.Combine(SchemaRoot(), "overlays");
+                if (!Directory.Exists(dir)) return false;
+                foreach (var path in Directory.EnumerateFiles(dir, "ty*-not-supported.json"))
+                {
+                    var name = Path.GetFileName(path);
+                    if (!IsLoadedOverlayFileName(name)) continue;
+                    if (!int.TryParse(name.Substring(2, 2), System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture, out var yy)) continue;
+                    var overlay = LoadOverlay(snap, 2000 + yy);
+                    if (overlay != null && overlay.Overrides.TryGetValue(key, out var o) && o.Access != FieldAccess.ReadWrite)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch (Exception)
+            {
+                return true; // can't tell: fail closed
+            }
+        }
+
         private static readonly System.Text.RegularExpressions.Regex RangeRuleFieldPattern =
-            new System.Text.RegularExpressions.Regex("^C([1-7])_(G?)([0-9]{1,6})\\z",
+            new System.Text.RegularExpressions.Regex("^C([1-7])_(G?)([1-9][0-9]{0,5})\\z",
                 System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
         /// <summary>

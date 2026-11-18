@@ -217,10 +217,12 @@ namespace LacertMCP.Tests.Schema
             Assert.Equal(StatusCodes.FieldNotSupported, ex.StatusCode);
             Assert.False(ex.Context.ContainsKey("accessSource"));
 
-            // ...and only a year without a literal entry falls to the range rule.
+            // ...and (R8-review) a field the SDK withdrew in ANY year's overlay
+            // is not range-rule-writable in other years either: overlays are
+            // exact-year, so TY24 would otherwise fail open. It stays Unknown.
             var ty24 = FieldAccessMapLoader.ResolveFieldAccess('I', 1, "C1_99", 2024);
-            Assert.Equal(FieldAccess.ReadWrite, ty24.Access);
-            Assert.Equal(FieldAccessMapLoader.SourceSdkRangeRule, ty24.Source);
+            Assert.Equal(FieldAccess.Unknown, ty24.Access);
+            Assert.Equal(FieldAccessMapLoader.SourceUnknown, ty24.Source);
 
             // The universal client-number rule is untouched.
             Assert.Equal(FieldAccessMapLoader.SourceUniversalRule, FieldAccessMapLoader.ResolveFieldAccess('I', 1, "C1_0", 2024).Source);

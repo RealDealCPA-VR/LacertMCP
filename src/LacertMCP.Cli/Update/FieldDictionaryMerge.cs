@@ -10,8 +10,10 @@ namespace LacertMCP.Cli.Update
     /// <summary>Outcome of merging this PC's field dictionaries into a release's.</summary>
     public sealed class FieldDictionaryMergeResult
     {
-        public FieldDictionaryMergeResult(int kept, int superseded, IReadOnlyList<string> conflicts, IReadOnlyList<string> unreadable)
+        public FieldDictionaryMergeResult(int kept, int superseded, IReadOnlyList<string> conflicts, IReadOnlyList<string> unreadable,
+            IReadOnlyList<string>? sideFiles = null)
         {
+            SideFiles = sideFiles ?? Array.Empty<string>();
             Kept = kept;
             Superseded = superseded;
             Conflicts = conflicts;
@@ -27,6 +29,9 @@ namespace LacertMCP.Cli.Update
         /// <summary>This PC's entries dropped because the release maps the same cell under another id.</summary>
         public IReadOnlyList<string> Conflicts { get; }
 
+        /// <summary>Files holding this PC's conflicting entries for review (not loaded by the server).</summary>
+        public IReadOnlyList<string> SideFiles { get; }
+
         /// <summary>Installed dictionary files that didn't load (the release's copy is taken).</summary>
         public IReadOnlyList<string> Unreadable { get; }
 
@@ -35,7 +40,8 @@ namespace LacertMCP.Cli.Update
             var lines = new List<string>();
             if (Kept > 0) lines.Add($"Kept {Kept} field-dictionary entr{(Kept == 1 ? "y" : "ies")} recorded on this PC.");
             if (Superseded > 0) lines.Add($"{Superseded} of this PC's dictionary entr{(Superseded == 1 ? "y is" : "ies are")} now shipped by the release (the release's copy is used).");
-            foreach (var c in Conflicts) lines.Add("Dropped this PC's dictionary entry " + c + " — the release maps the same cell under another id.");
+            foreach (var c in Conflicts) lines.Add("Conflict, the release's mapping is used: " + c + ".");
+            foreach (var f in SideFiles) lines.Add("This PC's conflicting entries are kept for review (not loaded) in " + f + "; to keep one, fix it and record it again.");
             foreach (var u in Unreadable) lines.Add("This PC's " + u + " was not a valid field dictionary; took the release's copy.");
             return lines;
         }
@@ -59,6 +65,7 @@ namespace LacertMCP.Cli.Update
         public static FieldDictionaryMergeResult Merge(string installedDir, string releaseDir)
         {
             int kept = 0, superseded = 0;
+            var sideFiles = new List<string>();
             var conflicts = new List<string>();
             var unreadable = new List<string>();
             var plans = new List<(string Path, string Json)>();
@@ -87,22 +94,45 @@ namespace LacertMCP.Cli.Update
                 }
 
                 var merged = new List<FieldDictionaryEntry>(release);
-                var releaseIds = new HashSet<string>(release.Select(e => e.Id), StringComparer.Ordinal);
+                // Ids compare case-insensitively, like the loader's duplicate check.
+                var releaseById = new Dictionary<string, FieldDictionaryEntry>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in release) releaseById[r.Id] = r;
                 var added = 0;
+                var sideCopies = new List<FieldDictionaryEntry>();
                 foreach (var e in installed.Entries)
                 {
-                    if (releaseIds.Contains(e.Id))
+                    if (releaseById.TryGetValue(e.Id, out var shipped))
                     {
-                        superseded++;
+                        if (shipped.TargetKey == e.TargetKey && shipped.TaxYears.OrderBy(y => y).SequenceEqual(e.TaxYears.OrderBy(y => y)))
+                        {
+                            superseded++;   // the release ships this same mapping
+                        }
+                        else
+                        {
+                            // Same id, different cell or years (e.g. corrected here
+                            // with `record --replace`): don't silently take either.
+                            // The release's copy is used; this PC's is kept aside.
+                            conflicts.Add($"{e.Id} ({name}: this PC maps {e.TargetKey} for {YearsText(e)}, the release maps {shipped.TargetKey} for {YearsText(shipped)})");
+                            sideCopies.Add(e);
+                        }
                         continue;
                     }
                     if (release.Any(r => r.TargetKey == e.TargetKey && FieldDictionaryLoader.YearsOverlap(r, e)))
                     {
-                        conflicts.Add($"{e.Id} ({name})");
+                        conflicts.Add($"{e.Id} ({name}: the release maps the same cell under another id)");
+                        sideCopies.Add(e);
                         continue;
                     }
                     merged.Add(e);
                     added++;
+                }
+                if (sideCopies.Count > 0)
+                {
+                    // Not loaded by the server (wrong file name on purpose): the
+                    // operator's entries, kept for review instead of being lost.
+                    var sidePath = Path.Combine(releaseDir, Path.GetFileNameWithoutExtension(name) + ".this-pc-conflicts.json.txt");
+                    plans.Add((sidePath, FieldDictionaryLoader.Serialize(module.Value, sideCopies)));
+                    sideFiles.Add(sidePath);
                 }
                 if (added == 0) continue;
 
@@ -118,8 +148,11 @@ namespace LacertMCP.Cli.Update
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllText(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             }
-            return new FieldDictionaryMergeResult(kept, superseded, conflicts, unreadable);
+            return new FieldDictionaryMergeResult(kept, superseded, conflicts, unreadable, sideFiles);
         }
+
+        private static string YearsText(FieldDictionaryEntry e)
+            => e.TaxYears.Count == 0 ? "all years" : "TY" + string.Join("/", e.TaxYears.OrderBy(y => y));
 
         private static char? ModuleFor(string fileName)
         {

@@ -248,7 +248,7 @@ namespace LacertMCP.Server.Schema
         // C{table}_{n} or C{table}_G{n}, tables 1..4 only (the dictionary maps
         // input fields; DATA5-7 are status / display / forms tables).
         private static readonly Regex FieldPattern = new Regex(
-            "^C([1-4])_(G?)([0-9]{1,5})\\z", RegexOptions.CultureInvariant);
+            "^C([1-4])_(G?)(0|[1-9][0-9]{0,4})\\z", RegexOptions.CultureInvariant);
 
         private static readonly HashSet<string> CommonProps = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -263,7 +263,9 @@ namespace LacertMCP.Server.Schema
         private sealed class DictionarySnapshot
         {
             public ConcurrentDictionary<string, FieldDictionaryLoadResult> Modules { get; }
-                = new ConcurrentDictionary<string, FieldDictionaryLoadResult>(StringComparer.OrdinalIgnoreCase);
+                // Ordinal: module chars are uppercase everywhere else (the access
+                // map's caches are case-sensitive); 'i' must not alias 'I'.
+                = new ConcurrentDictionary<string, FieldDictionaryLoadResult>(StringComparer.Ordinal);
 
             // The shipped folder, resolved once per generation: resolving it
             // probes the disk, and FieldAccessMapLoader asks the dictionary on
