@@ -34,7 +34,7 @@ namespace LacertMCP.Tests.Tools
             using var mgr = LiveDetailWriteHarness.NewEnabled(db, runner, _dir);
             var tool = new DetailsTools(mgr);
 
-            var root = Parse(await tool.LacerteDetailWrite("SMIT", "11", "1", 1200, "ACME", source: "Source", tsj: "T"));
+            var root = Parse(await tool.LacerteDetailWrite("SMIT", "11", "1", 1200, "ACME", suffix: "1000", source: "Source", tsj: "T"));
 
             Assert.True(root.GetProperty("success").GetBoolean(), root.ToString());
             var result = root.GetProperty("result");
@@ -52,7 +52,7 @@ namespace LacertMCP.Tests.Tools
             using var mgr = LiveDetailWriteHarness.NewEnabled(db, new FakeDetailWriteRunner(), _dir);
             var tool = new DetailsTools(mgr);
 
-            var root = Parse(await tool.LacerteDetailWrite("SMIT", "11", "1", 1200, "ACME"));
+            var root = Parse(await tool.LacerteDetailWrite("SMIT", "11", "1", 1200, "ACME", suffix: "1000"));
 
             Assert.False(root.GetProperty("success").GetBoolean());
             Assert.Equal(SyntheticStatusCodes.WriteNotVerified, root.GetProperty("statusCode").GetInt32());
@@ -75,8 +75,8 @@ namespace LacertMCP.Tests.Tools
             var tool = new DetailWriteBulkTools(mgr);
             var entries = new[]
             {
-                new DetailWriteBulkTools.BulkDetailEntry { ClientNumber = "SMIT", Series = "11", Code = "1", Amount = 100, Description = "row1", Source = "Source", Tsj = "T" },
-                new DetailWriteBulkTools.BulkDetailEntry { ClientNumber = "SMIT", Series = "11", Code = "1", Amount = 200, Description = "row2", Source = "Source", Tsj = "T" },
+                new DetailWriteBulkTools.BulkDetailEntry { ClientNumber = "SMIT", Series = "11", Code = "1", Suffix = "1000", Amount = 100, Description = "row1", Source = "Source", Tsj = "T" },
+                new DetailWriteBulkTools.BulkDetailEntry { ClientNumber = "SMIT", Series = "11", Code = "1", Suffix = "1000", Amount = 200, Description = "row2", Source = "Source", Tsj = "T" },
             };
 
             var root = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk"));

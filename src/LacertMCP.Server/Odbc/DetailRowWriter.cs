@@ -160,7 +160,47 @@ namespace LacertMCP.Server.Odbc
                 sb.Append(c);
             }
             sb.Append('\'');
+            RequireAnsi(value, field);
             return sb.ToString();
+        }
+
+        // DBF text is stored in an ANSI code page; a character it can't hold is
+        // converted by the driver, the read-back then can't match, and the row
+        // is already in the file. Refuse it up front instead.
+        private static readonly Encoding Ansi = Encoding.GetEncoding(1252,
+            EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+
+        private static void RequireAnsi(string value, string field)
+        {
+            try
+            {
+                Ansi.GetBytes(value);
+            }
+            catch (EncoderFallbackException ex)
+            {
+                throw new LacerteSDKError(SyntheticStatusCodes.DetailWriteInvalid,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = Op,
+                        ["field"] = field,
+                        ["index"] = ex.Index,
+                        ["reason"] = field + " contains a character Lacerte's detail file can't store (outside Windows-1252, e.g. an emoji or a non-Latin letter). Replace it and retry.",
+                    });
+            }
+        }
+
+        /// <summary>
+        /// Live detail rows must carry a Suffix: the SDK says it starts at 1000
+        /// for standard fields and at 1 for suffixed fields, so an omitted Suffix
+        /// (left to the driver's default, likely 0) would write a row Lacerte
+        /// doesn't use. Simulation keeps accepting a blank Suffix.
+        /// </summary>
+        public static void RequireLiveSuffix(DetailRow row)
+        {
+            if (row != null && string.IsNullOrWhiteSpace(row.Suffix))
+            {
+                Reject("Suffix", "Suffix is required for a live detail row: 1000 for a standard field, or the field's own suffix (starting at 1) for suffixed fields (Lacerte SDK). Take it from the field dictionary entry.");
+            }
         }
 
         private static string Reject(string field, string reason)
@@ -204,8 +244,7 @@ namespace LacertMCP.Server.Odbc
                 && TextEquals(written.CityAbbr, stored.CityAbbr)
                 && TextEquals(BridgeInputValidation.NormalizeDetailSource(written.Source) ?? written.Source,
                               BridgeInputValidation.NormalizeDetailSource(stored.Source) ?? stored.Source)
-                && TextEquals(BridgeInputValidation.NormalizeTsj(written.TSJ) ?? written.TSJ,
-                              BridgeInputValidation.NormalizeTsj(stored.TSJ) ?? stored.TSJ)
+                && TextEquals(TsjForCompare(written.TSJ), TsjForCompare(stored.TSJ))
                 && AmountEquals(written.Amount, stored.Amount)
                 && TextEquals(written.Description, stored.Description);
         }
@@ -226,6 +265,14 @@ namespace LacertMCP.Server.Odbc
             var t = (v ?? string.Empty).Trim();
             if (t.Length == 0) return null;
             return decimal.TryParse(t, NumberStyles.Number, CultureInfo.InvariantCulture, out var d) ? d : (decimal?)null;
+        }
+
+        // The SDK documents TSJ as "Joint (or blank)": a blank written TSJ the
+        // driver stores as Joint (or vice versa) is the same value.
+        private static string TsjForCompare(string? tsj)
+        {
+            var n = BridgeInputValidation.NormalizeTsj(tsj) ?? tsj ?? string.Empty;
+            return string.IsNullOrWhiteSpace(n) ? "Joint" : n;
         }
 
         private static bool TextEquals(string? a, string? b)

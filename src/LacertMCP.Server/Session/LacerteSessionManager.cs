@@ -1951,6 +1951,21 @@ namespace LacertMCP.Server.Session
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
+                    if (cached == SyntheticStatusCodes.WriteNotVerified)
+                    {
+                        // A pinned "may have landed" key (see the catch below):
+                        // never append again under this key.
+                        throw new LacerteSDKError(SyntheticStatusCodes.WriteNotVerified, new Dictionary<string, object?>
+                        {
+                            ["op"] = "WriteDetail",
+                            ["clientNumber"] = clientNumber,
+                            ["series"] = row.Series,
+                            ["code"] = row.Code,
+                            ["idempotencyReplay"] = true,
+                            ["reason"] = "An earlier call with this idempotency key may already have added this row, so it was NOT written again. "
+                                + "Check the client's detail rows with lacerte_detail_read; only if the row is missing, write it with a NEW idempotency key.",
+                        });
+                    }
                     outcome = new DetailWriteOutcome(cached,
                         Mode == SessionMode.Live ? KnownDetailSnapshot(ctx, clientNumber) : null, null,
                         "Replayed from the idempotency cache: no new write was made; this is the original write's result.");
@@ -2029,12 +2044,17 @@ namespace LacertMCP.Server.Session
                                     () => LiveCommitDetailRow(ctx, clientNumber, row, cancellationToken))
                                     .ConfigureAwait(false);
                             }
-                            catch (LacerteSDKError ex) when (ex.StatusCode == SyntheticStatusCodes.WriteNotVerified)
+                            catch (LacerteSDKError ex) when (DetailRowMayHaveLanded(ex))
                             {
-                                // Same rule as the field-write path: a write
-                                // that failed its read-back must never replay
-                                // as a cached Success.
-                                ForgetIdempotencyKey(idempotencyKey);
+                                // NOT the field-write rule. Detail rows are
+                                // APPEND-only: forgetting the key after a 9022
+                                // or a worker failure whose row is (or may be)
+                                // in the file let a same-key retry append a
+                                // second copy. Pin the key to a terminal
+                                // "may have landed" result instead; the replay
+                                // above tells the caller to check the rows and
+                                // use a NEW key only if the row is missing.
+                                StoreIdempotent(idempotencyKey, payload, SyntheticStatusCodes.WriteNotVerified);
                                 throw;
                             }
                             outcome = committed;
@@ -2925,6 +2945,20 @@ namespace LacertMCP.Server.Session
         /// (9022): the cached Success must not replay over a write that didn't
         /// stick, or every retry would short-circuit and fail again.
         /// </summary>
+        /// <summary>
+        /// True when a failed live detail write's row is, or may be, in the
+        /// detail file: a failed read-back (9022), or a worker failure whose
+        /// re-read said the row is there or couldn't tell.
+        /// </summary>
+        internal static bool DetailRowMayHaveLanded(LacerteSDKError ex)
+        {
+            if (ex.StatusCode == SyntheticStatusCodes.WriteNotVerified) return true;
+            return ex.Context != null
+                   && ex.Context.TryGetValue("rowWritten", out var w)
+                   && (string.Equals(w as string, "yes", StringComparison.Ordinal)
+                       || string.Equals(w as string, "unknown", StringComparison.Ordinal));
+        }
+
         internal void ForgetIdempotencyKey(string? key)
         {
             if (string.IsNullOrEmpty(key)) return;

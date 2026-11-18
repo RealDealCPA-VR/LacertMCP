@@ -99,7 +99,7 @@ namespace LacertMCP.Tests.Session
             var db = new FakeDetailDb();
             db.For("SMIT").Add(new DetailRow("12", "", "1", "", "", "", "Source", "Taxpayer", "", 320.5, "Bank interest"));
             var runner = new FakeDetailWriteRunner();
-            var row = new DetailRow("11", "", "1", "", "", "", "source", "T", "", 52000.5, "O'Brien Co W-2");
+            var row = new DetailRow("11", "", "1", "1000", "", "", "source", "T", "", 52000.5, "O'Brien Co W-2");
             runner.Behavior = AppendOnRun(db, "SMIT", row with { Source = "Source", TSJ = "Taxpayer" });
             using var mgr = NewEnabled(db, runner, _dir);
 
@@ -107,8 +107,8 @@ namespace LacertMCP.Tests.Session
 
             var call = Assert.Single(runner.Calls);
             Assert.Equal(
-                "INSERT INTO [SMIT-Detail] (Series, Code, StateAbbr, CityAbbr, Source, TSJ, Amount, Description) " +
-                "VALUES (11, 1, '', '', 'Source', 'Taxpayer', 52000.5, 'O''Brien Co W-2')",
+                "INSERT INTO [SMIT-Detail] (Series, Code, Suffix, StateAbbr, CityAbbr, Source, TSJ, Amount, Description) " +
+                "VALUES (11, 1, 1000, '', '', 'Source', 'Taxpayer', 52000.5, 'O''Brien Co W-2')",
                 call.Sql);
             Assert.Equal(LacerteSessionManager.LiveConnectionString(mgr.Context!), call.ConnectionString);
             Assert.Equal(TimeSpan.FromSeconds(60), call.Timeout);
@@ -179,22 +179,25 @@ namespace LacertMCP.Tests.Session
             Assert.Empty(runner.Calls);
         }
 
+        // R8-review — a client with no detail table yet (nothing entered) gets
+        // its first row: the missing table is an empty baseline, like the read
+        // path treats it, and the INSERT decides.
         [Fact]
-        public async Task BaselineReadFails_RefusesTheWrite_NoBackupNoWorker()
+        public async Task NoDetailTableYet_EmptyBaseline_FirstRowIsWritten()
         {
-            var db = new FakeDetailDb(); // no SMIT table → DBNotSupported
+            var db = new FakeDetailDb(); // no SMIT table → DBNotSupported on read
             var runner = new FakeDetailWriteRunner();
+            runner.Behavior = AppendOnRun(db, "SMIT", W2());
             using var mgr = NewEnabled(db, runner, _dir);
 
-            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("SMIT", W2()));
-            Assert.Equal(StatusCodes.DBNotSupported, ex.StatusCode);
-            Assert.Contains("Nothing was written", (string)ex.Context["reason"]!);
-            Assert.Empty(runner.Calls);
-            Assert.Empty(Directory.GetFiles(_dir));
+            var outcome = await mgr.WriteDetailWithOutcome("SMIT", W2());
+            Assert.True(outcome.Verified);
+            Assert.Single(runner.Calls);
+            Assert.Single(Directory.GetFiles(_dir)); // the (empty) backup was still taken
         }
 
         [Fact]
-        public async Task ReadBack_NoNewMatchingRow_Throws9022_AndForgetsTheIdempotencyKey()
+        public async Task ReadBack_NoNewMatchingRow_Throws9022_AndPinsTheIdempotencyKey()
         {
             var db = new FakeDetailDb();
             db.For("SMIT");
@@ -207,11 +210,18 @@ namespace LacertMCP.Tests.Session
             Assert.Equal(0, ex.Context["matchingRowsBefore"]);
             Assert.Equal(0, ex.Context["matchingRowsAfter"]);
             Assert.NotNull(ex.Context["snapshot"]);
-            Assert.False(mgr.TryGetIdempotencyEntryForTest("fp2-mismatch", out _));
-
-            // A retry with the same key re-executes instead of replaying.
+            // R8-review — detail rows are append-only: a row may now be in the
+            // file, so the key is pinned and a same-key retry must NOT append.
+            Assert.True(mgr.TryGetIdempotencyEntryForTest("fp2-mismatch", out _));
             runner.Behavior = AppendOnRun(db, "SMIT", W2());
-            var outcome = await mgr.WriteDetailWithOutcome("SMIT", W2(), idempotencyKey: "fp2-mismatch");
+            var replay = await Assert.ThrowsAsync<LacerteSDKError>(
+                () => mgr.WriteDetailWithOutcome("SMIT", W2(), idempotencyKey: "fp2-mismatch"));
+            Assert.Equal(SyntheticStatusCodes.WriteNotVerified, replay.StatusCode);
+            Assert.Equal(true, replay.Context["idempotencyReplay"]);
+            Assert.Single(runner.Calls);
+
+            // A NEW key writes it (after the operator checked it is missing).
+            var outcome = await mgr.WriteDetailWithOutcome("SMIT", W2(), idempotencyKey: "fp2-mismatch-2");
             Assert.True(outcome.Verified);
             Assert.Equal(2, runner.Calls.Count);
         }

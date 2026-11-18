@@ -527,9 +527,9 @@ namespace LacertMCP.Server.Session
             {
                 try
                 {
-                    if (System.IO.Path.IsPathRooted(explicitDir!.Trim()))
+                    if (IsFullyQualifiedPath(explicitDir!.Trim()))
                     {
-                        return explicitDir.Trim();
+                        return System.IO.Path.GetFullPath(explicitDir.Trim());
                     }
                 }
                 catch (ArgumentException)
@@ -540,6 +540,19 @@ namespace LacertMCP.Server.Session
             var appData = TryGet(env, "APPDATA");
             if (string.IsNullOrWhiteSpace(appData)) return null;
             return System.IO.Path.Combine(appData!, "lacerte-mcp", "detail-snapshots");
+        }
+
+        /// <summary>
+        /// X:\... or \\server\share\... — not drive-relative "C:backups" or
+        /// root-relative "\backups", which Path.IsPathRooted also accepts and
+        /// which would land under the host's working directory.
+        /// </summary>
+        internal static bool IsFullyQualifiedPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            if (path.StartsWith(@"\\", StringComparison.Ordinal)) return path.Length > 2;
+            return path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':'
+                   && (path[2] == '\\' || path[2] == '/');
         }
 
         private static string DetailSnapshotKey(SessionContext ctx, string clientKey)
@@ -561,6 +574,7 @@ namespace LacertMCP.Server.Session
         private DetailWriteOutcome LivePreviewDetailRow(SessionContext ctx, string clientNumber, DetailRow row)
         {
             var key = LiveClientKey(clientNumber);
+            DetailRowWriter.RequireLiveSuffix(row);
             DetailRowWriter.BuildInsertSql(key, row);
             return new DetailWriteOutcome(StatusCodes.Success, KnownDetailSnapshot(ctx, key), null,
                 "Dry run: the row passed validation and the INSERT was built; nothing was written and no backup was taken.");
@@ -575,6 +589,7 @@ namespace LacertMCP.Server.Session
         {
             var key = LiveClientKey(clientNumber);
             // Validate + build before touching anything.
+            DetailRowWriter.RequireLiveSuffix(row);
             var sql = DetailRowWriter.BuildInsertSql(key, row);
 
             lock (GetClientWriteLock(key))
@@ -586,6 +601,13 @@ namespace LacertMCP.Server.Session
                 try
                 {
                     before = LiveReadDetail(ctx, key, seriesFilter: null, fresh: true);
+                }
+                catch (LacerteSDKError ex) when (ex.StatusCode == StatusCodes.DBNotSupported)
+                {
+                    // No [<client>-Detail] table yet (a new client, nothing
+                    // entered): the baseline is empty, like the read path
+                    // treats it; the INSERT decides whether it can create it.
+                    before = Array.Empty<DetailRow>();
                 }
                 catch (LacerteSDKError ex)
                 {
@@ -683,6 +705,9 @@ namespace LacertMCP.Server.Session
                     var probe = LiveReadDetail(ctx, key, seriesFilter: null, fresh: true);
                     int delta = DetailRowWriter.CountMatching(probe, row) - matchingBefore;
                     rowWritten = delta == 0 ? "no" : delta == 1 ? "yes" : "unknown";
+                    // A worker that timed out may not have died yet (I/O stuck
+                    // on a file share) and can still commit after this read.
+                    if (run.Status == DetailWriteRunStatus.TimedOut && rowWritten == "no") rowWritten = "unknown";
                 }
                 catch (Exception)
                 {

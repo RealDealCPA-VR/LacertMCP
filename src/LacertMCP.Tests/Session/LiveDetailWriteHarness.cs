@@ -210,6 +210,6 @@ namespace LacertMCP.Tests.Session
         }
 
         public static DetailRow W2(double amount = 52000.50, string description = "ACME W-2", string tsj = "Taxpayer")
-            => new DetailRow("11", "", "1", "", "", "", "Source", tsj, "", amount, description);
+            => new DetailRow("11", "", "1", "1000", "", "", "Source", tsj, "", amount, description);
     }
 }

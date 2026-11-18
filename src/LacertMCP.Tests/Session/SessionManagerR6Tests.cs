@@ -84,7 +84,7 @@ namespace LacertMCP.Tests.Session
         private static DetailRow NewRow(double amount, string description)
             // R7-SRC — TSJ in the SDK vocabulary (the session normalizes T → Taxpayer
             // before fingerprinting, so a hand-computed fingerprint must use it too).
-            => new DetailRow("11", "", "1", "", "", "", "Source", "Taxpayer", "", amount, description);
+            => new DetailRow("11", "", "1", "1000", "", "", "Source", "Taxpayer", "", amount, description);
 
         // Replicates LacerteSessionManager.BuildPayload's canonical form so a
         // test can compute the fingerprint a DIFFERENT process would have

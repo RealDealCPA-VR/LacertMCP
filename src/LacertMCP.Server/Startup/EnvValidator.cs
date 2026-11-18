@@ -300,7 +300,7 @@ namespace LacertMCP.Server.Startup
             var raw = Get(env, "LACERTE_DETAIL_SNAPSHOT_DIR");
             if (string.IsNullOrEmpty(raw)) return;
             bool rooted;
-            try { rooted = Path.IsPathRooted(raw!.Trim()); }
+            try { rooted = LacertMCP.Server.Session.LacerteSessionManager.IsFullyQualifiedPath(raw!.Trim()); }
             catch (ArgumentException) { rooted = false; }
             if (!rooted)
             {

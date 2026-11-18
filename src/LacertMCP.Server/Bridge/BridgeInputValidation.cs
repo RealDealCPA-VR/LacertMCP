@@ -604,6 +604,26 @@ namespace LacertMCP.Server.Bridge
                     });
             }
             EnsureSafeText(row.Description, op, "row.Description", DescriptionMaxLength);
+            // R8-review — same rule in both modes (two-mode discipline): a detail
+            // row's text can't carry tab / line breaks, which the live ODBC
+            // INSERT refuses (DetailRowWriter.Quote), so sim refuses them too.
+            if (row.Description != null)
+            {
+                for (int i = 0; i < row.Description.Length; i++)
+                {
+                    char ch = row.Description[i];
+                    if (char.IsControl(ch) || ch == (char)0x2028 || ch == (char)0x2029)
+                    {
+                        throw new LacerteSDKError(SyntheticStatusCodes.DetailWriteInvalid, new Dictionary<string, object?>
+                        {
+                            ["op"] = op,
+                            ["field"] = "row.Description",
+                            ["index"] = i,
+                            ["reason"] = "row.Description must not contain control characters (tab, line breaks, etc.).",
+                        });
+                    }
+                }
+            }
             // Amount is double? — no string content to gate. NaN / Infinity
             // would marshal cleanly but blow up downstream; reject them.
             if (row.Amount.HasValue)

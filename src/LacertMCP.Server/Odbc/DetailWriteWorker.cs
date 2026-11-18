@@ -172,7 +172,10 @@ namespace LacertMCP.Server.Odbc
                 }
 
                 // Drain both pipes concurrently so a chatty stderr can't block the child.
-                Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                // The worker writes exactly one result line. Read just that line, so a
+                // grandchild the driver may start (inheriting the pipe) can't hold
+                // the read open and turn a successful INSERT into a "crash".
+                Task<string> stdoutTask = proc.StandardOutput.ReadLineAsync();
                 Task<string> stderrTask = proc.StandardError.ReadToEndAsync();
 
                 try
@@ -277,6 +280,30 @@ namespace LacertMCP.Server.Odbc
             "^INSERT INTO \\[[A-Z0-9]{1,8}-Detail\\] \\([A-Za-z, ]+\\) VALUES \\(",
             RegexOptions.CultureInvariant);
 
+        /// <summary>
+        /// True when <paramref name="sql"/> is one statement ending in ")": no
+        /// ";" or comment marker outside a quoted string literal ('' escapes a quote).
+        /// </summary>
+        internal static bool IsSingleStatement(string sql)
+        {
+            if (string.IsNullOrEmpty(sql)) return false;
+            bool inQuote = false;
+            for (int i = 0; i < sql.Length; i++)
+            {
+                char c = sql[i];
+                if (c == '\'')
+                {
+                    if (inQuote && i + 1 < sql.Length && sql[i + 1] == '\'') { i++; continue; }
+                    inQuote = !inQuote;
+                    continue;
+                }
+                if (inQuote) continue;
+                if (c == ';') return false;
+                if ((c == '-' && i + 1 < sql.Length && sql[i + 1] == '-') || (c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')) return false;
+            }
+            return !inQuote && sql.TrimEnd().EndsWith(")", StringComparison.Ordinal);
+        }
+
         public static bool IsWorkerInvocation(string[]? args)
             => args != null && args.Length > 0 && string.Equals(args[0], WorkerSwitch, StringComparison.Ordinal);
 
@@ -313,7 +340,7 @@ namespace LacertMCP.Server.Odbc
                 Write(output, new DetailWriteResponse { Ok = false, Error = "Request must carry connectionString and sql.", ErrorType = "BadRequest" });
                 return ExitBadRequest;
             }
-            if (!AllowedSql.IsMatch(request.Sql))
+            if (!AllowedSql.IsMatch(request.Sql) || !IsSingleStatement(request.Sql!))
             {
                 Write(output, new DetailWriteResponse { Ok = false, Error = "Only a detail-row INSERT is accepted.", ErrorType = "BadRequest" });
                 return ExitBadRequest;
