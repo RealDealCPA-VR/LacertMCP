@@ -224,7 +224,7 @@ namespace LacertMCP.Tests.Web
                 Result(@"{""success"":true,""result"":{""succeeded"":1,""failed"":1}}"));
             var events = log.Recent();
             Assert.Equal(1, events.Count(e => e.Verified));
-            Assert.True(events.Single(e => e.Verified).Detail!.Contains("1001"));
+            Assert.Contains("1001", events.Single(e => e.Verified).Detail!);
         }
     }
 
