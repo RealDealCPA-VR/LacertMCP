@@ -4,6 +4,20 @@
 
 **Today (2026-11-18).** Every module can be read in full and clients can be created. In live mode, only 3 DATA1 fields are writable (1040 and 1065 only), detail rows can't be written (9202), Claude has no map from tax concepts to Lacerte fields, and there is no 1041 pre-filing check. See the capability table in `docs/lacerte-mcp-guide.html`, Part I.
 
+## Status (2026-11-18)
+
+Built and tested in simulation, not yet verified on the Lacerte PC:
+
+- **FP-1a** — gated range-rule fallback: a field the module's dictionary names gets its access from the SDK range rules (literal entries and overlays still win). The dictionaries ship empty, so nothing changes until mappings are recorded.
+- **FP-2** — live detail-row writes over ODBC in a separate worker process, with a per-client snapshot before the first write and a read-back after each. **Off by default** (`LACERTE_LIVE_DETAIL_WRITES=1` enables them) until REGRESSION_CHECKLIST "FP-2 live items" pass.
+- **FP-3 tooling** — `Schema/FieldDictionary/` (empty per module), the `lacerte_field_dictionary` tool, and `lacerte-mcp map-diff snapshot|compare|record`. Recorded entries survive `lacerte-mcp update` and installer re-runs.
+- **FP-4** — the `lacerte_entity_return_entry` prompt (dictionary-gated, dry run, approval, read-back), plus pre-filing rules for 1041 (now supported) and 1120-S shareholders.
+- **FP-5** — simulation sample clients for S-corps (SData: ORCH, HOLW) and trusts (FData: MAPL, BIRC).
+
+Decisions 1 and 2 below were taken as recommended: range rules apply only to dictionary-listed fields, and detail writes take a snapshot and read back. Mandatory dry run before bulk detail writes and a restore command for snapshots are not built yet.
+
+Remaining, all on the Lacerte PC: record the mappings (FP-3), run the FP-2 live checks, optionally implement the dumper's live probe (FP-1b), and live acceptance per return type (FP-6). Rules that need verified codes (1120-S/1065 ownership totals, 1041 trust type, 1120 balance sheet) follow the mappings.
+
 ## Decisions needed before building
 
 1. **Writable-field policy.** The SDK manual states range rules: non-global `C1_n`, `C3_n`, `C2_2+` and `C4_2+` are ReadWrite, and other ranges are ReadOnly or Hidden. The SDK also rejects non-writable fields itself (7 NotExposed / 8 ExposedForRead). Two options:

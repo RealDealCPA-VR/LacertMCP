@@ -152,7 +152,7 @@ The PDF also states **range rules**, which are *not* encoded as literal keys:
 - Unlisted `C1_G+` / `C2_G2+` / `C3_G2+` / `C4_G2+` / `C6_G+` / `C7_G+` are Hidden.
 - Unlisted `C5_G+` are ReadWrite.
 
-Per the 2026-05-30 design decision, any field without a literal entry stays **fail-closed**: `Unknown` gives 9012, and writing it needs `force: true` or a `field-access set`. The SDK itself still enforces the range rules server-side, returning 7 NotExposed or 8 ExposedForRead. The universal `C{table}_0 → ReadOnly` rule is unchanged.
+Per the 2026-05-30 design decision, a field without a literal entry stays **fail-closed** (`Unknown` → 9012) — **with one exception (FP-1a, 2026-11-18):** when the module's field dictionary (`Schema/FieldDictionary/<module>.json`, entries verified on a real Lacerte install with `lacerte-mcp map-diff`) names that exact table + field for the tax year, the range rules above decide its access (`source: sdk-range-rule`). Resolution order: universal rule → year overlay → base map → range rule (dictionary-listed fields only) → Unknown, so literal entries and overlays always win. The dictionaries ship empty, so out of the box nothing changes. To enable a field without a dictionary entry, use `lacerte-mcp field-access set`. The SDK itself still enforces the range rules server-side, returning 7 NotExposed or 8 ExposedForRead. The universal `C{table}_0 → ReadOnly` rule is unchanged.
 
 Cross-references for the introspection workflow: agent 04 §5 and Todo
 follow-up F5 ("decide whether to ship `scripts/dump-field-access.csx` for

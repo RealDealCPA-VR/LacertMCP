@@ -193,7 +193,7 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 - `lacerte_field_dictionary(module: string, search?: string, taxYear?: int) → { module, moduleName, taxYear, search, count, totalEntries, entries: [{ id, concept, form, line?, kind: "field"|"detail", table?, field?, series?, code?, prefix?, suffix?, needsSubclient, needsState, dataType, notes?, taxYears?, verifiedOn, source }], note?, loadError? }` — verified map from a tax concept (1120 gross receipts, a K-1 box, ...) to the DATA1-4 column or detail Series/Code that holds it. `module` takes I/C/P/S/F/R/T/N/B or an alias (1120, 1065, 1041, ...). When `note` says there are no verified mappings, do NOT guess field or detail codes; mappings are recorded on the Lacerte PC with `lacerte-mcp map-diff` (then `lacerte_reload_schema`). A listed field with no literal access-map entry is classified by the SDK range rules.
 - `lacerte_return_codes() → { count, rows: [{ code, name, severity, userMessage, remediation, origin, originGroup }], codes }` — full code catalog. `origin` ∈ {TAPIStatus, TPSDKStatus, Synthetic}; `originGroup` ∈ {sdk, synthetic} matches the error envelope's `origin`.
 - `lacerte_help(topic?: string) → various by topic` — distilled README inline. Topics: `null`/`""` (full overview), `"modes"`, `"tools"`, `"env"`, `"limits"` (the killer payload — what this MCP does NOT do), `"first-call"`, `"prompts"`. Aliases: `"quickstart"`→`first-call`, `"envvars"`/`"environment"`→`env`, etc. Pure static content; safe pre-context.
-- `lacerte_prompts(name?: string) → catalog rows or { found, name, description, whenToUse, body }` — list/fetch the 4 canonical workflow recipes. Use when host MCP doesn't expose Prompts UI (Cursor pre-0.47, Windsurf, generic stdio).
+- `lacerte_prompts(name?: string) → catalog rows or { found, name, description, whenToUse, body }` — list/fetch the 5 canonical workflow recipes. Use when host MCP doesn't expose Prompts UI (Cursor pre-0.47, Windsurf, generic stdio).
 
 ### Schema reload (1 tool)
 
@@ -217,11 +217,11 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 
 ### Prompts catalog tool
 
-- `lacerte_prompts(name?: string)` — already listed under Discovery. Lists or fetches the 4 canonical workflow prompts; described in next section.
+- `lacerte_prompts(name?: string)` — already listed under Discovery. Lists or fetches the 5 canonical workflow prompts; described in next section.
 
 ---
 
-## Prompts (4 canonical workflows)
+## Prompts (5 canonical workflows)
 
 Registered via `WithPromptsFromAssembly()`. When the MCP host exposes a Prompts UI, prefer those (`/` in Claude Desktop, `@` in Cursor). When the host doesn't, call `lacerte_prompts(name)` to get the body and follow inline.
 
@@ -297,7 +297,7 @@ Invoke the `lacerte_client_intake` prompt, or manually:
 
 ### Pre-filing readiness
 
-`lacerte_pre_filing_check(clientNumber, severity: "strict")` — modules I/P/C/S (F/R/T/N/B return `unsupported-module`). Surfaces blockers/warnings against the per-module rule catalog; not-applicable rules land in `skippedRules`.
+`lacerte_pre_filing_check(clientNumber, severity: "strict")` — modules I/P/C/S/F (R/T/N/B return `unsupported-module`). Surfaces blockers/warnings against the per-module rule catalog; not-applicable rules land in `skippedRules`.
 
 ### Year-over-year diff
 
@@ -439,7 +439,7 @@ For SDK codes, also check `lacerte_return_codes` for the full enum.
 - `lacerte_recent_log(cid)` — recent log lines for a correlation ID (always-on ring; doesn't need `LACERTE_DEBUG_WIRE`).
 - `lacerte_session_status()` — current mode / registration / context / wire-log state, with `nextSteps` bootstrap guidance.
 - `lacerte_request_stats()` — process-lifetime aggregate counters when "is the server healthy?".
-- `lacerte_prompts()` — the 4 canonical workflow recipes.
+- `lacerte_prompts()` — the 5 canonical workflow recipes.
 - The skill body sketch (this file) is the single source of truth for conventions; if you find drift, prefer this skill's guidance.
 
 ---

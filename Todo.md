@@ -1601,10 +1601,15 @@ Primary source: https://static.developer.intuit.com/resources/Lacerte_SDK_Develo
 
 ### Filing preparation — 1120 / 1120-S / 1065 / 1041 (planned 2026-11-18; plan: docs/plans/filing-preparation.md)
 Today the MCP reads every return type and creates clients, but can't prepare returns: live mode writes only 3 DATA1 fields (I/P), detail rows can't be written (9202), there is no field dictionary, and no 1041 pre-filing check.
-- [ ] FP-0 Decisions: writable-field policy (adopt the SDK manual's range rules, gated by the dictionary?) and detail-write safety (per-client detail-file backup + read-back + mandatory bulk dry run).
-- [ ] FP-1 Writable-field coverage: (a) loader fallback to the SDK range rules; (b) implement the dumper's `--live` probe (currently a stub that always fails — docs corrected 2026-11-18).
-- [ ] FP-2 Live detail-row writes over ODBC with backup, read-back and restore.
-- [ ] FP-3 Field/code dictionary per return type, built on the Lacerte PC with a map-diff helper; `lacerte_field_dictionary` tool; confirm the sim Series IDs.
-- [ ] FP-4 Return-type prompts + pre-filing rules for 1041, 1120-S and the 1120 balance sheet.
-- [ ] FP-5 Simulation fixtures for S-corps and trusts; parity tests.
+- [x] FP-0 Decisions taken as recommended (2026-11-18): range rules only for dictionary-listed fields; detail writes snapshot + read back.
+- [x] FP-1a Gated range-rule fallback (FieldAccessMapLoader.ResolveFieldAccess, source `sdk-range-rule`).
+- [ ] FP-1b Implement the dumper's `--live` probe (Lacerte PC).
+- [x] FP-2 Live detail-row writes over ODBC: out-of-process worker, per-client snapshot, read-back, 9022 drops the idempotency key; OFF until `LACERTE_LIVE_DETAIL_WRITES=1`.
+- [ ] FP-2 live verification (REGRESSION_CHECKLIST "FP-2 live items"), then enable.
+- [ ] FP-2 follow-ups: mandatory dry run before bulk detail writes; snapshot restore/diff command; snapshot retention (they hold taxpayer data).
+- [x] FP-3 tooling: Schema/FieldDictionary (ships empty), `lacerte_field_dictionary`, `lacerte-mcp map-diff snapshot|compare|record`; entries kept across update/installer.
+- [ ] FP-3 Record the mappings on the Lacerte PC per return type; confirm or correct the sim Series IDs.
+- [x] FP-4 `lacerte_entity_return_entry` prompt; pre-filing: 1041 supported (beneficiaries-present), 1120-S shareholders-present.
+- [ ] FP-4 Code-dependent rules once mapped: 1120-S / 1065 ownership totals, 1041 trust type, 1120 balance sheet.
+- [x] FP-5 Sim fixtures: SData (ORCH, HOLW), FData (MAPL, BIRC).
 - [ ] FP-6 Live acceptance per return type on the Lacerte PC.

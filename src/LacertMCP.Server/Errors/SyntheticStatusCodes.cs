@@ -287,8 +287,8 @@ namespace LacertMCP.Server.Errors
             [LiveReplaceIndexUnsupported] = new StatusInfo(
                 "LiveReplaceIndexUnsupported",
                 Severity.Error,
-                "lacerte_detail_write received a replaceIndex while running in LIVE mode. Live detail-row writes are not available: per the Lacerte SDK Developer Instructions the COM library has no detail-write method (detail files are written only through the SDK's ODBC driver, whose write path is not wired yet), and there is no documented update-by-index path. Simulation mode honors replaceIndex for parity testing.",
-                "Correct the detail row directly in Lacerte, or run the workflow in simulation mode. Do not retry lacerte_detail_write live without replaceIndex — live detail writes return 9202 SimulationOnly until the ODBC write path ships."),
+                "lacerte_detail_write received a replaceIndex while running in LIVE mode. Live detail-row writes can only APPEND: per the Lacerte SDK Developer Instructions detail files are written through the SDK's ODBC driver (the COM library has no detail-write method), and there is no documented update-by-index path. Simulation mode honors replaceIndex for parity testing.",
+                "Correct or remove the existing row directly in Lacerte. To add a NEW row, call lacerte_detail_write without replaceIndex (live detail writes must be enabled on the server with LACERTE_LIVE_DETAIL_WRITES=1; otherwise they return 9202)."),
 
             [BulkBatchTooLarge] = new StatusInfo(
                 "BulkBatchTooLarge",
@@ -336,11 +336,11 @@ namespace LacertMCP.Server.Errors
                 "SimulationOnly",
                 Severity.Error,
                 // R7-SRC — every 9202 throw site is a LIVE path that is not
-                // wired yet (pre-TY21 row-number writes; detail-row writes,
-                // which the SDK performs only through its ODBC driver). The
-                // old text ("set LACERTE_LIVE=1") pointed the wrong way.
-                "This operation is available in simulation mode only — its live path is not wired yet (see context.reason for which one and why).",
-                "Run the operation in simulation mode, or perform the step directly in Lacerte. For pre-TY21 field writes use a TY21+ context; for detail rows enter them in Lacerte until the ODBC write path ships."),
+                // available: pre-TY21 row-number writes (not wired), and
+                // detail-row writes while LACERTE_LIVE_DETAIL_WRITES is off
+                // (FP-2: built, off until verified on the Lacerte PC).
+                "This operation isn't available in live mode right now (see context.reason for which one and why).",
+                "For pre-TY21 field writes use a TY21+ context. For detail rows: the operator can enable live detail writes with LACERTE_LIVE_DETAIL_WRITES=1 once they've been verified on the Lacerte PC (REGRESSION_CHECKLIST 'FP-2 live items'); until then enter the rows in Lacerte, or run the workflow in simulation mode."),
 
             [InternalServerError] = new StatusInfo(
                 "InternalServerError",

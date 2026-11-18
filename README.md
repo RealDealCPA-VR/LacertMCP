@@ -14,7 +14,7 @@ A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as t
 
 Bounding expectations up front saves a triage loop with the LLM:
 
-* **Not a return-preparation tool yet** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created, but in live mode only a few built-in fields are writable (3 DATA1 fields for Individual/Partnership, none for Corporate/S-Corp/Fiduciary) and detail rows (income, deductions, K-1 items) can't be written yet. Return data is entered in Lacerte. See Todo "Filing preparation" for what it would take.
+* **Return preparation only as far as it's mapped and enabled** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created. Writing return data needs verified field-dictionary mappings for that module (recorded on the Lacerte PC with `lacerte-mcp map-diff`; the dictionaries ship empty) and, for income/deduction/K-1 amounts, live detail writes switched on with `LACERTE_LIVE_DETAIL_WRITES=1` after the checks in REGRESSION_CHECKLIST "FP-2 live items". Until then return data is entered in Lacerte. See `docs/plans/filing-preparation.md`.
 * **No e-filing actions** — read-only EF status via `lacerte_ef_status` (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.
 * **No printing, PDF rendering, or third-party export** — DBF read/write + COM field-write only. Use Lacerte's File → Print or Print to PDF for any rendered output.
 * **No organizer, client portal, letter template, or diagnostics-detail access** — those live in non-DBF Lacerte surfaces this MCP doesn't wire up.
@@ -32,7 +32,7 @@ Full architecture in [ARCHITECTURE.md](ARCHITECTURE.md). Per-decision rationale 
 
 ## Try it (simulation mode)
 
-You don't need Windows or a Lacerte install to kick the tires — the MCP ships with an in-memory 8-client seed fixture (`src/LacertMCP.Server/Session/Fixtures/SeedData.cs`) so you can wire the server into Claude Desktop (or any stdio MCP host) on macOS / Linux / Windows-without-Lacerte and ask the LLM to read the seeded clients.
+You don't need Windows or a Lacerte install to kick the tires — the MCP ships with an in-memory 12-client seed fixture (`src/LacertMCP.Server/Session/Fixtures/SeedData.cs`) so you can wire the server into Claude Desktop (or any stdio MCP host) on macOS / Linux / Windows-without-Lacerte and ask the LLM to read the seeded clients.
 
 **1. Build + point Claude Desktop at the sim-mode server.** Use the JSON snippet under "Install paths → Claude Desktop → Sim mode" below (the `LACERTE_SIMULATION=1` env var is the only thing that matters).
 
@@ -118,7 +118,7 @@ For an operator install, run `./scripts/release.ps1` to produce `dist/LacertMCP-
 
 > Tip: Windows accepts forward slashes in JSON paths — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` works and avoids the double-backslash gotcha when hand-editing the config.
 
-**Sim mode** — no Lacerte install required; uses the in-memory 8-client seed fixture (`src/LacertMCP.Server/Session/Fixtures/SeedData.cs`). Use this to confirm the wiring before pointing the MCP at real return data:
+**Sim mode** — no Lacerte install required; uses the in-memory 12-client seed fixture (`src/LacertMCP.Server/Session/Fixtures/SeedData.cs`). Use this to confirm the wiring before pointing the MCP at real return data:
 
 ```json
 {
@@ -133,7 +133,7 @@ For an operator install, run `./scripts/release.ps1` to produce `dist/LacertMCP-
 }
 ```
 
-First call to verify wiring: `lacerte_set_context dataPath="C:\\Lacerte\\24Tax\\IData" taxYear=2024 module="I"` then `lacerte_client_list` returns the seeded BROW + PEND clients. The other seeded datapaths are `C:\Lacerte\20Tax\IData` (SMIT, JONE, REJE), `C:\Lacerte\24Tax\CData` (ACME, WIDG), and `C:\Lacerte\24Tax\PData` (PART with 3 partner subclients).
+First call to verify wiring: `lacerte_set_context dataPath="C:\\Lacerte\\24Tax\\IData" taxYear=2024 module="I"` then `lacerte_client_list` returns the seeded BROW + PEND clients. The other seeded datapaths are `C:\Lacerte\20Tax\IData` (SMIT, JONE, REJE), `C:\Lacerte\24Tax\CData` (ACME, WIDG), `C:\Lacerte\24Tax\PData` (PART with 3 partner subclients), `C:\Lacerte\24Tax\SData` (S-corps ORCH with 2 shareholders, HOLW with none) and `C:\Lacerte\24Tax\FData` (trusts MAPL with 2 beneficiaries, BIRC with none).
 
 For dev / sim against the source tree, swap `C:\\LacertMCP\\server\\LacertMCP.Server.exe` for `C:\\path\\to\\LacertMCP\\src\\LacertMCP.Server\\bin\\x64\\Release\\LacertMCP.Server.exe`. To switch from live to sim mode, drop `LACERTE_LIVE` + `LACERTE_DATA_PATH` from the env block and add `LACERTE_SIMULATION=1` (the in-memory seed provides the datapaths above).
 
@@ -183,6 +183,8 @@ env:
 | `LACERTE_IDEMPOTENCY_PERSIST_PATH` | optional | `%APPDATA%/lacerte-mcp/idempotency-cache.json` | Override the persisted idempotency-cache path. |
 | `LACERTE_SIM_EXPIRED` | testing only | unset | `1` simulates an expired 24h auth session. |
 | `LACERTE_DATA_ROOT` | optional | `C:\Lacerte` | Root scanned by `lacerte_list_datapaths` when discovering `{YY}Tax\{Module}Data` folders. |
+| `LACERTE_LIVE_DETAIL_WRITES` | optional | unset (off) | `1` enables live detail-row writes (income, deduction, K-1 amounts) through the Lacerte ODBC driver, run in a separate worker process with a per-client snapshot before the first write and a read-back after each. Off until verified on the Lacerte PC (REGRESSION_CHECKLIST "FP-2 live items"); while off, live detail writes return 9202. |
+| `LACERTE_DETAIL_SNAPSHOT_DIR` | optional | `%APPDATA%\lacerte-mcp\detail-snapshots` | Absolute folder for the pre-write detail-row snapshots (they contain taxpayer data and are not cleaned up automatically). |
 | `LACERTE_MCP_FORCE_FILE_STORE` | testing / dev | unset | `1` bypasses Windows Credential Manager and uses the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json` (auto-on off-Windows). |
 | `LACERTE_PARITY_RECORDING` | testing only | unset | Path to recorded parity JSON consumed by the `BothModesData` test harness (live ↔ sim contract recorder). |
 
@@ -297,7 +299,7 @@ The server registers **43 MCP tools**, grouped below by the same categories `lac
 | Tool | Params | What it does |
 | --- | --- | --- |
 | `lacerte_diff_clients` | `client1Number`, `client2Number`, `includeSubclients?`, `includeStates?`, `includeDetail?`, `ignoreFields?` | Field-by-field diff of two clients; detail rows compared across all 11 `DetailRow` fields; keyless rows reported via `rowsWithoutKey`. |
-| `lacerte_pre_filing_check` | `clientNumber`, `severity?` | Pre-filing readiness rules for modules I/P/C/S (1040/1065/1120/1120S); not-applicable rules surface in `skippedRules`, never silently pass. F/R/T/N/B return `readiness="unsupported-module"`. |
+| `lacerte_pre_filing_check` | `clientNumber`, `severity?` | Pre-filing readiness rules for modules I/P/C/S/F (1040/1065/1120/1120S/1041), incl. partners-present (1065), shareholders-present (1120-S, blocker) and beneficiaries-present (1041, warning); not-applicable rules surface in `skippedRules`, never silently pass. R/T/N/B return `readiness="unsupported-module"`. |
 | `lacerte_year_over_year` | `clientNumber`, `fromYear`, `toYear`, `scope?`, `seriesIds?` | Diff one client across two tax years. Envelope carries `foundInFromYear`/`foundInToYear` so a typo'd clientNumber can't read as "no changes". |
 | `lacerte_field_history` | `clientNumber`, `field`, `sinceUtc?`, `limit?` | Audit history for one (client, field) pair from the WireLog JSONL (requires `LACERTE_DEBUG_WIRE=1`). Rows carry `succeeded`; newest rows kept on truncation; `limit` clamped to 1000. |
 
@@ -320,11 +322,11 @@ The server registers **43 MCP tools**, grouped below by the same categories `lac
 | `lacerte_return_codes` | none | All 28 TAPIStatus + 5 TPSDKStatus + synthetic 9xxx codes with `origin`/`originGroup` discriminators. |
 | `lacerte_reload_schema` | none | Drop in-process FieldAccessMap caches so fresh shards take effect without a restart (a restart invalidates the 24h auth ticket). |
 | `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 43 tools by category, env vars, limits, first-call, prompts. |
-| `lacerte_prompts` | `name?` | List or fetch the 4 canonical workflow prompt bodies inline. |
+| `lacerte_prompts` | `name?` | List or fetch the 5 canonical workflow prompt bodies inline. |
 
 ## Prompts
 
-Four first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Program.cs`, discoverable through the standard MCP `prompts/list` handshake):
+Five first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Program.cs`, discoverable through the standard MCP `prompts/list` handshake):
 
 | Prompt | What it walks the agent through | Args |
 | --- | --- | --- |
@@ -332,6 +334,7 @@ Four first-class MCP prompts (registered via `WithPromptsFromAssembly()` in `Pro
 | `lacerte_review_ef_status` | Triage e-file status: pull EFiling+EFStatus join, group by Status, surface Rejected first, flag stale Pending/Transmitted (>72h). TY19+ only. | `taxYear?: int` |
 | `lacerte_field_write_bulk` | Bulk field write across many clients with mandatory dry-run preview (first N), idempotency keys, stop-on-first-error. Name matches the `lacerte_field_write_bulk` tool (P16-052 — was `lacerte_bulk_field_update` pre-P16). | `table: int = 1`, `field: string` (required), `previewCount: int = 3` |
 | `lacerte_csv_intake` | Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column→field mapping declaration, per-row idempotency keys, stop-on-first-error. | `sourceLabel?: string`, `rowCount?: int` |
+| `lacerte_entity_return_entry` | Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using ONLY verified `lacerte_field_dictionary` mappings (stops when the module has none): map source lines for operator approval, dry-run, commit with idempotency keys, handle `verified` / 9022, check owners, finish with `lacerte_pre_filing_check`. | `returnType: string = "1120"` (1120 / 1120S / 1065 / 1041), `sourceLabel?: string` |
 
 Canonical step lists live in `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
 
@@ -394,6 +397,7 @@ TL;DR:
 | `lacerte-mcp tools` | List every MCP tool the server registers (reflection — no stdio boot). Supports `--filter <regex>` / `--name <exact>` / `--names-only` / `--json`. |
 | `lacerte-mcp field-access {set,list,discover}` | Manage the per-field access map. `discover` exits 3 with a pointer to the standalone `LacertMCP.FieldAccessDumper.exe`. |
 | `lacerte-mcp doctor` | Pre-flight probes for the install; exit 0/1/2 contract (3 reserved for "not implemented here", see `field-access discover`). |
+| `lacerte-mcp map-diff {snapshot,compare,record}` | Build the field dictionary on the Lacerte PC: snapshot a test client, enter ONE known value in Lacerte, snapshot again, `compare` shows what changed, `record` saves the mapping (only when exactly one cell or detail row changed). See `src/LacertMCP.Server/Schema/FieldDictionary/README.md`. |
 | `lacerte-mcp update` | Update the install from the latest GitHub release (or fast-forward a git checkout); `--check` to only look, `--schedule daily` to automate. |
 
 ### `lacerte-mcp register [--app-name X] [--tax-year Y] [--reset]`

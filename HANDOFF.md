@@ -1,5 +1,13 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, later) — filing-prep build (everything that doesn't need the Lacerte PC)
+
+- Built FP-1a, FP-2, FP-3 tooling, FP-4 and FP-5 (three worktree agents + coordinator; details in docs/plans/filing-preparation.md "Status" and Todo "Filing preparation").
+- New: `lacerte_field_dictionary` tool (43 tools), `lacerte_entity_return_entry` prompt (5 prompts), `lacerte-mcp map-diff`, hidden `field-access merge-dictionary`, env `LACERTE_LIVE_DETAIL_WRITES` (default off) and `LACERTE_DETAIL_SNAPSHOT_DIR`, sim datapaths SData/FData (12 seeded clients).
+- Safety: field dictionaries ship EMPTY (no invented Lacerte codes); range rules apply only to dictionary-listed fields; live detail writes are out-of-process, snapshot first, read back, and OFF until verified; recorded dictionary entries survive updates.
+- Tests 2067 passed, 11 skipped, 0 failed; build 0 warnings. Nothing pushed.
+- Next, on the Lacerte PC: FP-2 live items -> enable detail writes; record mappings with map-diff for the most-filed return type; FP-6 acceptance.
+
 ## Last Session Summary (2026-11-18) — return-preparation capability check
 
 - Asked whether the MCP can prepare 1120 / 1120-S / 1065 / 1041 filings: **no, not today.** It reads every module and creates clients, but live mode writes only 3 DATA1 fields (I/P; none for C/S/F), live detail-row writes are unwired (9202), there is no field dictionary, and there is no 1041 pre-filing check.
