@@ -695,3 +695,15 @@ Claude Desktop's config file only starts local (stdio) programs, and its remote 
 **Rejected:** (1) re-running `install-http.ps1` from the update — it needs Administrator every time; (2) having the server update itself — it can't replace its own files and would restart mid-tool-call; (3) hourly checks — a mid-day restart drops in-flight agent calls, so the schedule is daily at a quiet hour; (4) keying updates on master commits — releases are what is built, tested and checksummed, so only a pushed `v*` tag ships.
 
 **Tradeoff:** an entry the operator built on this PC keeps beating a later curated correction for the same field (`--reset-field-map --force` takes the release's map as-is; the old one stays in the backup); and a curated entry a release drops stays on PCs that already had it.
+
+## 2026-11-17 — Round-8 review: verification semantics, startup sign-in, HTTP fail-closed
+
+**Write read-back.** A field write is `verified: true` only when the stored value matches. A mismatch is 9022 and now also drops the write's idempotency entry, so a retry with the same key re-executes instead of replaying the cached Success forever. A read-back that *cannot run* (ODBC error, field not exposed as a column) is `verified: null` with a note, never 9022: the SDK already accepted the write, and absence of evidence is not a mismatch. Write and read-back are pinned to one context. JSON `true`/`false` compares as a checkbox (X/Y/1/blank).
+
+**Startup sign-in runs in the background.** The live `Register` is the same SDK call as `lacerte-mcp login`; with a cold 24h ticket the SDK may show its sign-in window, and AutoReconnect adds back-off. Hosted services start sequentially, so awaiting it blocked the HTTP listener and stdio transport. Tools return NotSignedIn/LoginExpired until it lands. (This corrects the 2026-11-16 self-update note that a startup "never runs the interactive ceremony": an unattended restart is safe because nothing waits on it, not because no window can appear.)
+
+**HTTP mode fails closed without a connection scope.** Per-device read-only and per-connection context isolation depend on the MCP SDK flowing `SessionScope` (AsyncLocal) into tool calls. `SessionScope.Required` is set in HTTP mode; a tool call without a scope gets no shared context and every write is refused, rather than silently falling back to one process-wide context.
+
+**GET /mcp answers 405.** The server never sends unsolicited messages, and an open SSE GET kept its session "busy" forever (HttpListener can't see a dead client), so sessions were never reaped and the cap filled. Streamable HTTP clients treat 405 as "no standalone stream".
+
+**Rejected:** fixing the bridge's one-message-at-a-time loop now (needs runspaces in Windows PowerShell 5.1 — not contained); partitioning the idempotency cache per device (a cross-device replay needs identical key + args + context, i.e. the same write).

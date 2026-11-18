@@ -1,0 +1,921 @@
+<title>Lacerte MCP Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap">
+<style>
+/* Layout: a single ruled "return" read top to bottom. Each Part opens with a solid
+   form-style header bar (Part I … Part X), like the parts of a federal tax form. */
+:root {
+  --paper: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #152034;
+  --muted: #586378;
+  --rule: #d6dce6;
+  --rule-strong: #b5bfcf;
+  --accent: #1d5bbf;
+  --accent-soft: #e5edfb;
+  --ok: #17734a;
+  --ok-soft: #e2f3ea;
+  --warn: #9a5c00;
+  --warn-soft: #fbefdc;
+  --bad: #b02a20;
+  --bad-soft: #fbe6e3;
+  --bar: #152034;
+  --bar-fg: #ffffff;
+  --code-bg: #eef1f6;
+  --f-body: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --step-0: 0.875rem;
+  --step-1: 1rem;
+  --step-2: 1.2rem;
+  --step-3: 1.6rem;
+  --step-4: clamp(2rem, 5vw, 3.1rem);
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e131c; --surface: #151c28; --ink: #e5e9f0; --muted: #9ba6b9;
+    --rule: #283244; --rule-strong: #3a465b; --accent: #82a9ef; --accent-soft: #1b2944;
+    --ok: #5ec594; --ok-soft: #12291f; --warn: #e3a64c; --warn-soft: #2d2212;
+    --bad: #f2897f; --bad-soft: #2f1715; --bar: #e5e9f0; --bar-fg: #0e131c; --code-bg: #1c2433;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e131c; --surface: #151c28; --ink: #e5e9f0; --muted: #9ba6b9;
+  --rule: #283244; --rule-strong: #3a465b; --accent: #82a9ef; --accent-soft: #1b2944;
+  --ok: #5ec594; --ok-soft: #12291f; --warn: #e3a64c; --warn-soft: #2d2212;
+  --bad: #f2897f; --bad-soft: #2f1715; --bar: #e5e9f0; --bar-fg: #0e131c; --code-bg: #1c2433;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: var(--step-1);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+body::before {
+  content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px);
+  z-index: 10; background: var(--surface);
+}
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px;
+}
+code, kbd, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+h1, h2, h3 { line-height: 1.2; text-wrap: balance; margin: 0; }
+p { margin: 0; }
+
+.wrap {
+  max-width: 1080px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+/* ---------- top nav ---------- */
+.topbar {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--surface); border-bottom: 1px solid var(--rule);
+}
+.topbar .wrap { display: flex; align-items: center; gap: 20px; padding-block: 10px; }
+.brand { font-weight: 800; letter-spacing: -0.01em; white-space: nowrap; }
+.brand span { color: var(--muted); font-weight: 500; }
+.nav { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+.nav::-webkit-scrollbar { display: none; }
+.nav a {
+  font-family: var(--f-mono); font-size: 0.78rem; text-decoration: none; color: var(--muted);
+  padding: 4px 8px; border-radius: 4px; white-space: nowrap;
+}
+.nav a:hover { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- hero ---------- */
+.hero { padding-block: 56px 28px; display: grid; gap: 22px; }
+.eyebrow {
+  font-family: var(--f-mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px;
+}
+.hero h1 { font-size: var(--step-4); font-weight: 800; letter-spacing: -0.025em; max-width: 20ch; }
+.lede { font-size: var(--step-2); color: var(--muted); max-width: 62ch; }
+.lede strong { color: var(--ink); font-weight: 600; }
+.facts { display: flex; flex-wrap: wrap; gap: 10px; }
+.fact {
+  display: inline-flex; align-items: baseline; gap: 8px; border: 1px solid var(--rule);
+  background: var(--surface); border-radius: 999px; padding: 4px 14px; font-size: var(--step-0);
+}
+.fact b { font-family: var(--f-mono); font-weight: 600; }
+
+/* ---------- Part headers (form convention) ---------- */
+section.part { padding-block: 36px 8px; scroll-margin-top: 64px; }
+.part-head {
+  display: flex; align-items: stretch; border: 2px solid var(--bar); margin-bottom: 22px;
+}
+.part-head .no {
+  background: var(--bar); color: var(--bar-fg); font-weight: 800; padding: 6px 14px;
+  font-size: var(--step-0); letter-spacing: 0.04em; white-space: nowrap; display: flex; align-items: center;
+}
+.part-head h2 {
+  font-size: var(--step-2); font-weight: 700; padding: 6px 14px; display: flex; align-items: center;
+  background: var(--surface); flex: 1; min-width: 0;
+}
+.intro { color: var(--muted); max-width: 70ch; margin-bottom: 20px; }
+
+/* ---------- generic blocks ---------- */
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); }
+.grid { display: grid; gap: 16px; }
+.cols-2 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.cols-3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.card { padding: 18px 20px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card h3 { font-size: var(--step-1); font-weight: 700; }
+.card p, .card li { color: var(--muted); font-size: 0.95rem; }
+.card ul { margin: 0; padding-left: 1.1em; display: grid; gap: 4px; }
+.tag {
+  display: inline-block; font-family: var(--f-mono); font-size: 0.72rem; font-weight: 600;
+  letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent); width: fit-content;
+}
+.tag.ok { background: var(--ok-soft); color: var(--ok); }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.tag.bad { background: var(--bad-soft); color: var(--bad); }
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---------- diagram ---------- */
+.diagram { padding: 14px; }
+.diagram svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.d-box { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.5; }
+.d-pc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.d-strong { fill: var(--surface); stroke: var(--ink); stroke-width: 1.8; }
+.d-chip { fill: var(--code-bg); stroke: var(--rule-strong); stroke-width: 1; }
+.d-net { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.d-line { fill: none; stroke: var(--muted); stroke-width: 1.6; }
+.d-t { fill: var(--ink); font-family: var(--f-body); font-size: 15px; font-weight: 700; }
+.d-s { fill: var(--muted); font-family: var(--f-body); font-size: 12.5px; }
+.d-m { fill: var(--ink); font-family: var(--f-mono); font-size: 12.5px; }
+.d-label { fill: var(--accent); font-family: var(--f-mono); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; }
+.caption { color: var(--muted); font-size: var(--step-0); padding: 4px 6px 0; }
+
+/* ---------- request flow ---------- */
+.flow { list-style: none; margin: 0; padding: 0; display: grid; }
+.flow li {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) minmax(0, 0.9fr); gap: 0 18px;
+  padding: 16px 0; border-top: 1px solid var(--rule);
+}
+.flow li:last-child { border-bottom: 1px solid var(--rule); }
+.flow .n {
+  font-family: var(--f-mono); font-weight: 600; font-size: 0.85rem; width: 32px; height: 32px;
+  border: 1.5px solid var(--ink); border-radius: 50%; display: grid; place-items: center;
+}
+.flow h3 { font-size: var(--step-1); font-weight: 700; margin-bottom: 4px; }
+.flow p { color: var(--muted); font-size: 0.95rem; }
+.flow .stop { font-size: 0.88rem; color: var(--muted); display: grid; gap: 6px; align-content: start; }
+.flow .stop b { color: var(--ink); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.codes { display: flex; flex-wrap: wrap; gap: 6px; }
+.code-chip {
+  font-family: var(--f-mono); font-size: 0.76rem; padding: 2px 7px; border-radius: 4px;
+  background: var(--bad-soft); color: var(--bad); white-space: nowrap;
+}
+.code-chip.ok { background: var(--ok-soft); color: var(--ok); }
+@media (max-width: 720px) {
+  .flow li { grid-template-columns: 40px minmax(0, 1fr); }
+  .flow .stop { grid-column: 2; margin-top: 10px; }
+}
+
+/* ---------- comparison ---------- */
+.compare { width: 100%; border-collapse: collapse; font-size: 0.93rem; min-width: 620px; }
+.compare th, .compare td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.compare thead th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 2px solid var(--ink); }
+.compare td:first-child { font-weight: 600; white-space: nowrap; }
+.compare td { color: var(--muted); }
+.yes { color: var(--ok); font-weight: 700; }
+.no { color: var(--bad); font-weight: 700; }
+
+/* ---------- setup checklists ---------- */
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: s; display: grid; gap: 14px; }
+.steps > li { counter-increment: s; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; }
+.steps > li::before {
+  content: counter(s); font-family: var(--f-mono); font-weight: 600; font-size: 0.8rem;
+  width: 26px; height: 26px; border-radius: 4px; background: var(--ink); color: var(--paper);
+  display: grid; place-items: center; margin-top: 2px;
+}
+.steps h4 { margin: 0 0 2px; font-size: 0.98rem; }
+.steps p { color: var(--muted); font-size: 0.93rem; }
+.cmd {
+  display: flex; align-items: stretch; margin-top: 8px; border: 1px solid var(--rule);
+  border-radius: var(--radius); background: var(--code-bg); min-width: 0;
+}
+.cmd pre {
+  margin: 0; padding: 9px 12px; font-family: var(--f-mono); font-size: 0.8rem; overflow-x: auto;
+  flex: 1; min-width: 0; white-space: pre; color: var(--ink);
+}
+.copy {
+  border: 0; border-left: 1px solid var(--rule); background: transparent; color: var(--accent);
+  font-family: var(--f-mono); font-size: 0.74rem; font-weight: 600; padding: 0 12px; cursor: pointer;
+}
+.copy:hover { background: var(--accent-soft); }
+.where { font-family: var(--f-mono); font-size: 0.74rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--ink); flex-wrap: wrap; }
+.tabs button {
+  font: 600 0.92rem var(--f-body); border: 1px solid var(--rule); border-bottom: 0; background: var(--surface);
+  color: var(--muted); padding: 8px 14px; border-radius: var(--radius) var(--radius) 0 0; cursor: pointer;
+}
+.tabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.tabpanel { padding: 20px; border: 1px solid var(--rule); border-top: 0; background: var(--surface); border-radius: 0 0 var(--radius) var(--radius); }
+
+/* ---------- filters + tables ---------- */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.search {
+  font: 0.93rem var(--f-body); padding: 8px 12px; border: 1px solid var(--rule-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--ink); min-width: 0; flex: 1 1 220px; max-width: 360px;
+}
+.chip {
+  font: 600 0.8rem var(--f-body); border: 1px solid var(--rule-strong); background: var(--surface); color: var(--muted);
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+}
+.chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.count { font-family: var(--f-mono); font-size: 0.78rem; color: var(--muted); margin-left: auto; }
+table.data { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+table.data th, table.data td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+table.data thead th { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); background: var(--surface); position: sticky; top: 0; }
+table.data td { color: var(--muted); }
+table.data td:first-child { color: var(--ink); white-space: nowrap; }
+table.data td.def { font-family: var(--f-mono); font-size: 0.8rem; white-space: nowrap; color: var(--ink); }
+.env-table { min-width: 640px; }
+.tool-groups { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+.tool-group h3 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); padding: 12px 16px 8px; border-bottom: 1px solid var(--rule); display: flex; justify-content: space-between; }
+.tool-group ul { list-style: none; margin: 0; padding: 4px 0; }
+.tool-group li { padding: 8px 16px; display: grid; gap: 2px; }
+.tool-group li + li { border-top: 1px dashed var(--rule); }
+.tool-name { font-family: var(--f-mono); font-size: 0.82rem; font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
+.tool-desc { color: var(--muted); font-size: 0.88rem; }
+.kind { font-family: var(--f-mono); font-size: 0.66rem; font-weight: 600; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; letter-spacing: 0.05em; }
+.kind.read { background: var(--ok-soft); color: var(--ok); }
+.kind.write { background: var(--warn-soft); color: var(--warn); }
+.kind.info { background: var(--accent-soft); color: var(--accent); }
+.empty { color: var(--muted); padding: 20px; text-align: center; }
+
+/* ---------- access matrix ---------- */
+.matrix { width: 100%; border-collapse: collapse; font-size: 0.92rem; min-width: 520px; }
+.matrix th, .matrix td { padding: 10px 12px; border-bottom: 1px solid var(--rule); text-align: center; }
+.matrix th:first-child, .matrix td:first-child { text-align: left; }
+.matrix thead th { font-size: 0.8rem; border-bottom: 2px solid var(--ink); }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; }
+.dot.y { background: var(--ok); }
+.dot.n { background: transparent; border: 2px solid var(--bad); }
+
+/* ---------- code ranges ---------- */
+.ranges { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 0; border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+.range { padding: 16px 18px; display: grid; gap: 6px; }
+.range.sdk { background: var(--accent-soft); }
+.range.syn { background: var(--surface); border-left: 1px solid var(--rule); }
+.range .span { font-family: var(--f-mono); font-size: 1.15rem; font-weight: 600; }
+.range p { color: var(--muted); font-size: 0.9rem; }
+@media (max-width: 640px) { .ranges { grid-template-columns: 1fr; } .range.syn { border-left: 0; border-top: 1px solid var(--rule); } }
+
+/* ---------- troubleshooting ---------- */
+details.faq { border-top: 1px solid var(--rule); }
+details.faq:last-of-type { border-bottom: 1px solid var(--rule); }
+details.faq summary {
+  cursor: pointer; padding: 12px 4px; font-weight: 600; list-style: none; display: flex; gap: 12px; align-items: baseline;
+}
+details.faq summary::-webkit-details-marker { display: none; }
+details.faq summary::before { content: "+"; font-family: var(--f-mono); color: var(--accent); width: 1ch; }
+details.faq[open] summary::before { content: "−"; }
+details.faq .body { padding: 0 4px 14px 26px; color: var(--muted); font-size: 0.95rem; display: grid; gap: 6px; }
+
+/* ---------- update pipeline ---------- */
+.pipe { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 0; counter-reset: p; }
+.pipe > div { padding: 14px 14px 16px; border-top: 3px solid var(--rule-strong); display: grid; gap: 4px; align-content: start; position: relative; }
+.pipe > div.gh { border-top-color: var(--accent); }
+.pipe > div.pc { border-top-color: var(--ok); }
+.pipe .who { font-family: var(--f-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.pipe h4 { margin: 0; font-size: 0.95rem; }
+.pipe p { font-size: 0.86rem; color: var(--muted); }
+
+footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px 40px; color: var(--muted); font-size: var(--step-0); display: grid; gap: 8px; }
+.status-row { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.status-row b { color: var(--ink); font-family: var(--f-mono); font-weight: 600; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .copy, .chip, .tabs button, .nav a { transition: background-color .15s ease, color .15s ease; }
+}
+</style>
+
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand">Lacerte MCP <span>v0.2.2</span></div>
+    <nav class="nav" aria-label="Sections">
+      <a href="#what">I · What it is</a>
+      <a href="#flow">II · How a request flows</a>
+      <a href="#modes">III · Ways to run it</a>
+      <a href="#setup">IV · Setup</a>
+      <a href="#config">V · Configuration</a>
+      <a href="#safety">VI · Access &amp; safety</a>
+      <a href="#tools">VII · Tools</a>
+      <a href="#errors">VIII · Problems</a>
+      <a href="#updates">IX · Updates</a>
+      <a href="#cli">X · CLI</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow"><span>Operator guide</span><span>Intuit Lacerte TY18+</span><span>Model Context Protocol</span></div>
+    <h1>Let Claude read and update Lacerte returns, safely.</h1>
+    <p class="lede">Lacerte MCP runs on the PC that has Lacerte installed and gives AI assistants like <strong>Claude Desktop, Claude Code and Codex</strong> a set of well-defined tools: list clients, read any return table, check e-file status, and write fields with every change checked and confirmed. Your data never leaves your network.</p>
+    <div class="facts">
+      <span class="fact"><b>42</b> tools</span>
+      <span class="fact"><b>9</b> return modules (I C P S F R T N B)</span>
+      <span class="fact"><b>2</b> modes: live and simulation</span>
+      <span class="fact"><b>3</b> access levels per device</span>
+    </div>
+  </div>
+
+  <!-- ============================================================ PART I -->
+  <section class="part" id="what">
+    <div class="part-head"><div class="no">Part I</div><h2>What it is and how the pieces connect</h2></div>
+    <p class="intro">Intuit's Lacerte SDK only works on the computer where Lacerte is installed. So the MCP server lives on that one "Lacerte PC" and every assistant in the office reaches it over your private Tailscale network. Nothing is hosted in the cloud.</p>
+
+    <div class="panel diagram">
+      <div class="scroll-x">
+      <svg viewBox="0 0 1000 470" role="img" aria-labelledby="archTitle archDesc">
+        <title id="archTitle">How Lacerte MCP connects assistants to Lacerte</title>
+        <desc id="archDesc">Workstations running Claude Desktop, Claude Code or Codex connect over the Tailscale network to the Lacerte PC. There the always-on LacertMCP server checks who is calling, runs the request through the session manager, and uses the Lacerte SDK and ODBC driver to reach the Lacerte data folders.</desc>
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" style="fill: var(--muted)"></path>
+          </marker>
+        </defs>
+
+        <text x="20" y="44" class="d-label">WORKSTATIONS</text>
+        <rect x="20" y="60" width="230" height="72" rx="8" class="d-box"></rect>
+        <text x="36" y="90" class="d-t">Claude Desktop</text>
+        <text x="36" y="112" class="d-s">via bridge.ps1 (stdio → HTTP)</text>
+        <rect x="20" y="150" width="230" height="72" rx="8" class="d-box"></rect>
+        <text x="36" y="180" class="d-t">Claude Code</text>
+        <text x="36" y="202" class="d-s">connects over HTTP directly</text>
+        <rect x="20" y="240" width="230" height="72" rx="8" class="d-box"></rect>
+        <text x="36" y="270" class="d-t">Codex</text>
+        <text x="36" y="292" class="d-s">via bridge.ps1 (stdio → HTTP)</text>
+        <text x="20" y="350" class="d-s">One-line setup on each workstation:</text>
+        <text x="20" y="370" class="d-m">irm http://&lt;PC&gt;:8767/setup.ps1 | iex</text>
+
+        <rect x="280" y="52" width="130" height="270" rx="12" class="d-net"></rect>
+        <text x="345" y="80" class="d-label" text-anchor="middle">TAILSCALE</text>
+        <text x="345" y="100" class="d-s" text-anchor="middle">encrypted tailnet</text>
+        <text x="345" y="290" class="d-s" text-anchor="middle">port 8767, only</text>
+        <text x="345" y="306" class="d-s" text-anchor="middle">from 100.64.0.0/10</text>
+
+        <path d="M250,96 C330,96 360,122 452,122" class="d-line" marker-end="url(#arr)"></path>
+        <path d="M250,186 C330,186 360,140 452,140" class="d-line" marker-end="url(#arr)"></path>
+        <path d="M250,276 C330,276 360,158 452,158" class="d-line" marker-end="url(#arr)"></path>
+
+        <rect x="430" y="22" width="550" height="436" rx="12" class="d-pc"></rect>
+        <text x="450" y="46" class="d-label">LACERTE PC · WINDOWS</text>
+
+        <rect x="452" y="62" width="506" height="140" rx="8" class="d-strong"></rect>
+        <text x="468" y="88" class="d-t">LacertMCP.Server --http</text>
+        <text x="468" y="108" class="d-s">Always on: a Startup launcher starts it at sign-in and restarts it if it stops</text>
+        <rect x="468" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
+        <text x="480" y="148" class="d-m">/mcp</text>
+        <text x="480" y="168" class="d-s">the 42 tools</text>
+        <rect x="630" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
+        <text x="642" y="148" class="d-m">/  control page</text>
+        <text x="642" y="168" class="d-s">health, access, activity</text>
+        <rect x="792" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
+        <text x="804" y="148" class="d-m">who is this?</text>
+        <text x="804" y="168" class="d-s">tailscale whois → level</text>
+
+        <path d="M705,202 L705,224" class="d-line" marker-end="url(#arr)"></path>
+        <rect x="452" y="226" width="506" height="64" rx="8" class="d-box"></rect>
+        <text x="468" y="252" class="d-t">Session manager</text>
+        <text x="468" y="274" class="d-s">per-connection context · checks · field-access map · replay guard · read-back</text>
+
+        <path d="M575,290 L575,314" class="d-line" marker-end="url(#arr)"></path>
+        <path d="M835,290 L835,314" class="d-line" marker-end="url(#arr)"></path>
+        <rect x="452" y="316" width="244" height="64" rx="8" class="d-box"></rect>
+        <text x="468" y="342" class="d-t">Lacerte SDK (COM)</text>
+        <text x="468" y="364" class="d-s">sign-in · new clients · field writes</text>
+        <rect x="714" y="316" width="244" height="64" rx="8" class="d-box"></rect>
+        <text x="730" y="342" class="d-t">Lacerte ODBC driver</text>
+        <text x="730" y="364" class="d-s">reads · detail rows · read-back</text>
+
+        <path d="M575,380 L575,398" class="d-line" marker-end="url(#arr)"></path>
+        <path d="M835,380 L835,398" class="d-line" marker-end="url(#arr)"></path>
+        <rect x="452" y="400" width="506" height="44" rx="8" class="d-box"></rect>
+        <text x="468" y="427" class="d-t">Lacerte data</text>
+        <text x="575" y="427" class="d-m">{YY}Tax\{Module}Data</text>
+        <text x="760" y="427" class="d-s">on this PC or a file share</text>
+      </svg>
+      </div>
+      <p class="caption">Workstations never touch Lacerte files directly. Every request goes through the server on the Lacerte PC, which knows which device is asking and what it may do.</p>
+    </div>
+
+    <div class="grid cols-3" style="margin-top:16px">
+      <div class="panel card">
+        <span class="tag">Reads</span>
+        <h3>Everything in the return tables</h3>
+        <p>Client list and search, DATA1–DATA7 tables, dependents and partners, state rows, detail rows (W-2s, 1099s), forms, e-file status, firm-wide dashboards and year-over-year comparisons.</p>
+      </div>
+      <div class="panel card">
+        <span class="tag warn">Writes</span>
+        <h3>Field writes and new clients</h3>
+        <p>Single and bulk field writes, detail rows and client creation. Every field write is read back from Lacerte and only reported as done when the stored value matches.</p>
+      </div>
+      <div class="panel card">
+        <span class="tag bad">Out of scope</span>
+        <h3>What it never does</h3>
+        <p>No e-file submission, printing, PDFs, organizers or archived files. Lacerte's editor shows a change after you close and reopen that client.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART II -->
+  <section class="part" id="flow">
+    <div class="part-head"><div class="no">Part II</div><h2>How a request flows</h2></div>
+    <p class="intro">Here is what happens, in order, when you ask Claude something like <em>"Update Brown's phone number to 555-0142."</em> Each step can stop the request with a clear, coded reason. Nothing is half-done silently.</p>
+
+    <ol class="flow">
+      <li>
+        <span class="n">1</span>
+        <div><h3>Claude picks a tool</h3><p>Claude finds the client (<code>lacerte_client_find</code>) and calls <code>lacerte_field_write</code> on the Lacerte PC's <code>/mcp</code> endpoint with the table, client number, field and new value.</p></div>
+        <div class="stop"><b>Stops here if</b><div class="codes"><span class="code-chip">9017 InvalidArgument</span></div></div>
+      </li>
+      <li>
+        <span class="n">2</span>
+        <div><h3>The server identifies the device</h3><p>It asks Tailscale which device made the call, then looks up that device on the control page's Access tab: <em>No access</em>, <em>Read only</em> or <em>Read &amp; write</em>.</p></div>
+        <div class="stop"><b>Stops here if</b><p>the device has no access, or only Read access and this is a write</p><div class="codes"><span class="code-chip">9001 FieldIsReadOnly</span></div></div>
+      </li>
+      <li>
+        <span class="n">3</span>
+        <div><h3>It uses this connection's context</h3><p>Each connection keeps its own tax year, module and data folder (set with <code>lacerte_set_context</code>), so two people's assistants can't redirect each other's writes.</p></div>
+        <div class="stop"><b>Stops here if</b><div class="codes"><span class="code-chip">9009 ContextNotSet</span><span class="code-chip">9016 ContextMismatch</span></div></div>
+      </li>
+      <li>
+        <span class="n">4</span>
+        <div><h3>The value and field are checked</h3><p>The field must be listed as writable in the field-access map for that module and year. Unknown fields are refused, not guessed. Length, characters and number formats are validated too.</p></div>
+        <div class="stop"><b>Stops here if</b><div class="codes"><span class="code-chip">9012 UnknownFieldAccess</span><span class="code-chip">9015 FieldWriteInvalid</span></div></div>
+      </li>
+      <li>
+        <span class="n">5</span>
+        <div><h3>Replays are caught</h3><p>If Claude retries with the same idempotency key and the same arguments, the earlier success is returned instead of writing twice. A dry run stops here and shows what would change.</p></div>
+        <div class="stop"><b>Stops here if</b><p>the same key arrives with different arguments</p><div class="codes"><span class="code-chip">9102 IdempotencyConflict</span></div></div>
+      </li>
+      <li>
+        <span class="n">6</span>
+        <div><h3>Lacerte makes the change</h3><p>The write goes through Intuit's SDK, using the newer <code>UpdateTaxReturn</code> path for 2021 and later. Detail rows go through the ODBC driver.</p></div>
+        <div class="stop"><b>Stops here if</b><p>Lacerte refuses or isn't reachable</p><div class="codes"><span class="code-chip">2 DBFNotAccessable</span><span class="code-chip">203 NotSignedIn</span><span class="code-chip">9201 BridgeUnavailable</span></div></div>
+      </li>
+      <li>
+        <span class="n">7</span>
+        <div><h3>The change is read back</h3><p>A fresh database connection reads the field again, from the same year and folder the write went to. Only a matching stored value counts as verified. A mismatch also clears the retry record, so trying again really rewrites the field. If the field can't be read back at all, the reply says <em>accepted, not verified</em> instead of guessing.</p></div>
+        <div class="stop"><b>Stops here if</b><div class="codes"><span class="code-chip">9022 WriteNotVerified</span></div></div>
+      </li>
+      <li>
+        <span class="n">8</span>
+        <div><h3>Claude gets a clear answer</h3><p>Every reply has the same shape: <code>success</code>, the <code>result</code> and a correlation id (<code>cid</code>). Social Security, EIN, bank and other secret values are masked. The call also appears on the control page's Activity tab.</p></div>
+        <div class="stop"><b>Result</b><div class="codes"><span class="code-chip ok">success: true · verified</span></div></div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============================================================ PART III -->
+  <section class="part" id="modes">
+    <div class="part-head"><div class="no">Part III</div><h2>Ways to run it</h2></div>
+    <p class="intro">There are two choices to make: <strong>where</strong> the assistants connect from, and <strong>whether</strong> the server talks to real Lacerte data or to built-in sample clients.</p>
+
+    <div class="tabs" role="tablist" aria-label="Deployment">
+      <button role="tab" id="tab-net" aria-selected="true" aria-controls="panel-net">Office network (recommended)</button>
+      <button role="tab" id="tab-one" aria-selected="false" aria-controls="panel-one" tabindex="-1">One PC only</button>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-net" aria-labelledby="tab-net">
+      <div class="grid cols-2">
+        <div class="card" style="padding:0">
+          <h3>Every workstation shares one server</h3>
+          <p>The server runs on the Lacerte PC around the clock, listens on its Tailscale address and on <code>localhost</code>, and serves the control page. Each workstation runs one setup command; you then grant it access on the control page.</p>
+          <ul>
+            <li>Installed by <code>install-http.ps1</code> into <code>%LOCALAPPDATA%\LacertMCP</code></li>
+            <li>Firewall opened to the tailnet only (<code>100.64.0.0/10</code>)</li>
+            <li>Per-device access, activity timeline and health checks</li>
+          </ul>
+        </div>
+        <div class="card" style="padding:0">
+          <h3>Control page tabs</h3>
+          <ul>
+            <li><b>Overview</b>: live or simulation, the 24-hour Intuit sign-in countdown, ODBC driver, SDK, writable-field map, data folders, Tailscale</li>
+            <li><b>Access</b>: per device, No access, Read only or Read &amp; write</li>
+            <li><b>Agents</b>: connected assistants and the client file each is in, plus the copyable setup line</li>
+            <li><b>Data folders</b>: test reads of each <code>{YY}Tax\{Module}Data</code> folder</li>
+            <li><b>Activity</b> and <b>Storage</b></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-one" aria-labelledby="tab-one" hidden>
+      <div class="grid cols-2">
+        <div class="card" style="padding:0">
+          <h3>Claude Desktop starts the server itself</h3>
+          <p>For a single person working on the Lacerte PC. Claude Desktop launches <code>LacertMCP.Server.exe</code> over stdio and stops it when it quits. There is no control page or device access list; the person at the PC is the only user.</p>
+        </div>
+        <div class="card" style="padding:0">
+          <span class="where">claude_desktop_config.json</span>
+          <div class="cmd"><pre>{
+  "mcpServers": {
+    "lacerte": {
+      "command": "C:/LacertMCP/server/LacertMCP.Server.exe",
+      "env": {
+        "LACERTE_LIVE": "1",
+        "LACERTE_DEFAULT_TAX_YEAR": "2024"
+      }
+    }
+  }
+}</pre><button class="copy" type="button">Copy</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel scroll-x" style="margin-top:20px">
+      <table class="compare">
+        <thead><tr><th></th><th>Live</th><th>Simulation</th></tr></thead>
+        <tbody>
+          <tr><td>Turn on with</td><td><code>LACERTE_LIVE=1</code> (Windows only)</td><td><code>LACERTE_SIMULATION=1</code>, or automatic off Windows</td></tr>
+          <tr><td>Data</td><td>Your real Lacerte returns</td><td>8 built-in sample clients: SMIT, JONE, REJE, BROW, PEND, ACME, WIDG, PART</td></tr>
+          <tr><td>Needs</td><td>Lacerte, the 64-bit Lacerte SDK, a one-time Intuit sign-in</td><td>Nothing; runs on any machine</td></tr>
+          <tr><td>Writes reach Lacerte</td><td class="yes">Yes, then read back</td><td class="no">No, kept in memory</td></tr>
+          <tr><td>Response shapes</td><td colspan="2">Identical on the normal path, so anything you try in simulation works the same against real data.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART IV -->
+  <section class="part" id="setup">
+    <div class="part-head"><div class="no">Part IV</div><h2>Setting it up</h2></div>
+    <p class="intro">Set up the Lacerte PC once, then add each workstation. Commands are for PowerShell. Replace <code>&lt;PC&gt;</code> with the Lacerte PC's Tailscale address (the control page shows it).</p>
+
+    <div class="grid cols-2">
+      <div class="panel card">
+        <span class="where">On the Lacerte PC · once</span>
+        <ol class="steps">
+          <li><div><h4>Install the prerequisites</h4><p>Lacerte (first-run setup complete), the <b>64-bit</b> Lacerte SDK from Intuit's developer portal, and Tailscale signed in to your tailnet.</p></div></li>
+          <li><div><h4>Run the installer as Administrator</h4><p>Download the latest <code>LacertMCP-v*.zip</code> from the GitHub Releases page, unzip it, and run this from that folder. Add <code>-DataRoot \\server\Lacerte</code> if your data is on a share. The installer remembers your options, so re-running it later keeps them.</p>
+            <div class="cmd"><pre>powershell -ExecutionPolicy Bypass -File .\install-http.ps1</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Sign in to Lacerte</h4><p>Open <code>http://localhost:8767/</code> and choose <b>Sign in to Lacerte</b>, or run the one-time registration. Intuit's sign-in lasts 24 hours; use <b>Reconnect</b> or <code>lacerte-mcp login</code> to renew it.</p>
+            <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" register</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Build the writable-field map</h4><p>Out of the box only a handful of built-in fields are writable; the rest are refused until Lacerte itself has told the server which fields can be written. Run this once per tax year you use, then sign out of Windows and back in. The control page's <em>Writable fields</em> check shows when it's done.</p>
+            <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\dumper\LacertMCP.FieldAccessDumper.exe" --live --year 2024 --out "$env:LOCALAPPDATA\LacertMCP\server\Schema\FieldAccessMap\base"</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Turn on nightly updates</h4><p>Optional, and no admin needed. Installs each new release at 03:00; if the PC was asleep or off then, it runs as soon as you're signed in again. Every run is written to <code>update.log</code>.</p>
+            <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" update --schedule daily</pre><button class="copy" type="button">Copy</button></div></div></li>
+        </ol>
+      </div>
+
+      <div class="panel card">
+        <span class="where">On each workstation</span>
+        <ol class="steps">
+          <li><div><h4>Join the tailnet</h4><p>Install Tailscale and sign in to the same tailnet as the Lacerte PC.</p></div></li>
+          <li><div><h4>Run the one-line setup</h4><p>Registers Lacerte MCP with Claude Desktop (classic and Store installs), Claude Code and Codex. No admin rights and no Node.js needed. Re-run it any time to refresh.</p>
+            <div class="cmd"><pre>irm http://&lt;PC&gt;:8767/setup.ps1 | iex</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Grant access</h4><p>On the Lacerte PC's control page, open <b>Access</b>. The workstation shows as <em>Ran setup</em>; choose <b>Read only</b> or <b>Read &amp; write</b>.</p></div></li>
+          <li><div><h4>Restart Claude and say hello</h4><p>Restart Claude Desktop, then ask: <em>"What's my Lacerte session status?"</em> Claude calls <code>lacerte_session_status</code> and lists next steps.</p></div></li>
+          <li><div><h4>Claude Code only, if you prefer manual setup</h4>
+            <div class="cmd"><pre>claude mcp add --transport http lacerte http://&lt;PC&gt;:8767/mcp</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>To remove it from a workstation</h4>
+            <div class="cmd"><pre>$env:LACERTE_MCP_UNINSTALL='1'; irm http://&lt;PC&gt;:8767/setup.ps1 | iex</pre><button class="copy" type="button">Copy</button></div></div></li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="panel card" style="margin-top:16px">
+      <h3>Good first prompts</h3>
+      <div class="grid cols-3">
+        <p><em>"Show me the Lacerte data folders on this machine."</em><br><code>lacerte_list_datapaths</code></p>
+        <p><em>"Set my context to 2024 Individual."</em><br><code>lacerte_set_context</code></p>
+        <p><em>"List my first 10 clients."</em><br><code>lacerte_client_list</code></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART V -->
+  <section class="part" id="config">
+    <div class="part-head"><div class="no">Part V</div><h2>Configuration</h2></div>
+    <p class="intro">All settings are environment variables. In office-network mode the installer writes them into the Startup launcher. In one-PC mode they go in the <code>env</code> block of your Claude config. Most installs only set the first few.</p>
+
+    <div class="toolbar">
+      <input id="envSearch" class="search" type="search" placeholder="Filter settings…" aria-label="Filter settings">
+      <div role="group" aria-label="Setting group" class="toolbar" style="margin:0">
+        <button class="chip" data-env-group="all" aria-pressed="true" type="button">All</button>
+        <button class="chip" data-env-group="mode" aria-pressed="false" type="button">Mode</button>
+        <button class="chip" data-env-group="data" aria-pressed="false" type="button">Data</button>
+        <button class="chip" data-env-group="network" aria-pressed="false" type="button">Network</button>
+        <button class="chip" data-env-group="limits" aria-pressed="false" type="button">Limits</button>
+        <button class="chip" data-env-group="logs" aria-pressed="false" type="button">Logs</button>
+        <button class="chip" data-env-group="testing" aria-pressed="false" type="button">Testing</button>
+      </div>
+      <span class="count" id="envCount"></span>
+    </div>
+    <div class="panel scroll-x">
+      <table class="data env-table" id="envTable">
+        <thead><tr><th>Setting</th><th>Default</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr data-group="mode"><td><code>LACERTE_LIVE</code></td><td class="def">unset</td><td><code>1</code> uses the real Lacerte SDK (Windows). The installer sets this.</td></tr>
+          <tr data-group="mode"><td><code>LACERTE_SIMULATION</code></td><td class="def">1 off Windows</td><td><code>1</code> forces the built-in sample clients, even on Windows.</td></tr>
+          <tr data-group="data"><td><code>LACERTE_DATA_ROOT</code></td><td class="def">C:\Lacerte</td><td>Folder that holds the <code>{YY}Tax\{Module}Data</code> folders. Point it at a share for networked Lacerte.</td></tr>
+          <tr data-group="data"><td><code>LACERTE_ALLOW_UNC</code></td><td class="def">unset</td><td><code>1</code> allows <code>\\server\share</code> paths. The installer sets it when <code>-DataRoot</code> is a share.</td></tr>
+          <tr data-group="data"><td><code>LACERTE_DEFAULT_TAX_YEAR</code></td><td class="def">unset</td><td>Year to use when Claude sets a context without one.</td></tr>
+          <tr data-group="data"><td><code>LACERTE_DATA_PATH</code></td><td class="def">unset</td><td>Shown in error hints and checked by <code>doctor</code>. Claude still sets the context per conversation.</td></tr>
+          <tr data-group="data"><td><code>LACERTE_APP_NAME</code></td><td class="def">Operator Lacerte MCP</td><td>Name shown in Intuit's consent dialog; the CLI registers under the same name.</td></tr>
+          <tr data-group="network"><td><code>LACERTE_HTTP</code></td><td class="def">unset</td><td><code>1</code> is the same as starting the server with <code>--http</code> (office-network mode).</td></tr>
+          <tr data-group="network"><td><code>LACERTE_HTTP_PORT</code></td><td class="def">8767</td><td>Port for <code>/mcp</code> and the control page.</td></tr>
+          <tr data-group="network"><td><code>LACERTE_HTTP_DATA_DIR</code></td><td class="def">%APPDATA%\lacerte-mcp</td><td>Where the device access list and activity history are kept.</td></tr>
+          <tr data-group="network"><td><code>LACERTE_TAILSCALE_EXE</code></td><td class="def">Program Files\Tailscale</td><td>Path to <code>tailscale.exe</code>, if it is installed somewhere unusual.</td></tr>
+          <tr data-group="limits"><td><code>LACERTE_BULK_WRITE_MAX</code></td><td class="def">500</td><td>Most rows one bulk field or detail write may carry (more → 9020).</td></tr>
+          <tr data-group="limits"><td><code>LACERTE_BULK_CREATE_MAX</code></td><td class="def">100</td><td>Most clients one bulk create may carry.</td></tr>
+          <tr data-group="limits"><td><code>LACERTE_IDEMPOTENCY_PERSIST</code></td><td class="def">on</td><td>Remembers completed writes across restarts so a retried call can't write twice. Only <code>0</code> turns it off.</td></tr>
+          <tr data-group="limits"><td><code>LACERTE_IDEMPOTENCY_PERSIST_PATH</code></td><td class="def">%APPDATA%\lacerte-mcp</td><td>Where that replay record lives.</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_DEBUG_WIRE</code></td><td class="def">0</td><td><code>1</code> writes every SDK and SQL call to <code>logs/lacerte-YYYYMMDD.log</code>, secrets masked. Also feeds <code>lacerte_field_history</code>.</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_DEBUG_LOG_PATH</code></td><td class="def">./logs</td><td>Where that debug log goes.</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_DEBUG_LOG_MAX_BYTES</code> and siblings</td><td class="def">unset</td><td>Size caps, retention days and result sampling for the debug log.</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_LOG_LEVEL</code></td><td class="def">Information</td><td>How chatty the server's own log is (<code>Trace</code> … <code>Critical</code>, <code>None</code>).</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_HEARTBEAT_SECONDS</code></td><td class="def">30</td><td>How often a liveness file is written to <code>%TEMP%</code>; <code>0</code> turns it off.</td></tr>
+          <tr data-group="logs"><td><code>LACERTE_RECENT_LOG_CAPACITY</code></td><td class="def">256</td><td>Entries kept for <code>lacerte_recent_log</code> (16–4096).</td></tr>
+          <tr data-group="testing"><td><code>LACERTE_SIM_EXPIRED</code></td><td class="def">unset</td><td><code>1</code> pretends the 24-hour sign-in has expired.</td></tr>
+          <tr data-group="testing"><td><code>LACERTE_MCP_FORCE_FILE_STORE</code></td><td class="def">unset</td><td><code>1</code> keeps the AppID in a file instead of Windows Credential Manager.</td></tr>
+          <tr data-group="testing"><td><code>LACERTE_PARITY_RECORDING</code></td><td class="def">unset</td><td>Recording file used by the live-versus-simulation test harness.</td></tr>
+        </tbody>
+      </table>
+      <p class="empty" id="envEmpty" hidden>No settings match that filter.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART VI -->
+  <section class="part" id="safety">
+    <div class="part-head"><div class="no">Part VI</div><h2>Access and safety</h2></div>
+    <p class="intro">Tax data is sensitive, so the server is built to say no by default and to prove what it did.</p>
+
+    <div class="panel scroll-x">
+      <table class="matrix">
+        <thead><tr><th>What a device can do</th><th>No access</th><th>Read only</th><th>Read &amp; write</th></tr></thead>
+        <tbody>
+          <tr><td>Connect and see the session status</td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Read clients, tables, detail rows, e-file status</td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Dry-run a write to preview it</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Write fields and detail rows, create clients</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid cols-3" style="margin-top:16px">
+      <div class="panel card"><span class="tag">Network</span><h3>Tailnet only</h3><p>The server listens on the Lacerte PC's Tailscale address and <code>localhost</code> only, and the firewall admits Tailscale addresses only. Each caller is identified by <code>tailscale whois</code>, never by a header. Requests relayed through a proxy on the PC are refused, and tagged devices are never treated as the owner.</p></div>
+      <div class="panel card"><span class="tag">Fail closed</span><h3>Unknown fields are refused</h3><p>A field is writable only if the field-access map says so for that module and year. A fresh install refuses every write until you run the dumper.</p></div>
+      <div class="panel card"><span class="tag">Proof</span><h3>Writes are read back</h3><p>Every field write is re-read over a fresh connection. A mismatch returns 9022 instead of a false success.</p></div>
+      <div class="panel card"><span class="tag">Preview</span><h3>Dry runs and read-only contexts</h3><p><code>dryRun: true</code> shows what would change without writing. A context set with <code>readOnly: true</code> blocks every write with 9001.</p></div>
+      <div class="panel card"><span class="tag">No doubles</span><h3>Idempotency keys</h3><p>A retried write with the same key returns the first result. Bulk writes use a key per row, so a half-finished batch can be safely resent.</p></div>
+      <div class="panel card"><span class="tag">Privacy</span><h3>Secrets masked</h3><p>SSN, EIN, TIN, bank and routing numbers, dates of birth, emails and phone numbers are masked in replies. The activity timeline records which client and field changed, never the value.</p></div>
+      <div class="panel card"><span class="tag">Takes effect now</span><h3>Access changes are immediate</h3><p>Lowering a device to Read only applies to its open connections straight away, even partway through a bulk write. Setting it to No access disconnects it.</p></div>
+      <div class="panel card"><span class="tag">Limits</span><h3>No device can crowd out others</h3><p>Each device can hold up to 8 connections (32 in all), request bodies are size-capped, and repeated refused requests are summarized instead of flooding the activity log.</p></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART VII -->
+  <section class="part" id="tools">
+    <div class="part-head"><div class="no">Part VII</div><h2>Tools Claude can use</h2></div>
+    <p class="intro">Claude chooses these automatically from what you ask. You never call them yourself, but knowing them helps you phrase requests. There are also four guided workflows (MCP prompts): client intake, e-file review, bulk field update and CSV intake.</p>
+
+    <div class="toolbar">
+      <input id="toolSearch" class="search" type="search" placeholder="Search tools, e.g. state, bulk, e-file…" aria-label="Search tools">
+      <div role="group" aria-label="Tool kind" class="toolbar" style="margin:0">
+        <button class="chip" data-kind="all" aria-pressed="true" type="button">All</button>
+        <button class="chip" data-kind="read" aria-pressed="false" type="button">Reads</button>
+        <button class="chip" data-kind="write" aria-pressed="false" type="button">Writes</button>
+        <button class="chip" data-kind="info" aria-pressed="false" type="button">Status &amp; help</button>
+      </div>
+      <span class="count" id="toolCount"></span>
+    </div>
+    <div class="tool-groups" id="toolGroups"></div>
+    <p class="empty" id="toolEmpty" hidden>No tools match. Try a shorter word.</p>
+  </section>
+
+  <!-- ============================================================ PART VIII -->
+  <section class="part" id="errors">
+    <div class="part-head"><div class="no">Part VIII</div><h2>When something goes wrong</h2></div>
+    <p class="intro">Every failure returns <code>success: false</code> with a numbered <code>statusCode</code>, a plain-English <code>userMessage</code> and a <code>remediation</code> telling you what to do. The number's range tells you where to look.</p>
+
+    <div class="ranges">
+      <div class="range sdk"><span class="tag">origin: sdk</span><span class="span">0 – 204</span><p>Reported by Lacerte or Intuit's SDK. Fix it in Lacerte: sign in again, close a locked client, correct the tax data.</p></div>
+      <div class="range syn"><span class="tag ok">origin: synthetic</span><span class="span">9001 – 9299</span><p>Raised by this server before touching Lacerte. Fix the request or the setup. 9001–9099 are request checks, 9100–9199 are sign-in and replay issues, 9200–9299 are the SDK connection and server.</p></div>
+    </div>
+
+    <div style="margin-top:20px">
+      <details class="faq" open><summary>9007 LoginExpired or 203 NotSignedIn</summary><div class="body"><p>Intuit's sign-in lasts 24 hours. Click <b>Reconnect</b> on the control page, or run <code>lacerte-mcp login</code> on the Lacerte PC, then retry.</p></div></details>
+      <details class="faq"><summary>9012 UnknownFieldAccess on every write</summary><div class="body"><p>The writable-field map has no rule for that field and year. Run the field-map dumper for that tax year (Part IV, step 4) and sign out and back in. The Overview tab's <em>Writable fields</em> check warns while only the built-in rules are loaded.</p></div></details>
+      <details class="faq"><summary>Claude says it has to set its context again</summary><div class="body"><p>The connection was closed, for example after an hour idle, a server restart or an update, so its tax year and folder were forgotten. Ask Claude to set the context again. Writes can never land in the wrong file because of this; they're refused until the context is set.</p></div></details>
+      <details class="faq"><summary>9022 WriteNotVerified</summary><div class="body"><p>Lacerte accepted the write, but reading it back returned a different value. A common cause is the return being open in Lacerte. Close it and retry; the retry really rewrites the field, even with the same idempotency key.</p></div></details>
+      <details class="faq"><summary>9001 FieldIsReadOnly</summary><div class="body"><p>The context was set read-only, the field or table is read-only (for example DATA6 and DATA7), or this device has <em>Read only</em> access on the control page.</p></div></details>
+      <details class="faq"><summary>9009 ContextNotSet</summary><div class="body"><p>Tell Claude which year, module and data folder to work in, for example: <em>"Use 2024 Individual."</em></p></div></details>
+      <details class="faq"><summary>A workstation can't see any Lacerte tools</summary><div class="body"><p>Check that Tailscale is connected on both machines, that the device isn't set to <em>No access</em> on the Access tab, and that Claude Desktop was restarted after setup. Opening <code>http://&lt;PC&gt;:8767/access-check</code> from the workstation shows what the server thinks of it.</p></div></details>
+      <details class="faq"><summary>My change doesn't show in Lacerte</summary><div class="body"><p>Lacerte's editor only rereads a client when it is closed and reopened. The write is on disk; reopen the client, or ask Claude to read the field back.</p></div></details>
+      <details class="faq"><summary>The control page doesn't load</summary><div class="body"><p>On the Lacerte PC, run <code>"%LOCALAPPDATA%\LacertMCP\server\LacertMCP.Server.exe" --http</code> in a console to see the error. After an update, <code>update.log</code> in the same folder records what happened.</p></div></details>
+      <details class="faq"><summary>Check the whole install</summary><div class="body"><p><code>lacerte-mcp doctor</code> runs 13 checks (Windows, 64-bit, .NET 4.8, ODBC driver, SDK, COM registration, mode, data folders, field map, AppID). Exit 0 means all green, 2 means warnings, 1 means something failed.</p></div></details>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART IX -->
+  <section class="part" id="updates">
+    <div class="part-head"><div class="no">Part IX</div><h2>Keeping it up to date</h2></div>
+    <p class="intro">A new version reaches the Lacerte PC when a version tag (for example <code>v0.2.3</code>) is pushed to GitHub. Code changes on their own don't go anywhere until they are released.</p>
+
+    <div class="panel pipe">
+      <div class="gh"><span class="who">GitHub</span><h4>Tag pushed</h4><p><code>git push origin v0.2.3</code> starts the Release workflow.</p></div>
+      <div class="gh"><span class="who">GitHub</span><h4>Release built</h4><p>Builds the zip of server, CLI and dumper; GitHub publishes its SHA-256 checksum.</p></div>
+      <div class="pc"><span class="who">Lacerte PC · 03:00</span><h4>Check and download</h4><p><code>lacerte-mcp update</code> finds the newer release and verifies the download.</p></div>
+      <div class="pc"><span class="who">Lacerte PC</span><h4>Back up and swap</h4><p>Copies the current version to <code>backups\</code>, stops the server and swaps files. Field rules built on this PC are kept; corrected built-in rules arrive.</p></div>
+      <div class="pc"><span class="who">Lacerte PC</span><h4>Restart and confirm</h4><p>Restarts the server and waits for its health check. If the swap fails, the new build reports the wrong version, or the health check fails, the old version is put back and restarted.</p></div>
+    </div>
+
+    <div class="grid cols-3" style="margin-top:16px">
+      <div class="panel card"><h3>Update now</h3><div class="cmd"><pre>lacerte-mcp update</pre><button class="copy" type="button">Copy</button></div></div>
+      <div class="panel card"><h3>Only check</h3><div class="cmd"><pre>lacerte-mcp update --check</pre><button class="copy" type="button">Copy</button></div><p>Exit code 2 means an update is waiting.</p></div>
+      <div class="panel card"><h3>Go back a version</h3><div class="cmd"><pre>lacerte-mcp update --tag 0.2.1</pre><button class="copy" type="button">Copy</button></div></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART X -->
+  <section class="part" id="cli">
+    <div class="part-head"><div class="no">Part X</div><h2>Command-line reference</h2></div>
+    <p class="intro"><code>lacerte-mcp.exe</code> lives in <code>%LOCALAPPDATA%\LacertMCP\cli</code>. Use it in PowerShell on the Lacerte PC; registration and login show Intuit's sign-in windows there.</p>
+    <div class="panel scroll-x">
+      <table class="data" style="min-width:560px">
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>register</code></td><td>One-time AppID and Intuit consent and sign-in. Exit 0 when access is granted.</td></tr>
+          <tr><td><code>login</code></td><td>Renews the 24-hour Intuit sign-in.</td></tr>
+          <tr><td><code>status</code></td><td>Registration, mode and storage at a glance (<code>--json</code> for scripts).</td></tr>
+          <tr><td><code>doctor</code></td><td>13 install checks; exit 0 all green, 2 warnings, 1 a failure.</td></tr>
+          <tr><td><code>update</code></td><td>Installs the latest GitHub release (<code>--check</code>, <code>--tag</code>, <code>--schedule daily|off</code>, <code>--reset-field-map</code>).</td></tr>
+          <tr><td><code>tools</code></td><td>Lists every tool the server offers (<code>--names-only</code>, <code>--filter</code>).</td></tr>
+          <tr><td><code>field-access list|set</code></td><td>Shows or edits single entries in the writable-field map.</td></tr>
+          <tr><td><code>unregister --confirm</code></td><td>Removes the stored AppID, for a clean uninstall.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <div class="status-row">
+      <span>Version <b>0.2.2</b></span>
+      <span>Automated tests <b>1,833 passing</b></span>
+      <span>Simulation <b>fully tested</b></span>
+      <span>Live mode <b>wired, awaiting first run on the Lacerte PC</b></span>
+    </div>
+    <p>Source, releases and the full technical docs (README, INSTRUCTION_MANUAL, ARCHITECTURE, DECISIONS) are in the RealDealCPA-VR/LacertMCP repository on GitHub.</p>
+  </footer>
+</main>
+
+<script>
+(function () {
+  // ---- copy buttons ----
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var text = btn.previousElementSibling.textContent;
+      var done = function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1400); };
+      var fallback = function () {
+        var r = document.createRange(); r.selectNodeContents(btn.previousElementSibling);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "Selected";
+        setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+      };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+        else fallback();
+      } catch (e) { fallback(); }
+    });
+  });
+
+  // ---- deployment tabs ----
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+  function select(tab) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+    });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { select(t); });
+    t.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        var next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+        select(next); next.focus(); e.preventDefault();
+      }
+    });
+  });
+
+  // ---- env filter ----
+  var envGroup = "all";
+  var envRows = Array.prototype.slice.call(document.querySelectorAll("#envTable tbody tr"));
+  var envSearch = document.getElementById("envSearch");
+  function filterEnv() {
+    var q = envSearch.value.trim().toLowerCase(), shown = 0;
+    envRows.forEach(function (r) {
+      var ok = (envGroup === "all" || r.dataset.group === envGroup) && (!q || r.textContent.toLowerCase().indexOf(q) >= 0);
+      r.hidden = !ok; if (ok) shown++;
+    });
+    document.getElementById("envCount").textContent = shown + " of " + envRows.length;
+    document.getElementById("envEmpty").hidden = shown !== 0;
+  }
+  document.querySelectorAll("[data-env-group]").forEach(function (c) {
+    c.addEventListener("click", function () {
+      envGroup = c.dataset.envGroup;
+      document.querySelectorAll("[data-env-group]").forEach(function (o) { o.setAttribute("aria-pressed", o === c ? "true" : "false"); });
+      filterEnv();
+    });
+  });
+  envSearch.addEventListener("input", filterEnv);
+  filterEnv();
+
+  // ---- tools catalog ----
+  var T = [
+    ["Session", "lacerte_session_status", "info", "Mode, sign-in countdown, active context and suggested next steps. Claude calls this first."],
+    ["Session", "lacerte_set_context", "info", "Choose the tax year, module and data folder for this conversation; can be read-only."],
+    ["Session", "lacerte_list_modules", "info", "The 9 return modules: Individual, Corporate, Partnership, S-Corp, Fiduciary, Exempt, Estate, Gift, Benefit."],
+    ["Session", "lacerte_list_datapaths", "info", "Find the {YY}Tax\\{Module}Data folders on the PC or share."],
+    ["Session", "lacerte_can_use_new_apis", "info", "Whether a year and module use the 2021+ UpdateTaxReturn path."],
+    ["Session", "lacerte_health", "info", "Quick health probe: mode and status."],
+    ["Clients", "lacerte_client_list", "read", "List clients, optionally filtered by name."],
+    ["Clients", "lacerte_client_read", "read", "Read one client's main record."],
+    ["Clients", "lacerte_client_find", "read", "Turn a name like \"John Smith\" into a client number, with did-you-mean."],
+    ["Clients", "lacerte_client_query", "read", "Search one table by a field, e.g. all clients missing an email."],
+    ["Clients", "lacerte_client_summary", "read", "One-call snapshot: identity, states, flags and e-file status."],
+    ["Clients", "lacerte_export_client", "read", "A portable bundle of one client's data."],
+    ["Clients", "lacerte_client_create", "write", "Create a new client (ID up to 8 letters and digits)."],
+    ["Clients", "lacerte_client_create_bulk", "write", "Create many clients at once, e.g. from a roster (up to 100)."],
+    ["Tables", "lacerte_table_read", "read", "Read any of DATA1–DATA7 for a client."],
+    ["Tables", "lacerte_subclient_read", "read", "Dependents, partners, shareholders, beneficiaries."],
+    ["Tables", "lacerte_state_read", "read", "State rows for a client, optionally one state."],
+    ["Tables", "lacerte_state_subclient_read", "read", "State rows for a client's subclients."],
+    ["Tables", "lacerte_status_read", "read", "Return status rows (read-only table)."],
+    ["Tables", "lacerte_forms_read", "read", "Form rows (read-only table)."],
+    ["Tables", "lacerte_detail_read", "read", "Detail rows such as W-2 and 1099 entries, optionally by series."],
+    ["Writes", "lacerte_field_write", "write", "Write one field, then read it back to confirm."],
+    ["Writes", "lacerte_update_return", "write", "Same as field write, named after the 2021+ SDK call."],
+    ["Writes", "lacerte_field_write_bulk", "write", "Many field writes in one call (up to 500), with per-row replay keys."],
+    ["Writes", "lacerte_detail_write", "write", "Add a detail row (series, code, amount, description)."],
+    ["Writes", "lacerte_detail_write_bulk", "write", "Add many detail rows, e.g. seeding W-2s from intake."],
+    ["E-file", "lacerte_ef_status", "read", "E-file status for the active year and module (2019+), with \"since\" polling."],
+    ["Dashboards", "lacerte_firm_dashboard", "read", "Firm-wide counts across every year and module, without changing your context."],
+    ["Accelerators", "lacerte_diff_clients", "read", "Field-by-field comparison of two clients."],
+    ["Accelerators", "lacerte_pre_filing_check", "read", "Readiness checks before filing for 1040, 1065, 1120 and 1120S."],
+    ["Accelerators", "lacerte_year_over_year", "read", "Compare one client across two tax years."],
+    ["Accelerators", "lacerte_field_history", "read", "Change history for one field (needs the debug log on)."],
+    ["Observability", "lacerte_recent_log", "info", "The most recent server log entries."],
+    ["Observability", "lacerte_request_stats", "info", "Call counts and timings per tool."],
+    ["Observability", "lacerte_cache_state", "info", "What the server has cached."],
+    ["Observability", "lacerte_resource_usage", "info", "Memory, handles and threads."],
+    ["Observability", "lacerte_active_locks", "info", "Writes currently in progress."],
+    ["Meta", "lacerte_field_access_map", "info", "Which fields of a table are writable, read-only or hidden."],
+    ["Meta", "lacerte_return_codes", "info", "Every status code with its meaning and fix."],
+    ["Meta", "lacerte_reload_schema", "info", "Pick up a new field-access map without restarting."],
+    ["Meta", "lacerte_help", "info", "Built-in help: modes, tools, settings, limits."],
+    ["Meta", "lacerte_prompts", "info", "The four guided workflows, in full."]
+  ];
+  var kind = "all";
+  var toolSearch = document.getElementById("toolSearch");
+  var box = document.getElementById("toolGroups");
+  var label = { read: "read", write: "write", info: "status" };
+  function esc(s) { return s.replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function renderTools() {
+    var q = toolSearch.value.trim().toLowerCase(), groups = {}, order = [], shown = 0;
+    T.forEach(function (t) {
+      if (kind !== "all" && t[2] !== kind) return;
+      if (q && (t[0] + " " + t[1] + " " + t[3]).toLowerCase().replace(/_/g, " ").indexOf(q.replace(/_/g, " ")) < 0) return;
+      if (!groups[t[0]]) { groups[t[0]] = []; order.push(t[0]); }
+      groups[t[0]].push(t); shown++;
+    });
+    box.innerHTML = order.map(function (g) {
+      return '<div class="panel tool-group"><h3><span>' + esc(g) + '</span><span>' + groups[g].length + '</span></h3><ul>' +
+        groups[g].map(function (t) {
+          return '<li><span class="tool-name">' + esc(t[1]) + '<span class="kind ' + t[2] + '">' + label[t[2]] + '</span></span><span class="tool-desc">' + esc(t[3]) + '</span></li>';
+        }).join("") + '</ul></div>';
+    }).join("");
+    document.getElementById("toolCount").textContent = shown + " of " + T.length + " tools";
+    document.getElementById("toolEmpty").hidden = shown !== 0;
+  }
+  document.querySelectorAll("[data-kind]").forEach(function (c) {
+    c.addEventListener("click", function () {
+      kind = c.dataset.kind;
+      document.querySelectorAll("[data-kind]").forEach(function (o) { o.setAttribute("aria-pressed", o === c ? "true" : "false"); });
+      renderTools();
+    });
+  });
+  toolSearch.addEventListener("input", renderTools);
+  renderTools();
+})();
+</script>
