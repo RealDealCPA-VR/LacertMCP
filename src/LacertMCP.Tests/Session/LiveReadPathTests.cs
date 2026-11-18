@@ -140,9 +140,11 @@ namespace LacertMCP.Tests.Session
             var rows = await mgr.ListClients(limit: 10);
 
             Assert.Equal(2, rows.Count);
-            Assert.Equal("SMIT", rows[0]["clientNumber"]);
-            Assert.Equal("Smith", rows[0]["C1_2"]);
-            Assert.Contains("top 10", db.Sql.Single());
+            // Sorted by clientNumber like sim (R7-11), not DBF physical order.
+            Assert.Equal("JONE", rows[0]["clientNumber"]);
+            Assert.Equal("SMIT", rows[1]["clientNumber"]);
+            Assert.Equal("Smith", rows[1]["C1_2"]);
+            Assert.Single(db.Sql);
         }
 
         [Fact]
@@ -159,7 +161,7 @@ namespace LacertMCP.Tests.Session
 
             var rows = await mgr.ListClients(lastNameFilter: "smi", limit: 10);
 
-            Assert.Equal(new[] { "SMIT", "SMI2" }, rows.Select(r => (string)r["clientNumber"]!).ToArray());
+            Assert.Equal(new[] { "SMI2", "SMIT" }, rows.Select(r => (string)r["clientNumber"]!).ToArray());
             Assert.DoesNotContain(db.Sql, s => s.Contains("like"));
         }
 
@@ -202,12 +204,14 @@ namespace LacertMCP.Tests.Session
             Assert.Contains("[ACME-Detail-ClientStateInfo]", db.Sql.Single()); // R7: TY21+ name per the SDK PDF
         }
 
+        // R8 — a whole-firm read (lacerte_client_query) no longer errors in
+        // live: with an empty roster it is simply empty, like sim.
         [Fact]
-        public async Task ReadTable_Live_PerClientTable_WithoutClient_IsStructuredError()
+        public async Task ReadTable_Live_PerClientTable_WithoutClient_EmptyRoster_IsEmpty()
         {
             using var mgr = NewLive(new FakeDb());
-            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.ReadTable(2));
-            Assert.Equal(StatusCodes.InValidClientName, ex.StatusCode);
+            var rows = await mgr.ReadTable(2);
+            Assert.Empty(rows);
         }
 
         [Fact]
@@ -329,6 +333,101 @@ namespace LacertMCP.Tests.Session
             Assert.True(LacerteSessionManager.ValuesMatch(true, "X", out _));
             Assert.True(LacerteSessionManager.ValuesMatch(false, "", out _));
             Assert.False(LacerteSessionManager.ValuesMatch(true, "", out _));
+        }
+
+        // R8 — MCP binds tool args as JsonElement, so a JSON true/false must
+        // be compared as a checkbox, not as the text "True"/"False".
+        [Theory]
+        [InlineData("true", "X", true)]
+        [InlineData("true", "Y", true)]
+        [InlineData("true", "1", true)]
+        [InlineData("false", "", true)]
+        [InlineData("false", "N", true)]
+        [InlineData("true", "", false)]
+        public void ValuesMatch_JsonBoolWrite_AgainstCheckboxStorage(string json, string stored, bool expected)
+        {
+            var element = System.Text.Json.JsonDocument.Parse(json).RootElement;
+            Assert.Equal(expected, LacerteSessionManager.ValuesMatch(element, stored, out _));
+        }
+
+        [Theory]
+        [InlineData("", "0", true)]          // clearing a numeric field that reads back as 0
+        [InlineData("", "0.00", true)]
+        [InlineData("", "5", false)]
+        [InlineData("12152024", "20241215", true)]   // numeric-looking dates in two formats
+        [InlineData("100", "200", false)]
+        public void ValuesMatch_ClearedNumbers_AndNumericLookingDates(string written, string stored, bool expected)
+        {
+            Assert.Equal(expected, LacerteSessionManager.ValuesMatch(written, stored, out _));
+        }
+
+        [Fact]
+        public void NormalizeLiveRow_Data4_MapsC4_1ToSubClientId()
+        {
+            var row = LacerteSessionManager.NormalizeLiveRow(4,
+                new Dictionary<string, object?> { ["C4_0"] = "ACME", ["C4_1"] = 2m, ["C4_G1"] = "CA" });
+            Assert.Equal(2, row["subClientId"]);
+            Assert.Equal("CA", row["stateAbbrev"]);
+
+            var bad = LacerteSessionManager.NormalizeLiveRow(2,
+                new Dictionary<string, object?> { ["C2_0"] = "ACME", ["C2_1"] = "Alice" });
+            Assert.False(bad.ContainsKey("subClientId")); // non-numeric never invents an id
+        }
+
+        [Fact]
+        public async Task ReadClient_Live_RequiresExactKey_NotPrefixMatch()
+        {
+            // An xBase driver with SET EXACT OFF can answer C1_0 = '10' with 1001.
+            var db = new FakeDb { Answer = _ => Table(new[] { "C1_0" }, new object?[] { "1001" }, new object?[] { "10" }) };
+            using var mgr = NewLive(db);
+            var row = await mgr.ReadClient("10");
+            Assert.NotNull(row);
+            Assert.Equal("10", row!["clientNumber"]);
+        }
+
+        [Fact]
+        public async Task ReadTable_Live_WholeFirm_GlobalTable_NoClientNumber()
+        {
+            var db = new FakeDb
+            {
+                Answer = sql => sql.Contains("DATA5-Status Info")
+                    ? Table(new[] { "C5_0", "C5_3" }, new object?[] { "SMIT", "a" }, new object?[] { "BROW", "b" })
+                    : Table(new[] { "C1_0" }),
+            };
+            using var mgr = NewLive(db);
+            var rows = await mgr.ReadTable(5);
+            Assert.Equal(new[] { "BROW", "SMIT" }, rows.Select(r => (string)r["clientNumber"]!).ToArray());
+            Assert.Contains("select * from [DATA5-Status Info]", db.Sql);
+        }
+
+        [Fact]
+        public async Task ReadTable_Live_WholeFirm_PerClientTables_WalkRoster()
+        {
+            var db = new FakeDb
+            {
+                Answer = sql =>
+                {
+                    if (sql.Contains("DATA1-Client Info")) return Table(new[] { "C1_0" }, new object?[] { "SMIT" }, new object?[] { "ACME" });
+                    if (sql.Contains("[ACME-SubClientInfo]")) return Table(new[] { "C2_1", "C2_3" }, new object?[] { 1, "Alice" });
+                    if (sql.Contains("[SMIT-SubClientInfo]")) throw new LacerteSDKError(StatusCodes.DBNotSupported); // no table: no subclients
+                    return Table(new[] { "C2_1" });
+                },
+            };
+            using var mgr = NewLive(db, new StubBridge { NewApis = true });
+            var rows = await mgr.ReadTable(2);
+            var r = Assert.Single(rows);
+            Assert.Equal("ACME", r["clientNumber"]);
+            Assert.Equal(1, r["subClientId"]);
+        }
+
+        [Fact]
+        public void StatusDateOnOrAfter_ExactWatermark()
+        {
+            var since = new DateTime(2024, 3, 1, 12, 0, 0, DateTimeKind.Utc);
+            Assert.False(LacerteSessionManager.StatusDateOnOrAfter("2024-03-01T11:59:59", since));
+            Assert.True(LacerteSessionManager.StatusDateOnOrAfter("2024-03-01T12:00:00", since));
+            Assert.True(LacerteSessionManager.StatusDateOnOrAfter(new DateTime(2024, 3, 2), since));
+            Assert.False(LacerteSessionManager.StatusDateOnOrAfter(null, since));
         }
     }
 }

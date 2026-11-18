@@ -220,6 +220,34 @@ namespace LacertMCP.Server.Odbc
         // DATA5/6/7 — still global in both forms per agent 03 §4
         // -------------------------------------------------------------------
 
+        /// <summary>Pre-TY21 DATA4 for one client across every state.</summary>
+        public static string Data4OldFormAllStates(string client)
+        {
+            ValidateClient(client);
+            return $"select * from [DATA4-State Subclient Info] where C4_0 = '{client}'";
+        }
+
+        /// <summary>
+        /// Whole-firm read of a table that is one global DBF in this form:
+        /// DATA2/3/4 before TY21, DATA5/6/7 always (lacerte_client_query /
+        /// lacerte_table_read with no clientNumber).
+        /// </summary>
+        public static string GlobalTable(int table)
+        {
+            switch (table)
+            {
+                case 2: return "select * from [DATA2-Subclient Info]";
+                case 3: return "select * from [DATA3-State Client Info]";
+                case 4: return "select * from [DATA4-State Subclient Info]";
+                case 5: return "select * from [DATA5-Status Info]";
+                case 6: return "select * from [DATA6-Display Info]";
+                case 7: return "select * from [DATA7-Form Info]";
+                default:
+                    throw new LacerteSDKError(StatusCodes.DBNotSupported,
+                        new Dictionary<string, object?> { ["table"] = table });
+            }
+        }
+
         /// <summary>DATA5 status info for one client.</summary>
         public static string Data5(string client)
         {

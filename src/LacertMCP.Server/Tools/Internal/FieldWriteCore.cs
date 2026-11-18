@@ -31,12 +31,28 @@ namespace LacertMCP.Server.Tools.Internal
         /// </summary>
         public static async Task<FieldWriteVerification> VerifyOrThrow(
             LacerteSessionManager session, string op, int table, string clientNumber, string field,
-            object? value, int? subClientId, string? stateAbbrev, CancellationToken cancellationToken)
+            object? value, int? subClientId, string? stateAbbrev, CancellationToken cancellationToken,
+            string? idempotencyKey = null, SessionContext? writeContext = null)
         {
-            var v = await session.VerifyFieldWrite(table, clientNumber, field, value,
-                subClientId, stateAbbrev, cancellationToken).ConfigureAwait(false);
+            FieldWriteVerification v;
+            try
+            {
+                v = await session.VerifyFieldWrite(table, clientNumber, field, value,
+                    subClientId, stateAbbrev, cancellationToken, writeContext).ConfigureAwait(false);
+            }
+            catch (LacerteSDKError ex)
+            {
+                // The SDK already accepted the write; a failed READ-BACK
+                // (driver timeout, table not exposed over ODBC, ...) is not
+                // evidence the write failed, so don't report it as one.
+                return new FieldWriteVerification(null, null,
+                    "Not verified: the write was accepted but reading it back failed (" + ex.StatusName + ").");
+            }
             if (v.Verified == false)
             {
+                // Don't let the cached Success replay over a write that didn't
+                // stick: a retry with the same key must actually re-write.
+                session.ForgetIdempotencyKey(idempotencyKey);
                 throw new LacerteSDKError(SyntheticStatusCodes.WriteNotVerified,
                     new System.Collections.Generic.Dictionary<string, object?>
                     {
@@ -78,14 +94,18 @@ namespace LacertMCP.Server.Tools.Internal
         {
             return WrapToolHandler.Run(async () =>
             {
+                // Pin the write and its read-back to one context so a
+                // lacerte_set_context landing in between can't split them.
+                var ctx = session.Context;
                 var status = await session.WriteField(
                     table, clientNumber, field, value,
-                    subClientId, stateAbbrev, dryRun, idempotencyKey, cancellationToken);
+                    subClientId, stateAbbrev, dryRun, idempotencyKey, cancellationToken,
+                    expectedContext: ctx);
 
                 var verification = dryRun
                     ? null
                     : await VerifyOrThrow(session, "WriteField", table, clientNumber, field, value,
-                        subClientId, stateAbbrev, cancellationToken).ConfigureAwait(false);
+                        subClientId, stateAbbrev, cancellationToken, idempotencyKey, ctx).ConfigureAwait(false);
 
                 var info = StatusCodes.GetStatusInfo(status);
                 return (object)new

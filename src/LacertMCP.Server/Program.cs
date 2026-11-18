@@ -112,6 +112,9 @@ namespace LacertMCP.Server
             {
                 // HTTP mode: MCP over Streamable HTTP + the control page, on
                 // loopback and this PC's tailnet address only (Web/HttpServer.cs).
+                // Every tool call must carry its connection's SessionScope;
+                // one that doesn't fails closed (SessionScope.Required).
+                SessionScope.Required = true;
                 builder.Services.AddSingleton<Tailscale>();
                 builder.Services.AddSingleton<DeviceAccess>(_ => new DeviceAccess());
                 builder.Services.AddSingleton<ActivityLog>(_ => new ActivityLog());

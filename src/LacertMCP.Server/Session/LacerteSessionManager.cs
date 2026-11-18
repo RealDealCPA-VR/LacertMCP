@@ -144,10 +144,21 @@ namespace LacertMCP.Server.Session
         /// </summary>
         public SessionContext? Context
         {
-            get => SessionScope.Current is { } scope ? scope.Context : _globalContext;
+            get => SessionScope.Current is { } scope ? scope.Context
+                : SessionScope.Required ? null : _globalContext;
             private set
             {
                 if (SessionScope.Current is { } scope) scope.Context = value;
+                else if (SessionScope.Required)
+                {
+                    // HTTP mode with no connection scope: never fall back to a
+                    // context every device would share (see SessionScope.Required).
+                    throw new LacerteSDKError(SyntheticStatusCodes.InternalServerError,
+                        new Dictionary<string, object?>
+                        {
+                            ["reason"] = "This request arrived without its connection scope, so no context can be set. Reconnect the agent.",
+                        });
+                }
                 else _globalContext = value;
             }
         }
@@ -982,7 +993,7 @@ namespace LacertMCP.Server.Session
             // R7-11 — deterministic ClientNumber order (ConcurrentDictionary
             // enumeration order is unspecified and can change when a create
             // resizes the map between two offset pages, skipping/repeating
-            // rows). Live SQL orders by ClientNumber too.
+            // rows). Live sorts the roster the same way in memory.
             // R7-10 / R7-35b — the ENTIRE read happens under the shared
             // _simGate, including the Clients.Values snapshot. On net48
             // ConcurrentDictionary.Values copies eagerly, so taking it before
@@ -1130,12 +1141,21 @@ namespace LacertMCP.Server.Session
             CancellationToken cancellationToken = default)
             => UnderSimRead(() => ReadTableCoreUnlocked(table, clientNumber, stateAbbrev, cancellationToken));
 
+        /// <summary>
+        /// Read pinned to an explicit context (write read-back): a concurrent
+        /// lacerte_set_context can't redirect it to another path/year/module.
+        /// </summary>
+        internal Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTableInContext(
+            SessionContext context, int table, string? clientNumber, string? stateAbbrev,
+            CancellationToken cancellationToken = default)
+            => UnderSimRead(() => ReadTableCoreUnlocked(table, clientNumber, stateAbbrev, cancellationToken, context));
+
         private Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> ReadTableCoreUnlocked(
             int table, string? clientNumber, string? stateAbbrev,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken, SessionContext? pinnedContext = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var ctx = RequireContext();
+            var ctx = pinnedContext ?? RequireContext();
             RequireRegistered();
             if (Mode == SessionMode.Live)
             {
@@ -2320,7 +2340,11 @@ namespace LacertMCP.Server.Session
         // against a read-only tuple (or be spuriously rejected).
         private static void RejectIfReadOnly(SessionContext ctx, string operation, int? table = null, string? fieldName = null)
         {
-            if (!ctx.ReadOnly && SessionScope.Current?.ReadOnlyAccess != true) return;
+            var scope = SessionScope.Current;
+            // HTTP mode: a write with no connection scope can't be tied to a
+            // device's access level, so it is refused (fail closed).
+            var scopeMissing = scope == null && SessionScope.Required;
+            if (!ctx.ReadOnly && scope?.ReadOnlyAccess != true && !scopeMissing) return;
 
             var reason = fieldName == null
                 ? $"Read-only session: {operation} rejected."
@@ -2841,6 +2865,21 @@ namespace LacertMCP.Server.Session
         // next eviction cycle will catch it once the holder releases. This
         // bounds the worst-case lock-map size at IdempotencyCacheMaxEntries +
         // (currently held entries) — practically the same as the cache cap.
+        /// <summary>
+        /// Drops a cached write result so a retry with the same key re-executes.
+        /// Used when a write the SDK accepted fails read-back verification
+        /// (9022): the cached Success must not replay over a write that didn't
+        /// stick, or every retry would short-circuit and fail again.
+        /// </summary>
+        internal void ForgetIdempotencyKey(string? key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (_idempotencyCache.TryRemove(key!, out _))
+            {
+                PersistIdempotencyCacheToDisk();
+            }
+        }
+
         private void EvictIdempotencyEntry(string key)
         {
             _idempotencyCache.TryRemove(key, out _);

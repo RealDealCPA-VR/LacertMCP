@@ -20,6 +20,16 @@ namespace LacertMCP.Server.Session
             set => s_current.Value = value;
         }
 
+        /// <summary>
+        /// Set once at startup in HTTP mode. Every tool call must then arrive
+        /// inside a connection scope; one that doesn't (an SDK change that
+        /// stops flowing the execution context, a future code path) fails
+        /// closed — no shared process-wide context, and every write refused —
+        /// instead of silently dropping per-device read-only and per-connection
+        /// isolation.
+        /// </summary>
+        public static bool Required { get; set; }
+
         /// <summary>This connection's active context (null until lacerte_set_context).</summary>
         public SessionContext? Context { get; set; }
 

@@ -16,9 +16,11 @@ namespace LacertMCP.Server.Startup
     /// in BOTH modes — the server could not serve a single data call.
     ///
     /// <para>
-    /// Live: this re-attaches to the cached 24h Intuit login created by
-    /// <c>lacerte-mcp register</c> / <c>lacerte-mcp login</c>. It never runs the
-    /// interactive ceremony. A failure is logged with the remediation and left
+    /// Live: this makes the same SDK <c>Register</c> call as
+    /// <c>lacerte-mcp login</c>. With a valid cached 24h Intuit login it
+    /// re-attaches silently; with a cold ticket the SDK may show its sign-in
+    /// window on the desktop, so the call runs in the background and never
+    /// blocks server startup. A failure is logged with the remediation and left
     /// for the operator (control page "Reconnect to Lacerte", or the CLI) —
     /// tools keep returning the structured NotSignedIn / AppNotRegistered error.
     /// </para>
@@ -38,12 +40,32 @@ namespace LacertMCP.Server.Startup
         public static string? LastResult { get; private set; }
         public static DateTime? LastAttemptAt { get; private set; }
 
-        public async Task StartAsync(CancellationToken cancellationToken)
+        private readonly CancellationTokenSource _stop = new CancellationTokenSource();
+        private Task? _attempt;
+
+        /// <summary>
+        /// Starts the sign-in attempt in the background and returns at once.
+        /// Hosted services start one after another, so awaiting Register here
+        /// held back the HTTP listener and the stdio transport until the
+        /// Lacerte COM call returned — and that call can wait on an Intuit
+        /// sign-in window when the 24h ticket is cold, or on AutoReconnect
+        /// back-off. Tools answer NotSignedIn / LoginExpired until it lands,
+        /// and the control page's Reconnect stays reachable meanwhile.
+        /// </summary>
+        public Task StartAsync(CancellationToken cancellationToken)
         {
-            await TryRegisterAsync(_session, _log, cancellationToken).ConfigureAwait(false);
+            _attempt = Task.Run(() => TryRegisterAsync(_session, _log, _stop.Token));
+            return Task.CompletedTask;
         }
 
-        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            _stop.Cancel();
+            return Task.CompletedTask;
+        }
+
+        /// <summary>The in-flight startup attempt (tests await it).</summary>
+        internal Task? Attempt => _attempt;
 
         /// <summary>Attempts registration; never throws. Returns true on AccessGranted.</summary>
         public static async Task<bool> TryRegisterAsync(LacerteSessionManager session, ILogger? log, CancellationToken ct)

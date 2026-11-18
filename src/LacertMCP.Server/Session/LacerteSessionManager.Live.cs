@@ -147,11 +147,17 @@ namespace LacertMCP.Server.Session
                 {
                     state = (v as string)?.Trim();
                 }
+                // Subclient number: the SDK documents C4_1 for DATA4 ("C4_1 is
+                // the subclient number"; sample "... and C4_1 = 1"); DATA2
+                // follows the same C{t}_1 layout. Only a positive integer
+                // counts, so an unexpected column shape never invents an id.
                 if ((table == 2 || table == 4)
-                    && (string.Equals(kv.Key, "SubClientID", StringComparison.OrdinalIgnoreCase)
+                    && (string.Equals(kv.Key, "C" + table + "_1", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(kv.Key, "SubClientID", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(kv.Key, "SubClientNumber", StringComparison.OrdinalIgnoreCase)))
                 {
-                    subClient = v is string ss && int.TryParse(ss.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : v;
+                    var sid = ToPositiveInt(v);
+                    if (sid.HasValue) subClient = sid.Value;
                 }
                 dict[kv.Key] = v;
             }
@@ -161,6 +167,24 @@ namespace LacertMCP.Server.Session
             if (!string.IsNullOrEmpty(state)) result["stateAbbrev"] = state;
             foreach (var kv in dict) result[kv.Key] = kv.Value;
             return result;
+        }
+
+        private static int? ToPositiveInt(object? v)
+        {
+            switch (v)
+            {
+                case null: return null;
+                case string s:
+                    return int.TryParse(s.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0 ? n : (int?)null;
+                case IConvertible c:
+                    try
+                    {
+                        var d = c.ToDecimal(CultureInfo.InvariantCulture);
+                        return d > 0 && d == decimal.Truncate(d) && d <= int.MaxValue ? (int)d : (int?)null;
+                    }
+                    catch (Exception) { return null; }
+                default: return null;
+            }
         }
 
         /// <summary>
@@ -214,6 +238,22 @@ namespace LacertMCP.Server.Session
                 S("Source"), S("TSJ"), S("ImportSrc"), amount, S("Description"));
         }
 
+        internal static bool StatusDateOnOrAfter(object? statusDate, DateTime sinceUtc)
+        {
+            switch (statusDate)
+            {
+                case null: return false;
+                case DateTime dt:
+                    var u = dt.Kind == DateTimeKind.Local ? dt.ToUniversalTime() : DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+                    return u >= sinceUtc;
+                default:
+                    var s = (statusDate as string ?? statusDate.ToString() ?? string.Empty).Trim();
+                    return DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                               DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var p)
+                           && p >= sinceUtc;
+            }
+        }
+
         private static bool TryGetCI(IReadOnlyDictionary<string, object?> row, string key, out object? value)
         {
             if (row.TryGetValue(key, out value)) return true;
@@ -245,30 +285,35 @@ namespace LacertMCP.Server.Session
             SessionContext ctx, string? lastNameFilter, int limit)
         {
             if (limit <= 0) return Array.Empty<IReadOnlyDictionary<string, object?>>();
-            IEnumerable<Dictionary<string, object?>> rows;
-            if (string.IsNullOrEmpty(lastNameFilter))
-            {
-                rows = LiveQuery(ctx, SqlTemplates.Data1Top(Math.Min(limit, LiveRosterCap)), 1);
-            }
-            else
+            // The DBF returns rows in physical order; sim (R7-11) orders by
+            // ClientNumber, so the whole roster is read and sorted here too —
+            // otherwise paging and "first N" would differ between modes.
+            IEnumerable<Dictionary<string, object?>> rows = SortByClientNumber(
+                LiveQuery(ctx, SqlTemplates.Data1Top(LiveRosterCap), 1));
+            if (!string.IsNullOrEmpty(lastNameFilter))
             {
                 // Same semantics as sim: case-insensitive StartsWith on the
                 // trimmed name column, applied in memory.
                 var nameKey = ctx.Module == 'I' ? "C1_2" : "C1_1";
                 var f = lastNameFilter!;
-                rows = LiveQuery(ctx, SqlTemplates.Data1Top(LiveRosterCap), 1)
-                    .Where(r => TryGetCI(r, nameKey, out var v) && v is string s
-                                && s.Trim().StartsWith(f, StringComparison.OrdinalIgnoreCase))
-                    .Take(limit);
+                rows = rows.Where(r => TryGetCI(r, nameKey, out var v) && v is string s
+                                       && s.Trim().StartsWith(f, StringComparison.OrdinalIgnoreCase));
             }
-            return rows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
+            return rows.Take(limit).Cast<IReadOnlyDictionary<string, object?>>().ToList();
         }
+
+        private static IEnumerable<Dictionary<string, object?>> SortByClientNumber(IEnumerable<Dictionary<string, object?>> rows)
+            => rows.OrderBy(r => r.TryGetValue("clientNumber", out var v) ? v as string ?? v?.ToString() ?? string.Empty : string.Empty,
+                StringComparer.OrdinalIgnoreCase);
 
         private IReadOnlyDictionary<string, object?>? LiveReadClient(SessionContext ctx, string clientNumber)
         {
             var key = LiveClientKey(clientNumber);
             var rows = LiveQuery(ctx, SqlTemplates.Data1Where(key), 1);
-            return rows.FirstOrDefault();
+            // Exact key match: an xBase driver with SET EXACT OFF can treat
+            // C1_0 = '10' as a prefix match and return client 1001 first.
+            return rows.FirstOrDefault(r => r.TryGetValue("clientNumber", out var v)
+                && string.Equals((v as string)?.Trim(), key, StringComparison.OrdinalIgnoreCase));
         }
 
         private IReadOnlyList<IReadOnlyDictionary<string, object?>> LiveReadTable(
@@ -276,6 +321,12 @@ namespace LacertMCP.Server.Session
         {
             var useNew = CanUseNewApis(ctx.Year, ctx.Module);
             string? key = string.IsNullOrWhiteSpace(clientNumber) ? null : LiveClientKey(clientNumber!);
+            if (key == null && table >= 2 && table <= 7)
+            {
+                // Whole-firm read (lacerte_client_query, lacerte_table_read with
+                // no clientNumber) — sim returns every client's rows, so live must too.
+                return LiveReadWholeFirm(ctx, table, useNew, stateAbbrev, fresh);
+            }
             string sql;
             switch (table)
             {
@@ -295,12 +346,11 @@ namespace LacertMCP.Server.Session
                     }
                     else
                     {
-                        if (string.IsNullOrWhiteSpace(stateAbbrev))
-                        {
-                            throw new LacerteSDKError(SyntheticStatusCodes.StateAbbrevRequired,
-                                new Dictionary<string, object?> { ["table"] = 4, ["op"] = "ReadTable" });
-                        }
-                        sql = SqlTemplates.Data4OldForm(RequireClientKey(key, table), stateAbbrev!.Trim().ToUpperInvariant());
+                        // No state = every state (the tool contract and sim);
+                        // the in-memory state filter below handles a given state.
+                        sql = string.IsNullOrWhiteSpace(stateAbbrev)
+                            ? SqlTemplates.Data4OldFormAllStates(RequireClientKey(key, table))
+                            : SqlTemplates.Data4OldForm(RequireClientKey(key, table), stateAbbrev!.Trim().ToUpperInvariant());
                     }
                     break;
                 case 5: sql = SqlTemplates.Data5(RequireClientKey(key, table)); break;
@@ -332,6 +382,58 @@ namespace LacertMCP.Server.Session
             return rows.Cast<IReadOnlyDictionary<string, object?>>().ToList();
         }
 
+        /// <summary>
+        /// DATA2–7 for every client. Global DBFs (DATA2/3/4 before TY21,
+        /// DATA5/6/7 always) are one query; TY21+ DATA2/3/4 are one table per
+        /// client, so the roster is walked (a client with no such table simply
+        /// contributes no rows). Rows are ordered by clientNumber like sim.
+        /// </summary>
+        private IReadOnlyList<IReadOnlyDictionary<string, object?>> LiveReadWholeFirm(
+            SessionContext ctx, int table, bool useNew, string? stateAbbrev, bool fresh)
+        {
+            IEnumerable<Dictionary<string, object?>> rows;
+            if (!useNew || table >= 5)
+            {
+                rows = LiveQuery(ctx, SqlTemplates.GlobalTable(table), table, fresh);
+            }
+            else
+            {
+                var all = new List<Dictionary<string, object?>>();
+                var roster = SortByClientNumber(LiveQuery(ctx, SqlTemplates.Data1Top(LiveRosterCap), 1));
+                foreach (var client in roster)
+                {
+                    var cn = client.TryGetValue("clientNumber", out var v) ? (v as string)?.Trim() : null;
+                    if (string.IsNullOrEmpty(cn)) continue;
+                    string ck;
+                    try { ck = LiveClientKey(cn!); }
+                    catch (LacerteSDKError) { continue; } // a roster id that isn't a safe table prefix
+                    var sql = table == 2 ? SqlTemplates.Data2NewForm(ck)
+                        : table == 3 ? SqlTemplates.Data3NewForm(ck)
+                        : SqlTemplates.Data4NewForm(ck);
+                    try
+                    {
+                        foreach (var r in LiveQuery(ctx, sql, table, fresh))
+                        {
+                            if (!r.ContainsKey("clientNumber")) r["clientNumber"] = ck;
+                            all.Add(r);
+                        }
+                    }
+                    catch (LacerteSDKError ex) when (ex.StatusCode == StatusCodes.DBNotSupported)
+                    {
+                        // No per-client table for this client (nothing entered).
+                    }
+                }
+                rows = all;
+            }
+            if (!string.IsNullOrWhiteSpace(stateAbbrev))
+            {
+                var st = stateAbbrev!.Trim();
+                rows = rows.Where(r => r.TryGetValue("stateAbbrev", out var sv)
+                                       && string.Equals(sv as string, st, StringComparison.OrdinalIgnoreCase));
+            }
+            return SortByClientNumber(rows).Cast<IReadOnlyDictionary<string, object?>>().ToList();
+        }
+
         private static string RequireClientKey(string? key, int table)
         {
             if (key == null)
@@ -357,8 +459,15 @@ namespace LacertMCP.Server.Session
 
         private IReadOnlyList<IReadOnlyDictionary<string, object?>> LiveReadEFStatus(SessionContext ctx, DateTime? sinceUtc)
         {
-            var sql = sinceUtc.HasValue ? SqlTemplates.EfStatusJoinSince(sinceUtc.Value) : SqlTemplates.EfStatusJoin;
+            DateTime? since = sinceUtc.HasValue && sinceUtc.Value.Kind == DateTimeKind.Local
+                ? sinceUtc.Value.ToUniversalTime()
+                : sinceUtc;
+            var sql = since.HasValue ? SqlTemplates.EfStatusJoinSince(since.Value) : SqlTemplates.EfStatusJoin;
             return LiveQuery(ctx, sql, table: 0)
+                // The SQL push-down is day-granular; apply the same exact
+                // watermark filter sim uses so a poll doesn't re-deliver the day.
+                .Where(r => !since.HasValue
+                            || (TryGetCI(r, "StatusDate", out var sd) && StatusDateOnOrAfter(sd, since.Value)))
                 .Select(r =>
                 {
                     // Same six keys, same casing as the sim projection.

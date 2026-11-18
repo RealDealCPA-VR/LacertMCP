@@ -366,7 +366,7 @@ namespace LacertMCP.Server.Tools
                             ? null
                             : await FieldWriteCore.VerifyOrThrow(_session, "WriteFieldBulk", table,
                                 entry.ClientNumber, entry.Field, entry.Value, entry.SubClientId, entry.StateAbbrev,
-                                cancellationToken).ConfigureAwait(false);
+                                cancellationToken, rowKey, ctx).ConfigureAwait(false);
 
                         var info = StatusCodes.GetStatusInfo(status);
                         successCount++;

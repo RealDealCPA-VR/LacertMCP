@@ -33,10 +33,14 @@ namespace LacertMCP.Server.Session
         public async Task<FieldWriteVerification> VerifyFieldWrite(
             int table, string clientNumber, string field, object? written,
             int? subClientId, string? stateAbbrev,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            // The context the write ran in. Read-back must use the same
+            // (dataPath, year, module) even if a lacerte_set_context lands in
+            // between; null = the current context (tests / legacy callers).
+            SessionContext? writeContext = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var ctx = RequireContext();
+            var ctx = writeContext ?? RequireContext();
             var state = (table == 3 || table == 4) ? stateAbbrev : null;
 
             IReadOnlyList<IReadOnlyDictionary<string, object?>> rows;
@@ -46,7 +50,7 @@ namespace LacertMCP.Server.Session
             }
             else
             {
-                rows = await ReadTable(table, clientNumber, state, cancellationToken).ConfigureAwait(false);
+                rows = await ReadTableInContext(ctx, table, clientNumber, state, cancellationToken).ConfigureAwait(false);
             }
 
             if (table == 2 || table == 4)
@@ -88,7 +92,11 @@ namespace LacertMCP.Server.Session
             }
             if (!found)
             {
-                return new FieldWriteVerification(false, null, "Field " + field + " is not present on the row read back.");
+                // Not every writable field is exposed as an ODBC column (some
+                // TY21+ UpdateTaxReturn fields aren't). Absence is not evidence
+                // of a bad write, so make no claim rather than a false 9022.
+                return new FieldWriteVerification(null, null,
+                    "Not verified: field " + field + " isn't readable on the row read back.");
             }
 
             return ValuesMatch(written, readBack, out var note)
@@ -105,18 +113,36 @@ namespace LacertMCP.Server.Session
         internal static bool ValuesMatch(object? written, object? stored, out string? note)
         {
             note = null;
+            // MCP binds tool args as JsonElement: a JSON true/false must be
+            // compared as a bool (checkbox storage X / Y / 1 / blank), not as
+            // the text "True"/"False".
+            if (written is System.Text.Json.JsonElement wje
+                && (wje.ValueKind == System.Text.Json.JsonValueKind.True || wje.ValueKind == System.Text.Json.JsonValueKind.False))
+            {
+                written = wje.ValueKind == System.Text.Json.JsonValueKind.True;
+            }
             var w = AsText(written);
             var s = AsText(stored);
             if (w.Length == 0 && s.Length == 0) return true;
             if (string.Equals(w, s, StringComparison.Ordinal)) return true;
 
+            // Clearing a numeric field: DBF numerics often read back blank as 0.
+            if (w.Length == 0 && TryNumber(s, out var cleared) && cleared == 0m)
+            {
+                note = "Cleared; Lacerte stores an empty number as " + s + ".";
+                return true;
+            }
+
             // Leading zeros are significant (ZIP, SSN, EIN, client codes):
             // "07001" vs "7001" must NOT count as numerically equal.
             if (!HasSignificantLeadingZero(w) && !HasSignificantLeadingZero(s)
-                && TryNumber(w, out var wn) && TryNumber(s, out var sn))
+                && TryNumber(w, out var wn) && TryNumber(s, out var sn)
+                && wn == sn)
             {
-                return wn == sn;
+                return true;
             }
+            // A numeric mismatch can still be the same date in two formats
+            // ("12152024" vs "20241215"), so fall through to the date check.
             if (TryDate(w, out var wd) && TryDate(s, out var sd))
             {
                 if (wd == sd) { note = "Stored as " + s + " (same date)."; return true; }
