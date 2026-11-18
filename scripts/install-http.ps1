@@ -32,6 +32,9 @@
     -LiveDetailWrites                 let agents write detail rows (income, deduction, K-1 amounts) to
                                       real returns. Turn on only after the REGRESSION_CHECKLIST
                                       "FP-2 live items" pass on this PC (-LiveDetailWrites:$false turns it off)
+    -RequireApproval                  agents can't write to returns directly; data reaches a return only
+                                      through a proposal a person approved (control page Proposals tab or
+                                      `lacerte-mcp proposal approve`). -RequireApproval:$false turns it off
     -Uninstall                        remove everything this script added
 #>
 [CmdletBinding()]
@@ -40,6 +43,7 @@ param(
     [int]$Port = 8767,
     [switch]$Simulation,
     [switch]$LiveDetailWrites,
+    [switch]$RequireApproval,
     [switch]$Uninstall
 )
 
@@ -133,6 +137,7 @@ if (-not $saved -and (Test-Path $launcher)) {
             port       = if ($fromVbs['LACERTE_HTTP_PORT']) { [int]$fromVbs['LACERTE_HTTP_PORT'] } else { $null }
             simulation = ($fromVbs['LACERTE_SIMULATION'] -eq '1')
             liveDetailWrites = ($fromVbs['LACERTE_LIVE_DETAIL_WRITES'] -eq '1')
+            requireApproval = ($fromVbs['LACERTE_REQUIRE_APPROVAL'] -eq '1')
         }
     } catch { $saved = $null }
 }
@@ -140,6 +145,7 @@ $oldPort = if ($saved -and $saved.port) { [int]$saved.port } else { $null }
 if (-not $PSBoundParameters.ContainsKey('Port') -and $oldPort) { $Port = $oldPort }
 if (-not $PSBoundParameters.ContainsKey('DataRoot') -and $saved -and $saved.dataRoot) { $DataRoot = [string]$saved.dataRoot }
 $useSimulation = if ($PSBoundParameters.ContainsKey('Simulation')) { [bool]$Simulation } elseif ($saved) { [bool]$saved.simulation } else { $false }
+$useRequireApproval = if ($PSBoundParameters.ContainsKey('RequireApproval')) { [bool]$RequireApproval } elseif ($saved -and $saved.requireApproval) { [bool]$saved.requireApproval } else { $false }
 $useDetailWrites = if ($PSBoundParameters.ContainsKey('LiveDetailWrites')) { [bool]$LiveDetailWrites } elseif ($saved -and $saved.liveDetailWrites) { [bool]$saved.liveDetailWrites } else { $false }
 if (-not $DataRoot) { $DataRoot = 'C:\Lacerte' }
 if (-not $Uninstall -and -not (Test-Path -LiteralPath $DataRoot)) {
@@ -274,6 +280,7 @@ $envLines += "env(""LACERTE_HTTP_PORT"") = ""$Port"""
 $envLines += "env(""LACERTE_DATA_ROOT"") = ""$DataRoot"""
 if ($DataRoot.StartsWith('\\')) { $envLines += 'env("LACERTE_ALLOW_UNC") = "1"' }
 if ($useDetailWrites) { $envLines += 'env("LACERTE_LIVE_DETAIL_WRITES") = "1"' }
+if ($useRequireApproval) { $envLines += 'env("LACERTE_REQUIRE_APPROVAL") = "1"' }
 $vbs = @"
 ' Lacerte MCP launcher, added by install-http.ps1. Delete this file (or run
 ' install-http.ps1 -Uninstall) to stop it starting at logon.
@@ -289,7 +296,7 @@ Loop
 # (an accented user name, say) survives; ASCII would turn those letters into "?".
 Set-Content -Path $launcher -Value $vbs -Encoding Unicode
 
-[ordered]@{ dataRoot = $DataRoot; port = $Port; simulation = [bool]$useSimulation; liveDetailWrites = [bool]$useDetailWrites } |
+[ordered]@{ dataRoot = $DataRoot; port = $Port; simulation = [bool]$useSimulation; liveDetailWrites = [bool]$useDetailWrites; requireApproval = [bool]$useRequireApproval } |
     ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 
 Write-Host '==> Starting'
@@ -344,6 +351,11 @@ if ($useDetailWrites) {
     Write-Host 'Detail-row writes: ON (only for Series/Code in the verified field dictionary; re-run with -LiveDetailWrites:$false to turn off)'
 } else {
     Write-Host 'Detail-row writes: off (re-run with -LiveDetailWrites after the REGRESSION_CHECKLIST "FP-2 live items" pass)'
+}
+if ($useRequireApproval) {
+    Write-Host 'Approval required: ON (agents write to returns only through approved proposals)'
+} else {
+    Write-Host 'Approval required: off (re-run with -RequireApproval so agents can only write through approved proposals)'
 }
 Write-Host ''
 Write-Host 'Field writes: only a few built-in fields are writable (none for Corporate, S-Corp or Fiduciary).'
