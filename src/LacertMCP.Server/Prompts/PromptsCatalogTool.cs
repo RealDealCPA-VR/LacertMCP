@@ -59,6 +59,10 @@ namespace LacertMCP.Server.Prompts
                 name: "lacerte_csv_intake",
                 description: "Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column→field mapping and per-row idempotency.",
                 whenToUse: "Operator wants to bulk-onboard new clients from a CSV / Tax-Organizer export."),
+            new PromptCatalogEntry(
+                name: "lacerte_entity_return_entry",
+                description: "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified field-dictionary mappings, with dry runs, operator approval and read-back.",
+                whenToUse: "Operator wants a corporate, S-corp, partnership or trust return's data entered from a trial balance, K-1 package or prior-year return."),
         };
 
         [McpServerTool(Name = "lacerte_prompts")]
@@ -138,6 +142,9 @@ namespace LacertMCP.Server.Prompts
                     break;
                 case "lacerte_csv_intake":
                     result = WorkflowPrompts.CsvIntake();
+                    break;
+                case "lacerte_entity_return_entry":
+                    result = WorkflowPrompts.EntityReturnEntry();
                     break;
                 default:
                     return string.Empty;

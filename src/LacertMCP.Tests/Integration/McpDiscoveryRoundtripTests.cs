@@ -142,7 +142,8 @@ namespace LacertMCP.Tests.Integration
                 // lacerte_field_write_bulk to match the tool method name.
                 Assert.Contains("lacerte_field_write_bulk", names);
                 Assert.Contains("lacerte_csv_intake", names);
-                Assert.Equal(4, names.Length);
+                Assert.Contains("lacerte_entity_return_entry", names);
+                Assert.Equal(5, names.Length);
             }
             finally
             {

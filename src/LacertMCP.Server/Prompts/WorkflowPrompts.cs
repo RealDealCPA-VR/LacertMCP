@@ -338,5 +338,103 @@ Surface every tool error verbatim — do not summarize away a 9xxx status code. 
                 },
             };
         }
+
+        // -----------------------------------------------------------------
+        // /lacerte_entity_return_entry
+        // -----------------------------------------------------------------
+
+        /// <summary>Return type → (module char, display name, main form) for the entity prompt.</summary>
+        internal static (char Module, string Name, string Form)? EntityReturnFor(string? returnType)
+        {
+            switch ((returnType ?? string.Empty).Trim().ToUpperInvariant().Replace("-", string.Empty))
+            {
+                case "1120": case "C": case "CORPORATE": return ('C', "corporate", "1120");
+                case "1120S": case "S": case "SCORP": case "SCORPORATE": return ('S', "S-corporation", "1120-S");
+                case "1065": case "P": case "PARTNERSHIP": return ('P', "partnership", "1065");
+                case "1041": case "F": case "FIDUCIARY": case "TRUST": return ('F', "trust / fiduciary", "1041");
+                default: return null;
+            }
+        }
+
+        [McpServerPrompt(Name = "lacerte_entity_return_entry")]
+        [Description(
+            "Enter a corporate (1120), S-corporation (1120-S), partnership (1065) or trust (1041) return's data into Lacerte " +
+            "from source documents, using ONLY verified field-dictionary mappings, with dry-run previews, operator approval, " +
+            "read-back verification and a pre-filing check. Stops instead of guessing when a mapping is missing.")]
+        public static GetPromptResult EntityReturnEntry(
+            [Description("Return type: 1120, 1120S, 1065 or 1041 (module letters C, S, P, F also accepted).")]
+            string returnType = "1120",
+            [Description("Optional label for the source material (e.g. \"2024 trial balance.xlsx\"). Default: ask the operator.")]
+            string? sourceLabel = null)
+        {
+            var target = EntityReturnFor(returnType);
+            string text;
+            if (target == null)
+            {
+                text = $"The requested return type '{returnType}' is not one this workflow covers. Ask the operator which of these they mean: 1120 (corporate), 1120S (S-corporation), 1065 (partnership) or 1041 (trust / fiduciary), then restart this prompt with that value. Individual (1040) data entry is not covered by this workflow.";
+            }
+            else
+            {
+                var (module, name, form) = target.Value;
+                var source = string.IsNullOrWhiteSpace(sourceLabel) ? "the operator's source documents (ask for them)" : $"\"{sourceLabel}\"";
+                text =
+$@"You are entering a {name} return (Form {form}, Lacerte module '{module}') into Lacerte from {source}. Lacerte computes the forms; your job is data entry only, done safely. Follow every step; never skip a gate.
+
+Step 1 — Session and context
+  • Call `lacerte_session_status`. If it isn't registered/signed in, STOP and tell the operator to sign in (control page ""Sign in to Lacerte"" or `lacerte-mcp login`).
+  • Set the context with `lacerte_set_context` to the {form} data folder for the tax year (module '{module}'). Use `lacerte_list_datapaths` if unsure. Confirm the year with the operator.
+
+Step 2 — The client
+  • Find the client with `lacerte_client_find`. If it doesn't exist, ask before creating it with `lacerte_client_create` (dry run first), then resolve its client number with `lacerte_client_find`.
+  • Read what is already there: `lacerte_client_summary`, `lacerte_subclient_read` (partners / shareholders / beneficiaries), `lacerte_detail_read`. Never overwrite existing data without the operator's explicit OK for that item.
+
+Step 3 — Load the verified mappings (HARD GATE)
+  • Call `lacerte_field_dictionary` with module '{module}' and the tax year.
+  • If it returns no entries (its `note` says no verified mappings yet), STOP data entry. Tell the operator that {form} fields haven't been mapped on their Lacerte PC yet (they are recorded with `lacerte-mcp map-diff`), and offer to read and summarize the return instead.
+  • You may ONLY write to a field or detail Series/Code that a dictionary entry names. Never guess a field (C1_n…) or a detail code from memory, from the simulation seeds, or from another module.
+
+Step 4 — Map the source to the dictionary
+  • Go through {source} line by line and match each amount or answer to a dictionary entry (by concept, form and line).
+  • Build a table for the operator: source line | amount | dictionary id | Lacerte target (table/field or series/code) | existing value. List every UNMAPPED source line separately; those must be entered in Lacerte by hand.
+  • Ask the operator to approve the table before any write. Apply their corrections.
+
+Step 5 — Dry run, then commit
+  • Field targets: `lacerte_field_write` (or `lacerte_field_write_bulk` for many) with `dryRun: true` first. If a field is refused (9012 / 9001), it isn't writable — move it to the manual list; never work around it.
+  • Detail targets: `lacerte_detail_write` / `lacerte_detail_write_bulk` with `dryRun: true` first. In live mode these need the operator to have enabled detail writes (9202 says so); if refused, move the rows to the manual list.
+  • Show the dry-run results, get approval, then repeat WITHOUT dryRun, with stable idempotency keys (e.g. ""{form}-<client>-<dictionary id>"").
+  • Check every result: `verified: true` is done; `verified: null` means accepted but not confirmed — list it for the operator to check in Lacerte; 9022 WriteNotVerified means the stored value differs — STOP and report it (a retry with the same key re-writes once the cause is fixed, e.g. the return was open in Lacerte).
+
+Step 6 — Owners
+  • {OwnersNote(module)}
+  • Only change partner / shareholder / beneficiary rows through dictionary-mapped fields (they live in table 2 and need the subClientId).
+
+Step 7 — Review
+  • Run `lacerte_pre_filing_check` for the client and report blockers and warnings.
+  • Report: what was written (verified), what needs a manual check, what must be entered by hand, and that the operator should close and reopen the client in Lacerte to see the changes and let Lacerte recalculate. Filing and e-filing stay in Lacerte.
+
+Surface every tool error verbatim with its statusCode; do not summarize away a 9xxx code.";
+            }
+
+            return new GetPromptResult
+            {
+                Description = "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified mappings, with dry runs, approval and read-back.",
+                Messages = new List<PromptMessage>
+                {
+                    new PromptMessage
+                    {
+                        Role = Role.User,
+                        Content = new TextContentBlock { Text = text },
+                    },
+                },
+            };
+        }
+
+        private static string OwnersNote(char module) => module switch
+        {
+            'P' => "1065: read the partners with `lacerte_subclient_read`; a partnership needs at least two. Confirm each partner's identity and ownership against the source before entering K-1 related data.",
+            'S' => "1120-S: read the shareholders with `lacerte_subclient_read`; at least one is required. Confirm ownership against the source (the pre-filing check can't verify ownership totals yet).",
+            'F' => "1041: read the beneficiaries with `lacerte_subclient_read`. A trust that distributes income should have them; ask the operator if none are present.",
+            _ => "1120: a C corporation has no owner rows in this workflow; officers and shareholders information is entered only through dictionary-mapped fields.",
+        };
     }
 }

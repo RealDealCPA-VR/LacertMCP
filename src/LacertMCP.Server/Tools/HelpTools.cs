@@ -384,6 +384,12 @@ namespace LacertMCP.Server.Tools
                 purpose = "Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column->field mapping, per-row idempotency keys, stop-on-first-error.",
                 args = new[] { "sourceLabel?: string", "rowCount?: int" },
             },
+            new
+            {
+                name = "lacerte_entity_return_entry",
+                purpose = "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified field-dictionary mappings; dry run, operator approval, read-back, pre-filing check. Stops when no mapping exists.",
+                args = new[] { "returnType: string = \"1120\" (1120 | 1120S | 1065 | 1041)", "sourceLabel?: string" },
+            },
         };
 
         // CLI commands that an operator (not the LLM) can run for deeper

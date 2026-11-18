@@ -486,6 +486,7 @@ namespace LacertMCP.Tests.Prompts
                 "lacerte_review_ef_status",
                 "lacerte_field_write_bulk",
                 "lacerte_csv_intake",
+                "lacerte_entity_return_entry",
             })
             {
                 var json = await PromptsCatalogTool.LacertePrompts(promptName);
