@@ -11,8 +11,11 @@ using ModelContextProtocol.Server;
 
 namespace LacertMCP.Server.Web
 {
-    /// <summary>Who is calling: this PC, or a tailnet device identified by whois.</summary>
-    public sealed record Caller(bool IsLocal, string StableId, string Name, bool IsOwner, string Address)
+    /// <summary>
+    /// Who is calling: this PC, or a tailnet device identified by whois.
+    /// <c>Login</c> is the device's Tailscale login (whois UserProfile.LoginName), when known.
+    /// </summary>
+    public sealed record Caller(bool IsLocal, string StableId, string Name, bool IsOwner, string Address, string? Login = null)
     {
         public static Caller Local(string address) => new Caller(true, "local", "this computer", true, address);
     }

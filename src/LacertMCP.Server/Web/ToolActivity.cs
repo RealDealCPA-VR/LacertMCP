@@ -13,10 +13,22 @@ namespace LacertMCP.Server.Web
     /// </summary>
     internal static class ToolActivity
     {
+        private const string ProposalToolPrefix = "lacerte_proposal_";
+        internal const string ProposalCommitTool = "lacerte_proposal_commit";
+
+        /// <summary>
+        /// Tools that change a return. Proposal tools only prepare a proposal
+        /// (create / add_* / update_line / remove_line / submit write nothing to
+        /// Lacerte), so only lacerte_proposal_commit counts.
+        /// </summary>
         public static bool IsWrite(string tool)
-            => tool.IndexOf("write", StringComparison.OrdinalIgnoreCase) >= 0
-               || tool.IndexOf("create", StringComparison.OrdinalIgnoreCase) >= 0
-               || tool.IndexOf("update_return", StringComparison.OrdinalIgnoreCase) >= 0;
+        {
+            if (tool.StartsWith(ProposalToolPrefix, StringComparison.OrdinalIgnoreCase))
+                return string.Equals(tool, ProposalCommitTool, StringComparison.OrdinalIgnoreCase);
+            return tool.IndexOf("write", StringComparison.OrdinalIgnoreCase) >= 0
+                   || tool.IndexOf("create", StringComparison.OrdinalIgnoreCase) >= 0
+                   || tool.IndexOf("update_return", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
 
         public static void Record(ActivityLog activity, CallToolRequestParams? call, CallToolResult result)
         {
@@ -26,7 +38,9 @@ namespace LacertMCP.Server.Web
             string? statusName = null;
             bool dryRun = false;
             bool? verified = null;
-            var text = result.Content?.OfType<TextContentBlock>().FirstOrDefault()?.Text;
+            string? commitSummary = null;
+            var isCommit = string.Equals(tool, ProposalCommitTool, StringComparison.OrdinalIgnoreCase);
+            var text =result.Content?.OfType<TextContentBlock>().FirstOrDefault()?.Text;
             if (!string.IsNullOrEmpty(text))
             {
                 try
@@ -51,6 +65,21 @@ namespace LacertMCP.Server.Web
                                 verified = true;
                         }
                         if (inner.TryGetProperty("statusName", out var n2) && n2.ValueKind == JsonValueKind.String && statusName == null) statusName = n2.GetString();
+                        if (isCommit && ok && inner.TryGetProperty("ranCount", out _))
+                        {
+                            // Proposal commit report: verified only when every line it ran
+                            // was read back; CommitFailed (nothing written) is a failure.
+                            int Count(string name) => inner.TryGetProperty(name, out var c) && c.TryGetInt32(out var i) ? i : 0;
+                            var status = inner.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() : null;
+                            int ran = Count("ranCount"), succeeded = Count("succeededCount");
+                            int written = succeeded + Count("succeededUnverifiedCount");
+                            verified = status == "Committed" && ran > 0 && succeeded == ran;
+                            if (status == "CommitFailed") { ok = false; statusName ??= "CommitFailed"; }
+                            commitSummary = written + " of " + ran + " line(s) written (" + succeeded + " verified)"
+                                + (Count("failedCount") > 0 ? ", " + Count("failedCount") + " failed" : "")
+                                + (Count("uncertainCount") > 0 ? ", " + Count("uncertainCount") + " uncertain" : "")
+                                + (status != null ? "; " + Plain(status) : "");
+                        }
                     }
                 }
                 catch (JsonException)
@@ -63,13 +92,15 @@ namespace LacertMCP.Server.Web
             string? target = null;
             if (write && call?.Arguments != null)
             {
-                var parts = new[] { "clientNumber", "field", "table" }
+                var parts = new[] { "proposalId", "clientNumber", "field", "table" }
                     .Where(k => call.Arguments.ContainsKey(k))
                     .Select(k => k + " " + Plain(call.Arguments[k]));
                 target = string.Join(", ", parts);
                 if (call.Arguments.TryGetValue("entries", out var e) && e.ValueKind == JsonValueKind.Array)
                     target = (target.Length > 0 ? target + ", " : string.Empty) + e.GetArrayLength() + " entries";
             }
+            if (write && commitSummary != null)
+                target = (string.IsNullOrEmpty(target) ? string.Empty : target + ": ") + commitSummary;
 
             string message;
             if (!ok) message = tool + " failed" + (statusName != null ? ": " + statusName : string.Empty);
@@ -98,8 +129,12 @@ namespace LacertMCP.Server.Web
         /// lands on disk in plain text otherwise.
         /// </summary>
         internal static string Plain(JsonElement v)
+            => Plain(v.ValueKind == JsonValueKind.String ? v.GetString() ?? string.Empty : v.ToString());
+
+        /// <inheritdoc cref="Plain(JsonElement)"/>
+        internal static string Plain(string? raw)
         {
-            var raw = v.ValueKind == JsonValueKind.String ? v.GetString() ?? string.Empty : v.ToString();
+            raw ??= string.Empty;
             var safe = new string(raw.Where(c => (c < 128 && char.IsLetterOrDigit(c)) || c == '_' || c == '-' || c == '.').ToArray());
             var digits = new string(safe.Where(char.IsDigit).ToArray());
             if (digits.Length == 9 && safe.All(c => char.IsDigit(c) || c == '-'))
