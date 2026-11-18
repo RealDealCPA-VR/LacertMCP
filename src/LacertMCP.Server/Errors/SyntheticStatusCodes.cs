@@ -157,6 +157,21 @@ namespace LacertMCP.Server.Errors
         // readBack, reason}.
         public const int WriteNotVerified = 9022;
 
+        // 9023 — LACERTE_REQUIRE_APPROVAL=1 is set and a direct write tool
+        // (lacerte_field_write / lacerte_update_return / the two bulk write
+        // tools / lacerte_detail_write) tried a real (non-dry-run) write. With
+        // the switch on, the return is written only by committing an approved
+        // proposal (lacerte_proposal_commit). Dry runs are still allowed.
+        // Context carries {op, reason}.
+        public const int ApprovalRequired = 9023;
+
+        // 9024 — a proposal operation doesn't fit the proposal's state: wrong
+        // status for the step (e.g. editing a Submitted proposal, approving a
+        // Draft), a stale expectedVersion, a missing / outdated approval at
+        // commit, or a line that can't be approved. Context carries
+        // {proposalId, status, version, reason}.
+        public const int ProposalConflict = 9024;
+
         // ---- 9100–9199: auth lifecycle ----
         // 9101 reserved for the architecture-doc cross-reference (re-auth surfacing path).
         // 9102 idempotency-conflict per session manager design in Todo.md task #31.
@@ -307,6 +322,18 @@ namespace LacertMCP.Server.Errors
                 Severity.Error,
                 "Lacerte accepted the write, but reading the field back returned a different value (or no row). The value on the return is NOT what was requested. See context.written, context.readBack and context.reason.",
                 "Do NOT retry blindly and do NOT report the write as done. Read the client with lacerte_client_read / lacerte_table_read to see the current value, then tell the operator exactly what is on the return. Common causes: the return is open in the Lacerte UI, the field expects a different format (date / number / code), or the subClientId / stateAbbrev targets a different row."),
+
+            [ApprovalRequired] = new StatusInfo(
+                "ApprovalRequired",
+                Severity.Error,
+                "This server requires approval before anything is written to a return (LACERTE_REQUIRE_APPROVAL=1). Direct writes are refused; dry runs still work.",
+                "Put the entries in a proposal instead: lacerte_proposal_create, lacerte_proposal_add_lines, lacerte_proposal_submit, then ask the operator to review and approve it (control page or `lacerte-mcp proposal approve`). After approval call lacerte_proposal_commit."),
+
+            [ProposalConflict] = new StatusInfo(
+                "ProposalConflict",
+                Severity.Error,
+                "The proposal is not in a state that allows this step, the version you passed is out of date, or its approval no longer matches its content. See context.status, context.version and context.reason.",
+                "Read the proposal with lacerte_proposal_get to see its current status and version. Agents edit only Draft / ReturnedForChanges proposals; only a person approves (control page or `lacerte-mcp proposal approve`); commit only an Approved proposal whose content hasn't changed since approval."),
 
             [ReAuthRequired] = new StatusInfo(
                 "ReAuthRequired",

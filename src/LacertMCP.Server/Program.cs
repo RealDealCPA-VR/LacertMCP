@@ -75,6 +75,15 @@ namespace LacertMCP.Server
             // until Phase 9 wires the COM client.
             builder.Services.AddSingleton<LacerteSessionManager>();
 
+            // Proposal-then-approve store (<data dir>\proposals) + commit
+            // service, shared by the proposal tools and the control page.
+            if (Proposals.ProposalStore.Shared is { } proposalStore)
+            {
+                builder.Services.AddSingleton(proposalStore);
+                builder.Services.AddSingleton(sp => new Proposals.ProposalService(
+                    sp.GetRequiredService<LacerteSessionManager>(), proposalStore));
+            }
+
             // P15-054 — periodic liveness signal file at %TEMP%/lacerte-mcp-heartbeat-{pid}.json
             // so external watchers (Task Scheduler, NSSM, an operator
             // PowerShell snippet) can detect a hung / dead server without

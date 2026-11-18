@@ -178,6 +178,10 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
+                // LACERTE_REQUIRE_APPROVAL=1 — refuse the whole real batch up
+                // front (9023) instead of failing it row by row; dry runs pass.
+                _session.ThrowIfApprovalRequired("FieldWriteBulk", dryRun);
+
                 if (taxYear.HasValue && taxYear.Value != ctx.Year)
                 {
                     // P16-063 — distinct synthetic code 9016 ContextMismatch

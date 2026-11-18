@@ -49,6 +49,10 @@ namespace LacertMCP.Server.Startup
             "LACERTE_DEBUG_LOG_FULL_RESULTS",
             // FP-2 — live detail-row writes over ODBC; off unless exactly "1".
             "LACERTE_LIVE_DETAIL_WRITES",
+            // Proposal approval model — on only when exactly "1": the direct
+            // write tools then refuse real writes and only an approved
+            // proposal's commit writes (LacerteSessionManager.RequireApproval).
+            "LACERTE_REQUIRE_APPROVAL",
         };
 
         // R6-30(b): default-ON flags — the feature is enabled unless the value
@@ -333,9 +337,10 @@ namespace LacertMCP.Server.Startup
             var asmVersion = SafeAssemblyVersion();
 
             var liveDetailWrites = Get(env, "LACERTE_LIVE_DETAIL_WRITES") == "1";
+            var requireApproval = Get(env, "LACERTE_REQUIRE_APPROVAL") == "1";
 
             stderr.WriteLine(
-                $"[startup] LacertMCP {asmVersion} mode={mode.ToString().ToLowerInvariant()} dataRoot={Nz(dataRoot)} defaultTaxYear={Nz(defaultTaxYear)} debugWire={(debugWire ? "on" : "off")} debugLogPath={Nz(logPath)} liveDetailWrites={(liveDetailWrites ? "on" : "off")}");
+                $"[startup] LacertMCP {asmVersion} mode={mode.ToString().ToLowerInvariant()} dataRoot={Nz(dataRoot)} defaultTaxYear={Nz(defaultTaxYear)} debugWire={(debugWire ? "on" : "off")} debugLogPath={Nz(logPath)} liveDetailWrites={(liveDetailWrites ? "on" : "off")} requireApproval={(requireApproval ? "on" : "off")}");
             return mode;
         }
 

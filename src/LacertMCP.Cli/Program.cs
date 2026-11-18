@@ -6,7 +6,7 @@ using LacertMCP.Cli.Commands;
 namespace LacertMCP.Cli
 {
     /// <summary>
-    /// Operator CLI dispatcher — <c>lacerte-mcp register | login | status | unregister | tools | field-access | map-diff | detail-restore | doctor | update</c>.
+    /// Operator CLI dispatcher — <c>lacerte-mcp register | login | status | unregister | tools | field-access | map-diff | detail-restore | proposal | doctor | update</c>.
     ///
     /// <para>
     /// Built on <c>System.CommandLine</c> 2.0.0-beta4 (preview API — surface is subject to
@@ -48,6 +48,7 @@ namespace LacertMCP.Cli
             root.AddCommand(FieldAccessCommand.Build());
             root.AddCommand(MapDiffCommand.Build());
             root.AddCommand(DetailRestoreCommand.Build());
+            root.AddCommand(ProposalCommand.Build());
             root.AddCommand(DoctorCommand.Build());
             root.AddCommand(UpdateCommand.Build());
 

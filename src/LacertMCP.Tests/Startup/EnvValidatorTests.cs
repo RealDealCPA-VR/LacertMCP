@@ -280,6 +280,24 @@ namespace LacertMCP.Tests.Startup
             Assert.Contains("liveDetailWrites=on", output);
         }
 
+        // ----- Proposal approval model: LACERTE_REQUIRE_APPROVAL -----
+
+        [Fact]
+        public void RequireApproval_Typo_Warns_BannerShowsState()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_REQUIRE_APPROVAL", "yes")));
+            var output = sw.ToString();
+            Assert.Contains("LACERTE_REQUIRE_APPROVAL='yes'", output);
+            Assert.Contains("requireApproval=off", output);
+
+            sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_REQUIRE_APPROVAL", "1")));
+            output = sw.ToString();
+            Assert.DoesNotContain("LACERTE_REQUIRE_APPROVAL", output);
+            Assert.Contains("requireApproval=on", output);
+        }
+
         [Fact]
         public void DetailSnapshotDir_Relative_Warns_Absolute_DoesNot()
         {

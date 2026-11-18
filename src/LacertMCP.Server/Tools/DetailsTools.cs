@@ -186,7 +186,9 @@ namespace LacertMCP.Server.Tools
             });
         }
 
-        private static void ValidateDetailWrite(string series, string code, string stateAbbrev, string tsj)
+        // Internal: the proposal path (Proposals/ProposalService) runs the same
+        // row-shape gate on detail lines before their dry run.
+        internal static void ValidateDetailWrite(string series, string code, string stateAbbrev, string tsj)
         {
             if (string.IsNullOrWhiteSpace(series))
             {

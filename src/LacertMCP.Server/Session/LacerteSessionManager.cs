@@ -385,6 +385,10 @@ namespace LacertMCP.Server.Session
             _appName = TryGet(resolved, "LACERTE_APP_NAME");
             // FP-2 — LACERTE_LIVE_DETAIL_WRITES + backup directory.
             InitLiveDetailWriteSettings(resolved);
+            // Proposal approval model — LACERTE_REQUIRE_APPROVAL=1 makes the
+            // direct write tools refuse real writes (only an approved
+            // proposal's commit writes). Default off.
+            RequireApproval = string.Equals(TryGet(resolved, RequireApprovalEnvVar), "1", StringComparison.Ordinal);
 
             // P15-004 — parse LACERTE_DEFAULT_TAX_YEAR once at startup.
             // Fail-loud on bad input (per Boundary Invariant: config errors
@@ -1549,6 +1553,7 @@ namespace LacertMCP.Server.Session
             RequireExpectedContext(ctx, expectedContext, "WriteField");
             RequireRegistered();
             RejectIfReadOnly(ctx, "WriteField", table: table, fieldName: field);
+            ThrowIfApprovalRequired("WriteField", dryRun);
 
             // R7-06 / R7-08 — normalize identifiers at the chokepoint so both
             // modes agree with the read path: clientNumber is trimmed (reads
@@ -1854,6 +1859,33 @@ namespace LacertMCP.Server.Session
                 });
         }
 
+        /// <summary>Env switch: <c>LACERTE_REQUIRE_APPROVAL=1</c> — real writes only through an approved proposal's commit.</summary>
+        public const string RequireApprovalEnvVar = "LACERTE_REQUIRE_APPROVAL";
+
+        /// <summary>
+        /// True when the server runs with <c>LACERTE_REQUIRE_APPROVAL=1</c>: the
+        /// direct write tools refuse real field / detail writes (9023) and only
+        /// <c>lacerte_proposal_commit</c> (an approved, unchanged proposal) writes.
+        /// Dry runs and client creation are not affected.
+        /// </summary>
+        public bool RequireApproval { get; internal set; }
+
+        /// <summary>
+        /// 9023 ApprovalRequired for a real write outside an approved proposal's
+        /// commit while <see cref="RequireApproval"/> is on. Dry runs pass.
+        /// </summary>
+        internal void ThrowIfApprovalRequired(string op, bool dryRun)
+        {
+            if (dryRun || !RequireApproval || Proposals.ProposalCommitScope.IsActive) return;
+            throw new LacerteSDKError(SyntheticStatusCodes.ApprovalRequired,
+                new Dictionary<string, object?>
+                {
+                    ["op"] = op,
+                    ["reason"] = "This server runs with " + RequireApprovalEnvVar + "=1: nothing is written to a return except by committing a proposal a person approved. "
+                        + "Dry runs still work. Build a proposal (lacerte_proposal_create, lacerte_proposal_add_lines, lacerte_proposal_submit), have the operator approve it, then call lacerte_proposal_commit.",
+                });
+        }
+
         private static LacerteSDKError PreTy21LiveWriteRefusal(SessionContext ctx, string clientNumber)
             => new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
                 new Dictionary<string, object?>
@@ -1919,6 +1951,7 @@ namespace LacertMCP.Server.Session
             // Safety net: DetailsTools.ValidateDetailWrite handles row-shape
             // validation before this method is invoked.
             RejectIfReadOnly(ctx, "WriteDetail");
+            ThrowIfApprovalRequired("WriteDetail", dryRun);
             // R7-06 — trim like the read path.
             clientNumber = RequireClientNumber(clientNumber, "WriteDetail");
             // R7-12 — bridge row-content rules (length caps, control chars,

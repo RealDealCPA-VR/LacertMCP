@@ -360,8 +360,9 @@ Surface every tool error verbatim — do not summarize away a 9xxx status code. 
         [McpServerPrompt(Name = "lacerte_entity_return_entry")]
         [Description(
             "Enter a corporate (1120), S-corporation (1120-S), partnership (1065) or trust (1041) return's data into Lacerte " +
-            "from source documents, using ONLY verified field-dictionary mappings, with dry-run previews, operator approval, " +
-            "read-back verification and a pre-filing check. Stops instead of guessing when a mapping is missing.")]
+            "from source documents as a PROPOSAL: ONLY verified field-dictionary mappings, every line cited and dry-run validated, " +
+            "manual items and questions for the preparer; the operator approves it (control page / CLI), then it is committed with " +
+            "read-back verification, followed by a pre-filing check. Stops instead of guessing when a mapping is missing.")]
         public static GetPromptResult EntityReturnEntry(
             [Description("Return type: 1120, 1120S, 1065 or 1041 (module letters C, S, P, F also accepted).")]
             string returnType = "1120",
@@ -394,35 +395,40 @@ Step 3 — Load the verified mappings (HARD GATE)
   • If it returns no entries (its `note` says no verified mappings yet), STOP data entry. Tell the operator that {form} fields haven't been mapped on their Lacerte PC yet (they are recorded with `lacerte-mcp map-diff`), and offer to read and summarize the return instead.
   • You may ONLY write to a field or detail Series/Code that a dictionary entry names. Never guess a field (C1_n…) or a detail code from memory, from the simulation seeds, or from another module.
 
-Step 4 — Map the source to the dictionary
-  • Go through {source} line by line and match each amount or answer to a dictionary entry (by concept, form and line).
-  • Build a table for the operator: source line | amount | dictionary id | Lacerte target (table/field or series/code) | existing value. List every UNMAPPED source line separately; those must be entered in Lacerte by hand.
-  • Ask the operator to approve the table before any write. Apply their corrections.
-
-Step 5 — Dry run, then commit
-  • Field targets: `lacerte_field_write` (or `lacerte_field_write_bulk` for many) with `dryRun: true` first. If a field is refused (9012 / 9001), it isn't writable — move it to the manual list; never work around it.
-  • Detail targets: `lacerte_detail_write` / `lacerte_detail_write_bulk` with `dryRun: true` first, always passing the entry's `suffix` (and `prefix` if the entry has one). In live mode these need the operator to have enabled detail writes (9202 says so), and the server refuses any Series/Code not in the dictionary (9012); if refused, move the rows to the manual list.
-  • Dry runs: pass NO idempotency key (a key used on a dry run conflicts with the real write, 9102).
-  • Show the dry-run results, get approval, then repeat WITHOUT dryRun, with an idempotency key that is unique per SOURCE LINE: ""{form}-<client>-<dictionary id>-<source line number>"" (several W-2s, 1099s or K-1 lines can share one dictionary id; reusing a key would silently skip the later rows).
-  • `lacerte_detail_write_bulk` ENFORCES the preview: (1) call it with `dryRun: true`; only if EVERY row passes does it return a `previewToken` (if a row fails there is no token — fix or drop that row and dry-run again); (2) show the operator the previewed rows and get approval; (3) commit with the SAME `entries` (same order and values), same context and same `continueOnError`, `dryRun: false`, an idempotency key prefix (""{form}-<client>-<batch>""; the tool adds each row's position) and `previewToken` set to the dry run's token. A commit with a missing, expired (30 minutes) or mismatched token is refused with 9017 and nothing is written — run the dry run again. To resubmit a half-failed commit, reuse the same entries, idempotency key and previewToken while it is still valid.
-  • Check every result: `verified: true` is done; `verified: null` means accepted but not confirmed — list it for the operator to check in Lacerte.
-  • 9022 WriteNotVerified on a FIELD write: the stored value differs — STOP and report it; once the cause is fixed (e.g. the return was open in Lacerte) a retry with the same key re-writes it.
-  • 9022 (or any error whose context says `rowWritten: yes / unknown`) on a DETAIL row: the row may already be in the return. NEVER retry it — the same key is locked and won't write again. Read the rows with `lacerte_detail_read` and report; only if the row is clearly missing, write it with a NEW key after the operator agrees.
-
-Step 6 — Owners
+Step 4 — Owners
   • {OwnersNote(module)}
-  • Only change partner / shareholder / beneficiary rows through dictionary-mapped fields (they live in table 2 and need the subClientId).
+  • Only change partner / shareholder / beneficiary rows through dictionary-mapped field lines in the proposal (table 2, with the subClientId).
 
-Step 7 — Review
+Step 5 — Build a proposal (nothing is written to the return yet)
+  • Create it with `lacerte_proposal_create` (client number; it uses the active context; title e.g. ""{form} <year> from <source>"").
+  • Go through {source} line by line and match each amount or answer to a dictionary entry (by concept, form and line).
+  • Add every mapped value with `lacerte_proposal_add_lines`. Field targets: {{kind: ""field"", table, field, value, subClientId?, stateAbbrev?}}. Detail targets: {{kind: ""detail"", detail: {{series, code, amount, description, suffix, prefix?, ...}}}}, always with the entry's `suffix` (and `prefix` if it has one). Every line carries `dictionaryId`, `source` {{document, page, location (box / line), excerpt}}, `reasoning` wherever you used judgement, and `confidence` (high / medium / low). Several W-2s, 1099s or K-1 lines can share one dictionary id: add one line per SOURCE line.
+  • Each line is dry-run validated on the spot. A line with `ok: false` can't be approved: fix it with `lacerte_proposal_update_line` or drop it with `lacerte_proposal_remove_line`. If a target is refused (9012 / 9001 / 9202) it isn't writable — move it to the manual list; never work around a refusal.
+  • Never overwrite existing data silently: when a target already has a value, say so in the line's `reasoning` and ask about it as a question.
+  • Every UNMAPPED source line goes to `lacerte_proposal_add_manual_items` (description, amount, source, reason): the preparer enters those by hand.
+  • Anything the preparer must decide goes to `lacerte_proposal_add_questions`.
+
+Step 6 — Submit for review (HARD GATE: a person approves)
+  • Call `lacerte_proposal_submit`, then tell the operator the proposal id, the number of lines, manual items and questions, and that they review and approve it on the control page (Proposals) or on the Lacerte PC with `lacerte-mcp proposal show <id>` and `lacerte-mcp proposal approve <id> --confirm`.
+  • You cannot approve a proposal, and nothing is written until a person approves it. Do not enter this return with `lacerte_field_write` / `lacerte_detail_write` or their bulk forms: the proposal is the record of what was approved (a server running with LACERTE_REQUIRE_APPROVAL=1 refuses direct writes with 9023).
+  • If the operator returns it for changes (status ReturnedForChanges; their note is in `lastReview`), make the changes and submit again. Changing an approved proposal revokes its approval.
+
+Step 7 — Commit after approval
+  • Only when `lacerte_proposal_get` shows status Approved (state.readyToCommit true), call `lacerte_proposal_commit`. It writes only the lines the operator approved, with read-back and duplicate protection.
+  • Check every line result: Succeeded (verified) is done; SucceededUnverified was accepted but not confirmed — list it for the operator to check in Lacerte.
+  • Failed field lines (for example 9022 WriteNotVerified because the return was open in Lacerte): report them; once the cause is fixed, `lacerte_proposal_commit` again runs only the unfinished lines.
+  • An Uncertain detail line (an error whose context says `rowWritten: yes / unknown`, or 9022): the row may already be in the return. NEVER retry it and never add it again — the commit stops there. Tell the operator to check the client's detail rows in Lacerte and resolve the line (control page or `lacerte-mcp proposal resolve`); then commit again for the rest.
+
+Step 8 — Review
   • Run `lacerte_pre_filing_check` for the client and report blockers and warnings.
-  • Report: what was written (verified), what needs a manual check, what must be entered by hand, and that the operator should close and reopen the client in Lacerte to see the changes and let Lacerte recalculate. Filing and e-filing stay in Lacerte.
+  • Report: what was written (verified), what needs a manual check, the manual items that must be entered by hand, and that the operator should close and reopen the client in Lacerte to see the changes and let Lacerte recalculate. Filing and e-filing stay in Lacerte.
 
 Surface every tool error verbatim with its statusCode; do not summarize away a 9xxx code.";
             }
 
             return new GetPromptResult
             {
-                Description = "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified mappings, with dry runs, approval and read-back.",
+                Description = "Prepare an 1120 / 1120-S / 1065 / 1041 return from source documents as a proposal (verified mappings only, dry-run validated, cited); the operator approves it; then commit with read-back.",
                 Messages = new List<PromptMessage>
                 {
                     new PromptMessage

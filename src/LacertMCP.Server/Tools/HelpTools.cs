@@ -158,11 +158,11 @@ namespace LacertMCP.Server.Tools
         {
             "Return data entry only as far as mapped and enabled: every module can be read; writing needs verified lacerte_field_dictionary mappings (never guess codes) and, for amounts, live detail writes switched on (else 9202). Use the lacerte_entity_return_entry prompt; with an empty dictionary, offer to read and summarize instead.",
             "No e-filing actions. Read-only EF status via lacerte_ef_status (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.",
-            "No printing, PDF rendering, or third-party export. DBF read/write + COM field-write only. Use Lacerte's File -> Print or Print to PDF for any rendered output.",
+            "No printing, PDF rendering or export: use Lacerte's File -> Print / Print to PDF.",
             "No organizer, client portal, letter template, or diagnostics-detail access. Those live in non-DBF Lacerte surfaces this MCP doesn't wire up.",
             "Single-operator only. No concurrency control across multiple Lacerte users sharing one datapath. Don't point two MCP servers at the same LACERTE_DATA_PATH simultaneously.",
             "No archived / closed-copy / prior-firm-transfer file access. The MCP sees the live working set under {YY}Tax\\{Module}Data, not Lacerte's archive folders.",
-            "No live UI refresh. Writes land on disk, but the Lacerte editor only rereads on client close/reopen. Verify a write actually landed via lacerte_client_read / lacerte_table_read.",
+            "No live UI refresh: Lacerte shows writes after the client is closed and reopened.",
         };
 
         private static object Modes() => new
@@ -176,7 +176,7 @@ namespace LacertMCP.Server.Tools
             live = new
             {
                 name = "live",
-                description = "Real Lacerte SDK on Windows. Enable with LACERTE_LIVE=1. Requires the 64-bit Lacerte SDK MSI (32-bit driver has a known INSERT crash) + interactive Intuit consent (run `lacerte-mcp register` from PowerShell) + 24h auth refresh (`lacerte-mcp login`). Reads run via ODBC; writes via COM with TY21+ UpdateTaxReturn branching.",
+                description = "Real Lacerte SDK on Windows (LACERTE_LIVE=1). Needs the 64-bit Lacerte SDK, Intuit consent (`lacerte-mcp register`) and a 24h sign-in refresh (`lacerte-mcp login`). Reads via ODBC; field writes via COM (TY21+ UpdateTaxReturn).",
             },
         };
 
@@ -225,6 +225,21 @@ namespace LacertMCP.Server.Tools
                 "lacerte_update_return",
                 "lacerte_detail_write",
                 "lacerte_detail_write_bulk",
+            },
+            // Proposal-then-approve: the agent prepares, a person approves
+            // (control page / CLI), then the agent commits.
+            ["proposals"] = new[]
+            {
+                "lacerte_proposal_create",
+                "lacerte_proposal_add_lines",
+                "lacerte_proposal_update_line",
+                "lacerte_proposal_remove_line",
+                "lacerte_proposal_add_manual_items",
+                "lacerte_proposal_add_questions",
+                "lacerte_proposal_submit",
+                "lacerte_proposal_get",
+                "lacerte_proposal_list",
+                "lacerte_proposal_commit",
             },
             ["efile"] = new[]
             {
@@ -346,6 +361,13 @@ namespace LacertMCP.Server.Tools
                 defaultValue = "off",
                 purpose = "1 enables live detail-row writes (dictionary-mapped Series/Code only). Off until verified on the Lacerte PC.",
             },
+            new
+            {
+                name = "LACERTE_REQUIRE_APPROVAL",
+                required = "optional",
+                defaultValue = "off",
+                purpose = "1: only approved proposals write (direct writes: 9023).",
+            },
         };
 
         // First-call example: lacerte_session_status per the P18-024 verdict
@@ -394,7 +416,7 @@ namespace LacertMCP.Server.Tools
             new
             {
                 name = "lacerte_entity_return_entry",
-                purpose = "Enter an 1120 / 1120-S / 1065 / 1041 return's data from source documents using only verified field-dictionary mappings; dry run, operator approval, read-back, pre-filing check. Stops when no mapping exists.",
+                purpose = "Prepare an 1120 / 1120-S / 1065 / 1041 return as a proposal from source documents (verified mappings only); the operator approves it, then commit.",
                 args = new[] { "returnType: string = \"1120\" (1120 | 1120S | 1065 | 1041)", "sourceLabel?: string" },
             },
         };

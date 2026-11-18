@@ -175,6 +175,10 @@ namespace LacertMCP.Server.Tools
                         });
                 }
 
+                // LACERTE_REQUIRE_APPROVAL=1 — refuse the whole real batch up
+                // front (9023), before the preview-token check; dry runs pass.
+                _session.ThrowIfApprovalRequired("DetailWriteBulk", dryRun);
+
                 entries ??= Array.Empty<BulkDetailEntry>();
 
                 // -----------------------------------------------------------
