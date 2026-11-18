@@ -1,7 +1,7 @@
 ---
 name: lacerte-mcp
 description: |
-  Use this skill when interacting with Intuit Lacerte tax software via the Lacerte MCP server's tools (any tool name starting with `lacerte_`). Triggers on operator phrases involving tax-pro workflows: reading client info, updating DBF fields, creating clients, bulk field updates, reviewing EF (e-file) status, year-over-year comparisons, firm-wide dashboards, pre-filing readiness checks, name-to-ClientNumber resolution, detail-row writes, or any reference to TY (tax year), DBF tables 1-7, Lacerte modules (Individual/Corporate/Partnership/SCorp/Fiduciary/Exempt/Estate/Gift/Benefit), TAPIStatus codes, the LacerteSDK_Access COM API, or the LacerteDSII ODBC driver. Also activates when the operator references CLI commands like `lacerte-mcp register` / `lacerte-mcp login` / `lacerte-mcp doctor` / `lacerte-mcp tools`, environment variables like `LACERTE_LIVE` / `LACERTE_SIMULATION` / `LACERTE_DATA_PATH` / `LACERTE_DATA_ROOT` / `LACERTE_DEBUG_WIRE`, or the seeded simulation ClientIDs SMIT / JONE / REJE / BROW / PEND / ACME / WIDG / PART. Do NOT use for unrelated tax software (Drake, UltraTax, ProConnect, TurboTax, QuickBooks), generic tax-prep advice, or anything that doesn't go through a `lacerte_*` tool call.
+  Use this skill when interacting with Intuit Lacerte tax software via the Lacerte MCP server's tools (any tool name starting with `lacerte_`). Triggers on operator phrases involving tax-pro workflows: reading client info, updating DBF fields, creating clients, bulk field updates, reviewing EF (e-file) status, year-over-year comparisons, firm-wide dashboards, pre-filing readiness checks, name-to-ClientNumber resolution, detail-row writes, preparing or entering a return (1040, 1120, 1120-S, 1065, 1041) from source documents such as organizers, trial balances, W-2s, 1099s or K-1s, proposals awaiting the operator's approval, or any reference to TY (tax year), DBF tables 1-7, Lacerte modules (Individual/Corporate/Partnership/SCorp/Fiduciary/Exempt/Estate/Gift/Benefit), TAPIStatus codes, the LacerteSDK_Access COM API, or the LacerteDSII ODBC driver. Also activates when the operator references CLI commands like `lacerte-mcp register` / `lacerte-mcp login` / `lacerte-mcp doctor` / `lacerte-mcp tools` / `lacerte-mcp proposal` / `lacerte-mcp approval-pin` / `lacerte-mcp map-diff`, environment variables like `LACERTE_LIVE` / `LACERTE_SIMULATION` / `LACERTE_DATA_PATH` / `LACERTE_DATA_ROOT` / `LACERTE_DEBUG_WIRE` / `LACERTE_REQUIRE_APPROVAL` / `LACERTE_LIVE_DETAIL_WRITES`, or the seeded simulation ClientIDs SMIT / JONE / REJE / BROW / PEND / ACME / WIDG / PART. Do NOT use for unrelated tax software (Drake, UltraTax, ProConnect, TurboTax, QuickBooks), generic tax-prep advice, or anything that doesn't go through a `lacerte_*` tool call.
 ---
 
 # Lacerte MCP — operator skill
@@ -19,6 +19,8 @@ Trigger on any of these intents:
 - "update field C1_42" / "change the email" / "write to DATA1" / "field write"
 - "bulk update / mass mail merge / sweep N clients" / "update zip for every NY client"
 - "find every client where ..." / "all clients missing an email" / filtered roster queries
+- "prepare / enter this return from the organizer / trial balance / W-2s / K-1s" / "put these numbers into Lacerte" → do it as a **proposal** (see Proposals)
+- "what proposals are waiting" / "commit the approved proposal" / "it was returned for changes"
 - "create a new client" / "onboard a new return" / "import a CSV / tax organizer" / "bulk-create clients from a roster"
 - "review e-file status" / "what got rejected" / "any returns pending?"
 - "pre-filing check" / "is this return ready to file"
@@ -178,10 +180,10 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 
 ### Write (5 tools)
 
-- `lacerte_field_write(table: int, clientNumber: string, field: string, value: any?, subClientId?: int, stateAbbrev?: string, dryRun: bool = false, idempotencyKey?: string) → { statusCode, statusName, ... }` — single field write. Tables 1-5 writable; 6/7 read-only (`ExposedForRead`). Pre-TY21 uses `WriteToDBFDatabase`; TY21+ routes through `UpdateTaxReturn` (the session manager picks).
+- `lacerte_field_write(table: int, clientNumber: string, field: string, value: any?, subClientId?: int, stateAbbrev?: string, dryRun: bool = false, idempotencyKey?: string) → { statusCode, statusName, ... }` — single field write. Tables 1-5 writable; 6/7 read-only (`ExposedForRead`). Live TY21+ writes go through `UpdateTaxReturn`; live pre-TY21 writes are refused with `9202`. Every real write is read back from Lacerte: report it as done ONLY when `verified: true`. A mismatch is `9022 WriteNotVerified` (context has the value actually stored); `verified: null` means no read-back was possible, so check with `lacerte_table_read`. With `LACERTE_REQUIRE_APPROVAL=1` real writes return `9023` (dry runs still work); use a proposal.
 - `lacerte_update_return(...same as lacerte_field_write...)` — alias for TY21+ `UpdateTaxReturn` developer-doc parity. Behavior identical to `lacerte_field_write`. Prefer `lacerte_field_write` in new code.
 - `lacerte_field_write_bulk(table: int, entries: [{ clientNumber, field, value, subClientId?, stateAbbrev? }], taxYear?: int, readOnly?: bool, dryRun: bool = false, continueOnError: bool = false, idempotencyKey?: string, expectedCount?: int) → { table, dryRun, continueOnError, totalCount, successCount, errorCount, skippedCount, firstFailureIndex, firstFailure, recoveryHint, perItem }` — N writes per call. Capped at 500 entries (override `LACERTE_BULK_WRITE_MAX`). Per-row key shape: `{prefix}-{index}-{clientNumber}-{field}` (POSITIONAL — a retry must resubmit the same `entries[]` in the same order; repeated client+field pairs never alias). Pre-flight throws `9020 BulkBatchTooLarge` / `9021 BulkBatchCountMismatch` / `9016 ContextMismatch`. Honors MCP cancellation between rows (`stoppedEarly` + `processedCount`).
-- `lacerte_detail_write(clientNumber: string, series: string, code: string, amount: double?, description: string, prefix: string = "", suffix: string = "", stateAbbrev: string = "", cityAbbr: string = "", source: string = "", tsj: string = "", importSrc: string = "", replaceIndex?: int, dryRun: bool = false, idempotencyKey?: string) → { statusCode, statusName, clientNumber, replaceIndex, dryRun }` — append/replace a detail row. SDK column rules: `source` ∈ blank/`Nonsource`/`Source` (not a form tag), `importSrc` read-only (blank), `cityAbbr` ≤ 3, `prefix`/`suffix` whole numbers, `amount` within ±999,999,999 (≤ 12 decimals). Live detail writes are not wired yet (9202) — the SDK writes detail files via its ODBC driver only. Mandatory client-side validation (Series `^\d+$`, Code `^-?\d+$`, stateAbbrev `^[A-Z]{2}$` if non-empty, TSJ ∈ {Taxpayer, Spouse, Joint, ""} with T/S/J aliases, stored as the SDK word). The SDK does NOT validate row shape — without this tool's gates a malformed row silently corrupts the return. `replaceIndex` in live mode throws `9019 LiveReplaceIndexUnsupported`.
+- `lacerte_detail_write(clientNumber: string, series: string, code: string, amount: double?, description: string, prefix: string = "", suffix: string = "", stateAbbrev: string = "", cityAbbr: string = "", source: string = "", tsj: string = "", importSrc: string = "", replaceIndex?: int, dryRun: bool = false, idempotencyKey?: string) → { statusCode, statusName, clientNumber, replaceIndex, dryRun, verified, verificationNote, snapshot }` — append/replace a detail row. SDK column rules: `source` ∈ blank/`Nonsource`/`Source` (not a form tag), `importSrc` read-only (blank), `cityAbbr` ≤ 3, `prefix`/`suffix` whole numbers, `amount` within ±999,999,999 (≤ 12 decimals). Live detail writes go through the Lacerte ODBC driver in a separate worker process and are OFF unless the server runs with `LACERTE_LIVE_DETAIL_WRITES=1` (otherwise `9202`); even then only Series/Codes in the verified field dictionary are accepted (else `9012`). Before the first live write to a client its detail rows are backed up (`snapshot`); after each write the rows are read back — `verified: true` only when exactly one new matching row is there (mismatch → `9022`). The operator can undo the MCP's own live detail writes with `lacerte-mcp detail-restore`. Mandatory client-side validation (Series `^\d+$`, Code `^-?\d+$`, stateAbbrev `^[A-Z]{2}$` if non-empty, TSJ ∈ {Taxpayer, Spouse, Joint, ""} with T/S/J aliases, stored as the SDK word). The SDK does NOT validate row shape — without this tool's gates a malformed row silently corrupts the return. `replaceIndex` in live mode throws `9019 LiveReplaceIndexUnsupported`.
 - `lacerte_detail_write_bulk(entries: [{ clientNumber, series, code, amount, description, prefix?, suffix?, stateAbbrev?, cityAbbr?, source?, tsj?, importSrc?, replaceIndex? }], dryRun: bool = false, continueOnError: bool = false, idempotencyKey?: string, previewToken?: string) → { requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[], previewToken?, previewExpiresUtc?, previewNote? }` — REQUIRED FLOW: call with `dryRun: true` first (no idempotency key), show the operator, then call again with the SAME entries, `dryRun: false` and the returned `previewToken` (missing/expired/mismatched → 9017, nothing written). Bulk-append detail rows across one or many clients (the intake tool for seeding many W-2/1099/dependent rows). Runs the same mandatory per-row validation as `lacerte_detail_write` BEFORE the session call. Shares the 500-entry cap with `lacerte_field_write_bulk` (`LACERTE_BULK_WRITE_MAX`). Per-row key shape: `{prefix}-{index}-{clientNumber}-{series}-{code}` (POSITIONAL). Detail files have no primary key — ALWAYS pass an `idempotencyKey` prefix or a transport retry silently doubles rows.
 
 ### Create (2 tools)
@@ -212,7 +214,7 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 ### Accelerators (5 tools)
 
 - `lacerte_firm_dashboard(yearFilter?: int, modulesFilter?: string, sinceUtc?: string) → { generatedAt, root, sinceUtc, summary: { totalClients, totalTuplesScanned, totalEfRows, statusHistogram }, byContext: [{ taxYear, module, moduleName, dataPath, clientCount, efRowCount, statusHistogram, latestStatusDate, error? }] }` — Monday-morning firm snapshot. Fans across every (taxYear, module) under `LACERTE_DATA_ROOT`. Saves ~30 round-trips. Pure read: scans through explicit per-call contexts (R6-D2), never reads or modifies the active `set_context`, safe to run concurrently with any other tool.
-- `lacerte_pre_filing_check(clientNumber: string, severity: "normal" | "strict" = "normal") → { clientNumber, module, readiness: "ready"|"blocked"|"warn"|"unsupported-module", passed, blockers, warnings, checkedRules, skippedRules }` — pre-flight gate covering modules I (1040), P (1065), C (1120), S (1120S). Module-agnostic rules: `required-name`, `required-email`, `forms-at-least-one`, main-form presence (`forms-has-1040`/`-1065`/`-1120`/`-1120s`), `status-rows-present`. Individual-only: `required-last-name`, `dependents-have-description` — listed in `skippedRules` on P/C/S, never silently passed. Partnership adds `partners-present`. F/R/T/N/B return `readiness="unsupported-module"`. Unknown clientNumber returns `{ found: false, hint }` (success envelope, same shape as `lacerte_client_read`). `severity="strict"` promotes every warning to a blocker.
+- `lacerte_pre_filing_check(clientNumber: string, severity: "normal" | "strict" = "normal") → { clientNumber, module, readiness: "ready"|"blocked"|"warn"|"unsupported-module", passed, blockers, warnings, checkedRules, skippedRules }` — pre-flight gate covering modules I (1040), P (1065), C (1120), S (1120S), F (1041). Module-agnostic rules: `required-name`, `required-email`, `forms-at-least-one`, main-form presence (`forms-has-1040`/`-1065`/`-1120`/`-1120s`/`-1041`), `status-rows-present`. Individual-only: `required-last-name`, `dependents-have-description` — listed in `skippedRules` on P/C/S/F, never silently passed. Owner rosters: Partnership `partners-present` (0 = blocker, 1 = warning), S-Corp `shareholders-present` (0 = blocker), Fiduciary `beneficiaries-present` (0 = warning only). F/R/T/N/B return `readiness="unsupported-module"`. Unknown clientNumber returns `{ found: false, hint }` (success envelope, same shape as `lacerte_client_read`). `severity="strict"` promotes every warning to a blocker.
 - `lacerte_year_over_year(clientNumber: string, fromYear: int, toYear: int, scope: "demographics"|"detailTotals"|"all" = "all", seriesIds?: int[]) → { clientNumber, fromYear, toYear, scope, seriesIds, fromDataPath, toDataPath, foundInFromYear, foundInToYear, demographicsDiff, detailTotalsDiff, errors }` — diff a client across two tax years. Path rewrites `{YY}Tax` segment in active context's dataPath. `(toYear - fromYear) ≤ 5`. Default seriesIds: `[11, 12, 13, 20]` (Wages/Interest/Dividends/Income). ALWAYS check `foundInFromYear`/`foundInToYear` — a typo'd clientNumber returns both false, NOT a "no changes" diff. Error rows use the canonical `taxYear` key.
 - `lacerte_diff_clients(client1Number: string, client2Number: string, includeSubclients: bool = true, includeStates: bool = true, includeDetail: bool = false, ignoreFields?: string[]) → { client1Number, client2Number, summary, dataOne: { fields: [{ field, a, b }] }, subclients, states, detail, ignoredFields }` — structured field-by-field diff. Same-context only. Returns ONLY differing rows. Built-in ignore: `clientNumber`. Detail rows are compared across all 11 `DetailRow` fields (TSJ / Source / Prefix / Suffix / CityAbbr / ImportSrc included); rows lacking a diff key are counted in `rowsWithoutKey` instead of silently vanishing.
 - `lacerte_field_history(clientNumber: string, field: string, sinceUtc?: string, limit: int = 100) → { clientNumber, field, rows: [{ ts, cid, value, dryRun, statusCode, succeeded, durationMs }], total, truncated, logPath, hint?, redactionNote }` — audit log for one (clientNumber, field) pair sourced from WireLog JSONL. Requires `LACERTE_DEBUG_WIRE=1`. Each row carries `succeeded: true/false` — a rejected write is distinguishable from a landed one. `limit` clamped to 1000; when total exceeds limit the NEWEST rows are kept (display stays oldest-first). `value` is `"***"` for every row by design (disk-scope redaction is unconditional). Default window: 14 days.
@@ -247,10 +249,23 @@ Registered via `WithPromptsFromAssembly()`. When the MCP host exposes a Prompts 
 | `lacerte_review_ef_status` | Triage e-file status: pull EFiling+EFStatus join, group by Status, surface Rejected first, flag stale Pending/Transmitted (>72h). TY19+ only.                | `taxYear?: int`                                                   |
 | `lacerte_field_write_bulk` | Bulk field write across many clients with mandatory dry-run preview (first N), idempotency keys, stop-on-first-error.                                          | `table: int = 1`, `field: string` (required), `previewCount: int = 3` |
 | `lacerte_csv_intake`     | Bulk-onboard clients from a CSV / Tax-Organizer export with one-shot column→field mapping declaration, per-row idempotency keys, stop-on-first-error.            | `sourceLabel?: string`, `rowCount?: int`                          |
+| `lacerte_entity_return_entry` | Enter an 1120 / 1120-S / 1065 / 1041 return from source documents as a PROPOSAL: verified dictionary mappings only, every line cited and dry-run validated, manual items + questions, operator approves, commit with read-back, then pre-filing check. Stops instead of guessing when a mapping is missing. | `returnType: string = "1120"` (1120/1120S/1065/1041 or C/S/P/F), `sourceLabel?: string` |
 
 ---
 
 ## Common multi-step recipes
+
+### Prepare a return from source documents (the default for return data)
+
+1. `lacerte_session_status`, then `lacerte_set_context` for the client's year and module; resolve the client with `lacerte_client_find`.
+2. `lacerte_field_dictionary(module, search)` for each concept on the documents. Use ONLY listed mappings; anything unmapped becomes a manual item. Never guess a field or Series/Code.
+3. `lacerte_proposal_create(clientNumber, title)` → `lacerte_proposal_add_lines` (every line with `dictionaryId`, `source`, `confidence`) → `lacerte_proposal_add_manual_items` / `lacerte_proposal_add_questions`.
+4. Fix or remove any line with `preview.ok=false`, then `lacerte_proposal_submit`. Tell the operator the proposal id, the target return (`state.entriesGoInto`), and where to review it. Stop there: the operator approves with their PIN.
+5. When the operator says it's approved: `lacerte_proposal_get` → if `state.readyToCommit`, `lacerte_proposal_commit` → report per-line results (only `verified` lines are done) → `lacerte_pre_filing_check`.
+
+For entity returns, the `lacerte_entity_return_entry` prompt walks through the same steps.
+
+The direct-write recipes below (`lacerte_field_write`, the bulk tools) are for client-level housekeeping (addresses, emails). With `LACERTE_REQUIRE_APPROVAL=1` they return `9023` for real writes; switch to a proposal, never look for a way around it.
 
 ### Read a client by name
 
@@ -300,8 +315,8 @@ Invoke the `lacerte_client_intake` prompt, or manually:
 
 ### Discover a field code from an intent
 
-1. `lacerte_field_access_map(module, table, taxYear)`.
-2. Scan response by access value (`ReadWrite`) and field code (`C{t}_{n}`).
+1. `lacerte_field_dictionary(module, search: "gross receipts")` — the verified concept → field / Series-Code map. If `note` says there are no verified mappings, stop and tell the operator; mappings are recorded on the Lacerte PC with `lacerte-mcp map-diff`.
+2. `lacerte_field_access_map(module, table, taxYear)` to confirm a DATA1-5 field is `ReadWrite`. The access map says whether a field is writable, not what it means; never pick a field from it by guessing.
 
 ### Get help inline
 
@@ -408,7 +423,7 @@ Use when the operator says "just looking" or "audit mode" or you're driving a re
 | 9007 | LoginExpired                  | 24h ticket lapsed (proactive)                                    | Operator: run `lacerte-mcp login`.                                       |
 | 9008 | DetailWriteInvalid           | Client-side validation failed (Series/Code/Amount shape)         | Read per-field `reason`; fix and retry.                                  |
 | 9009 | ContextNotSet                | No `lacerte_set_context` yet                                     | Call `lacerte_list_datapaths` → `lacerte_set_context`.                   |
-| 9012 | UnknownFieldAccess           | Field absent from access map shard                               | `lacerte_field_access_map` to confirm what IS writable. Operator: `lacerte-mcp field-access set` + `lacerte_reload_schema` (the dumper's live probe isn't implemented). |
+| 9012 | UnknownFieldAccess           | Field absent from access map shard; or (live detail write) Series/Code not in the verified field dictionary | Don't guess another code. `lacerte_field_access_map` / `lacerte_field_dictionary` to see what IS mapped; otherwise make it a proposal manual item. Operator: `lacerte-mcp field-access set` or `map-diff`, then `lacerte_reload_schema`. |
 | 9013 | InvalidDataPath              | `dataPath` rejected by `PathValidation`                          | Pass absolute local path; OR set `LACERTE_ALLOW_UNC=1`.                  |
 | 9014 | TaxYearTooNew                | `taxYear > DateTime.Today.Year + 1`                              | Pass current/prior year.                                                  |
 | 9015 | FieldWriteInvalid            | `value` not a scalar (array/object rejected)                     | Pass string/number/bool/null. Use `lacerte_detail_write` for rows.       |
@@ -417,11 +432,14 @@ Use when the operator says "just looking" or "audit mode" or you're driving a re
 | 9019 | LiveReplaceIndexUnsupported  | `lacerte_detail_write` `replaceIndex` in LIVE mode               | Append the corrected row; delete the stale via future delete tool.        |
 | 9020 | BulkBatchTooLarge            | `entries.Length` over the cap (field/detail bulk: 500 via `LACERTE_BULK_WRITE_MAX`; create bulk: 100 via `LACERTE_BULK_CREATE_MAX`) | Chunk into ≤cap batches with a shared `idempotencyKey` prefix.            |
 | 9021 | BulkBatchCountMismatch       | `expectedCount != entries.Length`                                | Fix one side; do NOT drop the assertion blindly.                          |
+| 9022 | WriteNotVerified             | Write reported Success but the read-back differs or the row wasn't found | Do NOT report it as done or retry blindly. Show the operator `context.written` vs `context.readBack`; they check the return in Lacerte. |
+| 9023 | ApprovalRequired             | `LACERTE_REQUIRE_APPROVAL=1` and a direct write tool tried a real write | Put the change in a proposal for the operator to approve. Dry runs still work. |
+| 9024 | ProposalConflict             | Proposal step doesn't fit its state: wrong status, stale version, missing/outdated approval, target client gone or renamed, PIN check failed on the operator's side | Read `lacerte_proposal_get` → `state.blockers` and `context.reason`; tell the operator. Never try to approve or supply a PIN. |
 | 9101 | ReAuthRequired                | Reactive NotSignedIn (203) wrapper                               | Operator: `lacerte-mcp login`.                                            |
 | 9102 | IdempotencyConflict          | Same key + different payload                                     | Pick a fresh key, OR replay the original payload.                         |
 | 9103 | InvalidAppId                  | AppID failed bridge-boundary shape check                         | Operator: `lacerte-mcp unregister` + `register` OR fix `LACERTE_APPID`.   |
 | 9201 | BridgeUnavailable            | COM bridge didn't start                                          | Operator: confirm Windows + SDK; set `LACERTE_DEBUG_WIRE=1`; check log.   |
-| 9202 | SimulationOnly                | Op available in simulation only — live path not wired (pre-TY21 writes; detail-row writes) | Run in sim, or do the step in Lacerte; see `context.reason`.          |
+| 9202 | SimulationOnly                | Not available live: pre-TY21 writes, or detail-row writes while `LACERTE_LIVE_DETAIL_WRITES` is off | Do the step in Lacerte (or a proposal manual item); see `context.reason`. |
 | 9203 | InternalServerError          | Unexpected exception in the server                               | Capture `cid` + `context.exceptionType`; set `LACERTE_DEBUG_WIRE=1`; reproduce. |
 
 For SDK codes, also check `lacerte_return_codes` for the full enum.
@@ -444,25 +462,30 @@ For SDK codes, also check `lacerte_return_codes` for the full enum.
 - Don't expect a cached replay of a FAILED write — only Success results are cached. Retrying a failure with the same key re-executes (that's the point: fix the cause, e.g. close the return in the Lacerte UI, then retry).
 - Don't restart the MCP server to pick up new FieldAccessMap shards — call `lacerte_reload_schema` instead. Restarting invalidates the Intuit 24h auth ticket.
 - Don't try to e-file from this MCP — read-only via `lacerte_ef_status`. Submission/correction is done in the Lacerte UI.
+- Don't enter return data (income, deductions, K-1 amounts) with the direct write tools — prepare a proposal. Don't route around `9023` / `9024`, and never ask for, guess or supply the operator's approval PIN.
+- Don't report a write as done unless the response says `verified: true`. `9022` means the return may not hold what you wrote.
+- Don't guess field or detail codes when `lacerte_field_dictionary` has no verified mapping — record it as a manual item.
+- Don't retry or re-add an Uncertain proposal line — the operator checks Lacerte and resolves it.
 
 ---
 
 ## When in doubt
 
 - `lacerte_help(topic?)` — README-equivalent text inline.
-- `lacerte_return_codes()` — full enum of all 28+5+13 codes.
+- `lacerte_return_codes()` — the full code catalog (SDK + synthetic).
 - `lacerte_field_access_map(module, table, taxYear)` — what's writable.
 - `lacerte_recent_log(cid)` — recent log lines for a correlation ID (always-on ring; doesn't need `LACERTE_DEBUG_WIRE`).
 - `lacerte_session_status()` — current mode / registration / context / wire-log state, with `nextSteps` bootstrap guidance.
 - `lacerte_request_stats()` — process-lifetime aggregate counters when "is the server healthy?".
 - `lacerte_prompts()` — the 5 canonical workflow recipes.
+- `lacerte_proposal_get(proposalId)` — `state.blockers` explains why a proposal can't move.
 - The skill body sketch (this file) is the single source of truth for conventions; if you find drift, prefer this skill's guidance.
 
 ---
 
 ## Versioning + back-compat note
 
-This is v0.1.x pre-release. Wire conventions canonicalized in P16/P17/P18 (1678 tests passing, 0 failures as of the round-7 deep review). Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are kept until v0.2 but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
+Current release: v0.2.6 (2,312 tests passing). Simulation is fully tested; live mode is wired but still being verified on the Lacerte PC (REGRESSION_CHECKLIST). Wire conventions canonicalized in P16/P17/P18. Legacy domain aliases for collection keys (`clients` / `forms` / `statuses` / `subclients` / `states` / `stateSubclients` / `datapaths` / `modules` / `efStatuses` / `codes`) are still emitted but `rows` is the durable name — prefer it. Paginated envelopes also emit `returnedCount` (actual page size).
 
 Registration: `lacerte-mcp register` and `lacerte-mcp login` run the REAL Intuit consent + sign-in ceremony (`Bridge/Registration.cs`, wired in R6-05). Exit 0 = `AccessGranted` (or off-Windows `[skipped]` mint-only); exit 1 = denied/failed ceremony; exit 2 = PARTIAL (Lacerte SDK COM surface unavailable — AppID persisted, run `lacerte-mcp doctor`). Exit 3 is RETIRED for these verbs. The end-to-end ceremony against a real Intuit dialog is still pending verification on a Windows + Lacerte box.
 

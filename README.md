@@ -2,7 +2,7 @@
 
 A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as tools an LLM can call. Wraps the Lacerte SDK (`LacerteSDK_Access` COM/.NET + `LacerteDSII` ODBC) over JSON-RPC/stdio.
 
-**Status:** v0.1.0 — simulation fully tested; **live mode is wired end-to-end but not yet verified on a real Lacerte install** (see HANDOFF.md). Live reads go through the Lacerte ODBC driver; every field write is read back and reported `verified` only when the stored value matches (else 9022 WriteNotVerified).
+**Status:** v0.2.6 — simulation fully tested; **live mode is wired end-to-end but not yet verified on a real Lacerte install** (see HANDOFF.md). Live reads go through the Lacerte ODBC driver; every field write is read back and reported `verified` only when the stored value matches (else 9022 WriteNotVerified).
 
 ## What this is
 
