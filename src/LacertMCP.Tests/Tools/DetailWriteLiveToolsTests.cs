@@ -97,7 +97,7 @@ namespace LacertMCP.Tests.Tools
                 snap ??= s;
                 Assert.Equal(snap, s); // one backup per client
             }
-            Assert.Single(Directory.GetFiles(_dir));
+            Assert.Single(Directory.GetFiles(_dir, "*.json"));
 
             mgr.LiveDetailWritesEnabled = false;
             // Disabled: the dry run refuses where the commit would (9202) and

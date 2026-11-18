@@ -141,7 +141,7 @@ namespace LacertMCP.Tests.Session
 
             Assert.Equal(a.Snapshot, b.Snapshot);
             Assert.NotEqual(a.Snapshot, c.Snapshot);
-            var files = Directory.GetFiles(_dir).Select(Path.GetFileName).OrderBy(f => f).ToArray();
+            var files = Directory.GetFiles(_dir, "*.json").Select(Path.GetFileName).OrderBy(f => f).ToArray();
             Assert.Equal(2, files.Length);
             Assert.Contains(files, f => Regex.IsMatch(f!, @"^\d{8}-\d{6}-I24-SMIT\.json$"));
             Assert.Contains(files, f => Regex.IsMatch(f!, @"^\d{8}-\d{6}-I24-JONE\.json$"));
@@ -193,7 +193,7 @@ namespace LacertMCP.Tests.Session
             var outcome = await mgr.WriteDetailWithOutcome("SMIT", W2());
             Assert.True(outcome.Verified);
             Assert.Single(runner.Calls);
-            Assert.Single(Directory.GetFiles(_dir)); // the (empty) backup was still taken
+            Assert.Single(Directory.GetFiles(_dir, "*.json")); // the (empty) backup was still taken (plus its journal)
         }
 
         [Fact]

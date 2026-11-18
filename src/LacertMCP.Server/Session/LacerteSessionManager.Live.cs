@@ -490,7 +490,7 @@ namespace LacertMCP.Server.Session
         internal static readonly TimeSpan DefaultDetailWriteTimeout = TimeSpan.FromSeconds(60);
 
         /// <summary>Env override for the detail-backup directory.</summary>
-        internal const string DetailSnapshotDirEnvVar = "LACERTE_DETAIL_SNAPSHOT_DIR";
+        public const string DetailSnapshotDirEnvVar = "LACERTE_DETAIL_SNAPSHOT_DIR";
 
         /// <summary>FP-2 — live detail writes are refused (9202) unless this is true.</summary>
         internal bool LiveDetailWritesEnabled { get; set; }
@@ -520,7 +520,7 @@ namespace LacertMCP.Server.Session
         /// <c>%APPDATA%\lacerte-mcp\detail-snapshots</c>; null when neither is
         /// available (live detail writes are then refused).
         /// </summary>
-        internal static string? ResolveDetailSnapshotDirectory(IDictionary<string, string?> env)
+        public static string? ResolveDetailSnapshotDirectory(IDictionary<string, string?> env)
         {
             var explicitDir = TryGet(env, DetailSnapshotDirEnvVar);
             if (!string.IsNullOrWhiteSpace(explicitDir))
@@ -628,7 +628,8 @@ namespace LacertMCP.Server.Session
         /// Synchronous on purpose: it runs under the per-client write lock.
         /// </summary>
         private DetailWriteOutcome LiveCommitDetailRow(
-            SessionContext ctx, string clientNumber, DetailRow row, System.Threading.CancellationToken cancellationToken)
+            SessionContext ctx, string clientNumber, DetailRow row, System.Threading.CancellationToken cancellationToken,
+            string? idempotencyKey = null)
         {
             var key = LiveClientKey(clientNumber);
             // Validate + build before touching anything.
@@ -684,7 +685,7 @@ namespace LacertMCP.Server.Session
                 }
                 if (run.Status != DetailWriteRunStatus.Ok)
                 {
-                    throw DetailWorkerFailure(ctx, key, row, run, snapshot, matchingBefore);
+                    throw DetailWorkerFailure(ctx, key, row, run, snapshot, matchingBefore, sql, idempotencyKey);
                 }
 
                 // 4. Read-back over a fresh connection.
@@ -696,19 +697,30 @@ namespace LacertMCP.Server.Session
                 catch (Exception ex) when (!(ex is OperationCanceledException))
                 {
                     var why = ex is LacerteSDKError sdk ? sdk.StatusName : ex.GetType().Name;
+                    var readBackNote = "Not verified: the INSERT reported success but reading the detail rows back failed (" + why
+                        + "). Check with lacerte_detail_read before writing this row again.";
+                    var jn = AppendDetailJournal(ctx, key, row, sql, snapshot, idempotencyKey,
+                        DetailWriteJournal.OutcomeUnverified, "read-back failed (" + why + ")");
                     return new DetailWriteOutcome(StatusCodes.Success, snapshot, null,
-                        "Not verified: the INSERT reported success but reading the detail rows back failed (" + why
-                        + "). Check with lacerte_detail_read before writing this row again.");
+                        jn == null ? readBackNote : readBackNote + " " + jn);
                 }
 
                 int matchingAfter = DetailRowWriter.CountMatching(after, row);
                 if (matchingAfter - matchingBefore == 1)
                 {
-                    return new DetailWriteOutcome(StatusCodes.Success, snapshot, true, null);
+                    // 5. Journal (restore). A failure here never fails the write.
+                    var jn = AppendDetailJournal(ctx, key, row, sql, snapshot, idempotencyKey,
+                        DetailWriteJournal.OutcomeVerified, null);
+                    return new DetailWriteOutcome(StatusCodes.Success, snapshot, true, jn);
                 }
 
-                throw new LacerteSDKError(SyntheticStatusCodes.WriteNotVerified,
-                    new Dictionary<string, object?>
+                // The worker reported the INSERT ran: journal it as unverified
+                // so a restore can find it if it is in the file.
+                var journalNote = AppendDetailJournal(ctx, key, row, sql, snapshot, idempotencyKey,
+                    DetailWriteJournal.OutcomeUnverified,
+                    "read-back: matching rows " + matchingBefore.ToString(CultureInfo.InvariantCulture)
+                    + " -> " + matchingAfter.ToString(CultureInfo.InvariantCulture));
+                var notVerified = new Dictionary<string, object?>
                     {
                         ["op"] = "WriteDetail",
                         ["clientNumber"] = key,
@@ -724,7 +736,9 @@ namespace LacertMCP.Server.Session
                             ? "The INSERT reported success, but no new row equal to the written row was read back (the driver may have changed or truncated a value, e.g. a Description longer than the field allows). The detail file may now hold a row that differs from what was requested."
                             : "The number of rows equal to the written row changed by " + (matchingAfter - matchingBefore).ToString(CultureInfo.InvariantCulture)
                               + " instead of 1 (another writer — Lacerte's UI or a second server — may have changed this client's detail rows at the same time).",
-                    });
+                    };
+                if (journalNote != null) notVerified["journal"] = journalNote;
+                throw new LacerteSDKError(SyntheticStatusCodes.WriteNotVerified, notVerified);
             }
         }
 
@@ -735,7 +749,8 @@ namespace LacertMCP.Server.Session
         /// operator whether the row is there, so nobody retries blindly.
         /// </summary>
         private LacerteSDKError DetailWorkerFailure(
-            SessionContext ctx, string key, DetailRow row, DetailWriteRunResult run, string snapshot, int matchingBefore)
+            SessionContext ctx, string key, DetailRow row, DetailWriteRunResult run, string snapshot, int matchingBefore,
+            string? sql = null, string? idempotencyKey = null)
         {
             string rowWritten;
             if (run.Status == DetailWriteRunStatus.NotStarted)
@@ -775,6 +790,14 @@ namespace LacertMCP.Server.Session
                 ["snapshot"] = snapshot,
             };
             if (run.ExitCode.HasValue) c["workerExitCode"] = run.ExitCode.Value;
+            if (rowWritten == "yes" && sql != null)
+            {
+                // The row is in the file despite the error: journal it so a
+                // restore can remove it.
+                var jn = AppendDetailJournal(ctx, key, row, sql, snapshot, idempotencyKey,
+                    DetailWriteJournal.OutcomeLandedAfterError, "worker " + run.Status.ToString());
+                if (jn != null) c["journal"] = jn;
+            }
 
             switch (run.Status)
             {
@@ -830,7 +853,7 @@ namespace LacertMCP.Server.Session
             var now = DateTimeOffset.Now;
             var baseName = now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + ctx.Module
                 + (ctx.Year % 100).ToString("00", CultureInfo.InvariantCulture) + "-" + key;
-            var payload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            byte[] PayloadFor(string fileName) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
             {
                 kind = "lacerte-mcp detail-row backup",
                 version = 1,
@@ -842,6 +865,9 @@ namespace LacertMCP.Server.Session
                 table = "[" + key + "-Detail]",
                 rowCount = rows.Count,
                 note = "The client's detail rows as read just before the first lacerte_detail_write to this client by this server process. Rows written afterwards are not in this file.",
+                // Added after version 1 shipped; readers that don't know it ignore it.
+                journal = DetailWriteJournal.JournalFileNameFor(fileName),
+                journalNote = "Every row this server process INSERTED for this client is appended to the journal next to this file; `lacerte-mcp detail-restore` uses both to undo those rows.",
                 rows,
             }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
 
@@ -849,7 +875,7 @@ namespace LacertMCP.Server.Session
             try
             {
                 System.IO.Directory.CreateDirectory(dir!);
-                path = WriteNewFile(dir!, baseName, payload);
+                path = WriteNewFile(dir!, baseName, PayloadFor);
             }
             catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException
                                        || ex is ArgumentException || ex is NotSupportedException
@@ -861,12 +887,13 @@ namespace LacertMCP.Server.Session
             return path;
         }
 
-        private static string WriteNewFile(string dir, string baseName, byte[] payload)
+        private static string WriteNewFile(string dir, string baseName, Func<string, byte[]> payloadFor)
         {
             for (int n = 1; ; n++)
             {
                 var name = n == 1 ? baseName + ".json" : baseName + "-" + n.ToString(CultureInfo.InvariantCulture) + ".json";
                 var path = System.IO.Path.Combine(dir, name);
+                var payload = payloadFor(name);
                 try
                 {
                     using (var fs = new System.IO.FileStream(path, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None))
@@ -892,6 +919,57 @@ namespace LacertMCP.Server.Session
                     ["snapshotDirectory"] = dir,
                     ["reason"] = "Refused before writing: the backup of this client's detail rows could not be saved (" + why + "). Nothing was written. Fix the backup directory and retry.",
                 });
+
+        /// <summary>Test seam: appends one journal line (path, UTF-8 line incl. newline). Production: <see cref="DetailWriteJournal.AppendLine"/>.</summary>
+        internal Action<string, byte[]> DetailJournalAppender { get; set; } = DetailWriteJournal.AppendLine;
+
+        /// <summary>Test seam: where a journal failure is logged. Production: stderr (stdout is the MCP channel).</summary>
+        internal Action<string> DetailJournalLog { get; set; } = msg =>
+        {
+            try { Console.Error.WriteLine(msg); } catch (Exception) { /* no stderr */ }
+        };
+
+        /// <summary>
+        /// Appends one line to the restore journal next to <paramref name="snapshot"/>
+        /// for a row the worker INSERTED (runs under the per-client lock). Never
+        /// throws: a journal failure must not turn a written row into a failed
+        /// write. Returns null on success, else a note for the caller to surface.
+        /// </summary>
+        private string? AppendDetailJournal(SessionContext ctx, string key, DetailRow row, string sql, string snapshot,
+            string? idempotencyKey, string outcome, string? note)
+        {
+            string journalPath = snapshot;
+            try
+            {
+                journalPath = DetailWriteJournal.JournalPathFor(snapshot);
+                var entry = new DetailJournalEntry
+                {
+                    EntryId = Guid.NewGuid().ToString("N"),
+                    At = DateTimeOffset.Now.ToString("o", CultureInfo.InvariantCulture),
+                    DataPath = ctx.DataPath,
+                    TaxYear = ctx.Year,
+                    Module = ctx.Module.ToString(),
+                    ClientNumber = key,
+                    Snapshot = System.IO.Path.GetFileName(snapshot),
+                    Row = row,
+                    InsertSql = sql,
+                    IdempotencyKey = string.IsNullOrEmpty(idempotencyKey) ? null : idempotencyKey,
+                    Outcome = outcome,
+                    Note = note,
+                };
+                DetailJournalAppender(journalPath, DetailWriteJournal.SerializeLine(entry));
+                return null;
+            }
+            catch (Exception ex)
+            {
+                var msg = "The row was written, but recording it in the restore journal (" + journalPath + ") failed ("
+                    + ex.GetType().Name + ": " + ex.Message + "), so `lacerte-mcp detail-restore` will not know about it; "
+                    + "if it ever needs undoing, remove it in Lacerte by hand.";
+                try { DetailJournalLog("[lacerte-mcp] detail-write journal append failed for client " + key + ": " + ex); }
+                catch (Exception) { /* logging must not fail the write */ }
+                return msg;
+            }
+        }
 
         private static Dictionary<string, object?> CopyContext(IReadOnlyDictionary<string, object?>? source)
         {

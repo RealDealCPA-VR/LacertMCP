@@ -103,6 +103,90 @@ namespace LacertMCP.Tests.Odbc
             Assert.Empty(conn.Executed);
         }
 
+        // ---- restore DELETE request type ---------------------------------------------------
+
+        private const string GoodDelete =
+            "DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' " +
+            "AND Source = 'Source' AND TSJ = 'Taxpayer' AND Amount = 52000.5 AND Description = 'Renée''s W-2'";
+
+        private static byte[] DeleteRequest(string cs, string sql, string? op = DetailWriteWorker.OpDeleteDetailRow)
+            => DetailWriteWorker.Serialize(new DetailWriteRequest { ConnectionString = cs, Sql = sql, Op = op });
+
+        [Fact]
+        public void Worker_DeleteOp_RunsTheExactRestoreDelete_Exit0()
+        {
+            var conn = new FakeConn { NonQuery = () => 2 };
+            var (exit, response, raw) = RunWorker(DeleteRequest("Driver={X}", GoodDelete), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitOk, exit);
+            Assert.True(response!.Ok);
+            Assert.Equal(2, response.RowsAffected);
+            Assert.Equal(GoodDelete, Assert.Single(conn.Executed));
+            Assert.Single(raw.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        [Theory]
+        // Not the exact BuildDeleteSql shape.
+        [InlineData("DELETE FROM [SMIT-Detail]")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'")] // no Suffix
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Code = 1 AND Series = 11 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'")] // order
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 011 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'")] // literal
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x' OR 1 = 1")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'; DELETE FROM [SMIT-Detail]")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x' -- c")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x' AND ImportSrc = ''")]
+        [InlineData("DELETE FROM [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'T' AND Description = 'x'")] // TSJ not canonical
+        [InlineData("delete from [SMIT-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'")]
+        [InlineData("DELETE FROM [DATA1-Client Info] WHERE C1_0 = 'X'")]
+        [InlineData("DELETE FROM [smit-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND CityAbbr = '' AND Source = 'Source' AND TSJ = 'Taxpayer' AND Description = 'x'")]
+        // Not a DELETE at all.
+        [InlineData(GoodSql)]
+        [InlineData("UPDATE [SMIT-Detail] SET Amount = 0")]
+        [InlineData("select * from [SMIT-Detail]")]
+        public void Worker_DeleteOp_RefusesAnythingButTheExactShape_Exit2(string sql)
+        {
+            var conn = new FakeConn();
+            var (exit, response, _) = RunWorker(DeleteRequest("Driver={X}", sql), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitBadRequest, exit);
+            Assert.False(response!.Ok);
+            Assert.Empty(conn.Executed);
+        }
+
+        [Fact]
+        public void Worker_InsertPath_StillRefusesTheRestoreDelete_AndUnknownOps()
+        {
+            var conn = new FakeConn();
+            // No op = the server's INSERT request: a DELETE is refused there.
+            var (exit1, _, _) = RunWorker(Request("Driver={X}", GoodDelete), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitBadRequest, exit1);
+            // Unknown op.
+            var (exit2, r2, _) = RunWorker(DeleteRequest("Driver={X}", GoodSql, op: "insert"), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitBadRequest, exit2);
+            Assert.Equal("Unknown request op.", r2!.Error);
+            var (exit3, _, _) = RunWorker(DeleteRequest("Driver={X}", GoodDelete, op: "DELETEDETAILROW"), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitBadRequest, exit3);
+            Assert.Empty(conn.Executed);
+            // The INSERT still runs without an op.
+            var (exit4, r4, _) = RunWorker(Request("Driver={X}", GoodSql), _ => conn);
+            Assert.Equal(DetailWriteWorker.ExitOk, exit4);
+            Assert.True(r4!.Ok);
+        }
+
+        [Fact]
+        public void Request_WithoutOp_SerializesWithoutOpKey()
+        {
+            var json = Encoding.UTF8.GetString(DetailWriteWorker.Serialize(new DetailWriteRequest { ConnectionString = "c", Sql = "s" }));
+            Assert.DoesNotContain("\"op\"", json);
+        }
+
+        [Fact]
+        public void ProcessRunner_RunDelete_MissingExe_IsNotStarted()
+        {
+            var r = new ProcessDetailWriteRunner(Path.Combine(Path.GetTempPath(), "no-such-" + Guid.NewGuid().ToString("N") + ".exe"))
+                .RunDelete("Driver={X}", GoodDelete, TimeSpan.FromSeconds(5));
+            Assert.Equal(DetailWriteRunStatus.NotStarted, r.Status);
+        }
+
         [Fact]
         public void Worker_UnreadableRequest_Exit2()
         {
@@ -174,6 +258,29 @@ namespace LacertMCP.Tests.Odbc
             Assert.Equal(DetailWriteWorker.ExitFailed, r.ExitCode);
             Assert.False(string.IsNullOrEmpty(r.Error));
             Assert.Equal("IM002", r.SqlState); // driver manager: data source / driver not found
+        }
+
+        /// <summary>Same as above for the restore DELETE: accepted by the real worker, fails cleanly at the driver manager.</summary>
+        [Fact]
+        public void ProcessRunner_RealWorkerExe_Delete_InvalidConnectionString_CleanError()
+        {
+            var exe = ProcessDetailWriteRunner.DefaultExePath();
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe)
+                || !exe.EndsWith("LacertMCP.Server.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return; // worker exe not available in this test layout
+            }
+
+            var runner = new ProcessDetailWriteRunner(exe);
+            var r = runner.RunDelete("Driver={No Such Lacerte Test Driver};DataDir={C:\\nowhere};TaxYear=2024;ReturnType=Individual",
+                GoodDelete, TimeSpan.FromSeconds(60));
+            Assert.Equal(DetailWriteRunStatus.Failed, r.Status);
+            Assert.Equal("IM002", r.SqlState);
+
+            var bad = runner.RunDelete("Driver={No Such Lacerte Test Driver}", "DELETE FROM [SMIT-Detail]", TimeSpan.FromSeconds(60));
+            Assert.Equal(DetailWriteRunStatus.Failed, bad.Status);
+            Assert.Equal(DetailWriteWorker.ExitBadRequest, bad.ExitCode);
+            Assert.Equal("BadRequest", bad.ErrorType);
         }
     }
 }
