@@ -92,7 +92,7 @@ namespace LacertMCP.Tests.Tools
                 snap ??= s;
                 Assert.Equal(snap, s); // one backup per client
             }
-            Assert.Single(Directory.GetFiles(_dir));
+            Assert.Single(Directory.GetFiles(_dir, "*.json"));
 
             mgr.LiveDetailWritesEnabled = false;
             var off = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk-off"));

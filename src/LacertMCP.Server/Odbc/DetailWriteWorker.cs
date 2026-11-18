@@ -33,6 +33,15 @@ namespace LacertMCP.Server.Odbc
     {
         [DataMember(Name = "connectionString", Order = 1)] public string? ConnectionString { get; set; }
         [DataMember(Name = "sql", Order = 2)] public string? Sql { get; set; }
+
+        /// <summary>
+        /// Request type. Absent (the server's detail write) = one detail-row
+        /// INSERT. <see cref="DetailWriteWorker.OpDeleteDetailRow"/> = one
+        /// detail-row DELETE exactly as <see cref="DetailRowWriter.BuildDeleteSql"/>
+        /// builds it (<c>lacerte-mcp detail-restore apply</c> only). Anything
+        /// else is refused.
+        /// </summary>
+        [DataMember(Name = "op", Order = 3, EmitDefaultValue = false)] public string? Op { get; set; }
     }
 
     /// <summary>Result line the worker writes to stdout.</summary>
@@ -85,12 +94,21 @@ namespace LacertMCP.Server.Odbc
     }
 
     /// <summary>
+    /// Seam for running one detail-row DELETE out of process (restore only —
+    /// the MCP server never deletes). Production: <see cref="ProcessDetailWriteRunner"/>.
+    /// </summary>
+    public interface IDetailDeleteRunner
+    {
+        DetailWriteRunResult RunDelete(string connectionString, string deleteSql, TimeSpan timeout);
+    }
+
+    /// <summary>
     /// Spawns <c>LacertMCP.Server.exe --detail-write-worker</c> (this assembly)
     /// with redirected streams and no window, writes the request, and maps the
     /// exit to a <see cref="DetailWriteRunResult"/>. Never throws for a worker
     /// failure — every failure becomes a status.
     /// </summary>
-    public sealed class ProcessDetailWriteRunner : IDetailWriteRunner
+    public sealed class ProcessDetailWriteRunner : IDetailWriteRunner, IDetailDeleteRunner
     {
         private readonly string _exePath;
 
@@ -129,6 +147,18 @@ namespace LacertMCP.Server.Odbc
         }
 
         public DetailWriteRunResult Run(string connectionString, string sql, TimeSpan timeout)
+            => RunRequest(new DetailWriteRequest { ConnectionString = connectionString, Sql = sql }, timeout);
+
+        /// <summary>Runs one detail-row DELETE (restore) in the worker; same failure mapping as <see cref="Run"/>.</summary>
+        public DetailWriteRunResult RunDelete(string connectionString, string deleteSql, TimeSpan timeout)
+            => RunRequest(new DetailWriteRequest
+            {
+                ConnectionString = connectionString,
+                Sql = deleteSql,
+                Op = DetailWriteWorker.OpDeleteDetailRow,
+            }, timeout);
+
+        private DetailWriteRunResult RunRequest(DetailWriteRequest request, TimeSpan timeout)
         {
             if (!File.Exists(_exePath))
             {
@@ -180,7 +210,7 @@ namespace LacertMCP.Server.Odbc
 
                 try
                 {
-                    var payload = DetailWriteWorker.Serialize(new DetailWriteRequest { ConnectionString = connectionString, Sql = sql });
+                    var payload = DetailWriteWorker.Serialize(request);
                     var stdin = proc.StandardInput.BaseStream;
                     stdin.Write(payload, 0, payload.Length);
                     stdin.Flush();
@@ -261,7 +291,10 @@ namespace LacertMCP.Server.Odbc
     /// Reads one <see cref="DetailWriteRequest"/> from stdin, runs it with
     /// <c>ExecuteNonQuery</c>, writes one <see cref="DetailWriteResponse"/>
     /// line to stdout and returns the exit code. Starts nothing else (no MCP
-    /// host, no logging, no session).
+    /// host, no logging, no session). Two request types only: the server's
+    /// detail-row INSERT (no <c>op</c>), and the restore CLI's detail-row
+    /// DELETE (<c>op = deleteDetailRow</c>, exact <see cref="DetailRowWriter.BuildDeleteSql"/>
+    /// shape). Everything else is refused with exit 2.
     /// </summary>
     public static class DetailWriteWorker
     {
@@ -273,6 +306,14 @@ namespace LacertMCP.Server.Odbc
         public const int ExitFailed = 1;
         /// <summary>Exit code: the request was unreadable or not a detail INSERT (result line written).</summary>
         public const int ExitBadRequest = 2;
+
+        /// <summary>
+        /// <see cref="DetailWriteRequest.Op"/> for the restore DELETE. The SQL
+        /// must be exactly <see cref="DetailRowWriter.BuildDeleteSql"/>'s output
+        /// (re-parsed and rebuilt byte for byte); the INSERT allow-list is
+        /// separate and unchanged.
+        /// </summary>
+        public const string OpDeleteDetailRow = "deleteDetailRow";
 
         // Only a single-row detail INSERT built by DetailRowWriter is accepted,
         // so the worker can't be used as a general SQL runner.
@@ -303,6 +344,17 @@ namespace LacertMCP.Server.Odbc
             }
             return !inQuote && sql.TrimEnd().EndsWith(")", StringComparison.Ordinal);
         }
+
+        /// <summary>
+        /// The restore DELETE grammar: exactly what <see cref="DetailRowWriter.BuildDeleteSql"/>
+        /// builds (single statement on <c>[&lt;KEY&gt;-Detail]</c>, Series/Code/Suffix/
+        /// StateAbbr/CityAbbr/Source/TSJ/Description always present, Prefix/Amount
+        /// when written, canonical literals, nothing after the last condition).
+        /// </summary>
+        internal static bool IsAllowedDelete(string sql)
+            => !string.IsNullOrEmpty(sql)
+               && sql.StartsWith("DELETE FROM [", StringComparison.Ordinal)
+               && DetailRowWriter.TryParseDeleteSql(sql, out _, out _);
 
         public static bool IsWorkerInvocation(string[]? args)
             => args != null && args.Length > 0 && string.Equals(args[0], WorkerSwitch, StringComparison.Ordinal);
@@ -340,9 +392,30 @@ namespace LacertMCP.Server.Odbc
                 Write(output, new DetailWriteResponse { Ok = false, Error = "Request must carry connectionString and sql.", ErrorType = "BadRequest" });
                 return ExitBadRequest;
             }
-            if (!AllowedSql.IsMatch(request.Sql) || !IsSingleStatement(request.Sql!))
+            if (request.Op == null)
             {
-                Write(output, new DetailWriteResponse { Ok = false, Error = "Only a detail-row INSERT is accepted.", ErrorType = "BadRequest" });
+                if (!AllowedSql.IsMatch(request.Sql) || !IsSingleStatement(request.Sql!))
+                {
+                    Write(output, new DetailWriteResponse { Ok = false, Error = "Only a detail-row INSERT is accepted.", ErrorType = "BadRequest" });
+                    return ExitBadRequest;
+                }
+            }
+            else if (string.Equals(request.Op, OpDeleteDetailRow, StringComparison.Ordinal))
+            {
+                if (!IsAllowedDelete(request.Sql!))
+                {
+                    Write(output, new DetailWriteResponse
+                    {
+                        Ok = false,
+                        Error = "Only a single detail-row DELETE naming every written column (as lacerte-mcp detail-restore builds it) is accepted.",
+                        ErrorType = "BadRequest",
+                    });
+                    return ExitBadRequest;
+                }
+            }
+            else
+            {
+                Write(output, new DetailWriteResponse { Ok = false, Error = "Unknown request op.", ErrorType = "BadRequest" });
                 return ExitBadRequest;
             }
 

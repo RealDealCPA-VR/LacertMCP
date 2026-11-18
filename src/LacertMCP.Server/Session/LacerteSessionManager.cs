@@ -2041,7 +2041,7 @@ namespace LacertMCP.Server.Session
                                 // the per-client lock and the worker process
                                 // (up to DetailWriteTimeout).
                                 committed = await Task.Run(
-                                    () => LiveCommitDetailRow(ctx, clientNumber, row, cancellationToken))
+                                    () => LiveCommitDetailRow(ctx, clientNumber, row, cancellationToken, idempotencyKey))
                                     .ConfigureAwait(false);
                             }
                             catch (LacerteSDKError ex) when (DetailRowMayHaveLanded(ex))

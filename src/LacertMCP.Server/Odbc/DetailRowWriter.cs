@@ -40,6 +40,140 @@ namespace LacertMCP.Server.Odbc
         /// </summary>
         public static string BuildInsertSql(string clientKey, DetailRow row)
         {
+            var cols = BuildColumns(clientKey, row);
+            return "INSERT INTO [" + clientKey + "-Detail] (" + string.Join(", ", cols.Select(c => c.Column))
+                + ") VALUES (" + string.Join(", ", cols.Select(c => c.Literal)) + ")";
+        }
+
+        /// <summary>
+        /// FP-2 restore — builds the DELETE that removes the rows equal to
+        /// <paramref name="row"/> on EVERY column <see cref="BuildInsertSql"/>
+        /// writes for it (same columns, same order, same literals):
+        /// <c>DELETE FROM [&lt;KEY&gt;-Detail] WHERE Series = 11 AND Code = 1 AND Suffix = 1000 AND StateAbbr = '' AND ...</c>.
+        /// Same validation as the INSERT, plus a Suffix is required (every live
+        /// write carries one). An ODBC DELETE on a DBF removes EVERY row the
+        /// WHERE matches — the caller counts the rows it could match first and
+        /// re-inserts the copies that must stay (<c>lacerte-mcp detail-restore apply</c>).
+        /// The detail-write worker runs a DELETE only when it is exactly this
+        /// method's output (<see cref="TryParseDeleteSql"/>).
+        /// </summary>
+        public static string BuildDeleteSql(string clientKey, DetailRow row)
+        {
+            if (row == null) throw new ArgumentNullException(nameof(row));
+            RequireLiveSuffix(row);
+            var cols = BuildColumns(clientKey, row);
+            return "DELETE FROM [" + clientKey + "-Detail] WHERE "
+                + string.Join(" AND ", cols.Select(c => c.Column + " = " + c.Literal));
+        }
+
+        /// <summary>
+        /// Parses a DELETE and accepts it only when it is byte-for-byte what
+        /// <see cref="BuildDeleteSql"/> builds for the parsed client key and row:
+        /// one statement on the detail table, every written column present in
+        /// the canonical order with canonical literals, nothing else. Never throws.
+        /// </summary>
+        public static bool TryParseDeleteSql(string? sql, out string clientKey, out DetailRow? row)
+        {
+            clientKey = string.Empty;
+            row = null;
+            if (string.IsNullOrEmpty(sql)) return false;
+            var s = sql!;
+            const string head = "DELETE FROM [";
+            const string tableTail = "-Detail] WHERE ";
+            if (!s.StartsWith(head, StringComparison.Ordinal)) return false;
+            int pos = head.Length;
+            int keyEnd = s.IndexOf(tableTail, pos, StringComparison.Ordinal);
+            if (keyEnd <= pos || keyEnd - pos > 8) return false;
+            var key = s.Substring(pos, keyEnd - pos);
+            foreach (var ch in key)
+            {
+                if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
+            }
+            pos = keyEnd + tableTail.Length;
+
+            var values = new Dictionary<string, string>(StringComparer.Ordinal);
+            while (true)
+            {
+                int colStart = pos;
+                while (pos < s.Length && ((s[pos] >= 'A' && s[pos] <= 'Z') || (s[pos] >= 'a' && s[pos] <= 'z'))) pos++;
+                if (pos == colStart) return false;
+                var col = s.Substring(colStart, pos - colStart);
+                if (values.ContainsKey(col)) return false;
+                if (pos + 3 > s.Length || string.CompareOrdinal(s, pos, " = ", 0, 3) != 0) return false;
+                pos += 3;
+                if (pos >= s.Length) return false;
+                string value;
+                if (s[pos] == '\'')
+                {
+                    var sb = new StringBuilder();
+                    pos++;
+                    bool closed = false;
+                    while (pos < s.Length)
+                    {
+                        if (s[pos] == '\'')
+                        {
+                            if (pos + 1 < s.Length && s[pos + 1] == '\'') { sb.Append('\''); pos += 2; continue; }
+                            pos++;
+                            closed = true;
+                            break;
+                        }
+                        sb.Append(s[pos]);
+                        pos++;
+                    }
+                    if (!closed) return false;
+                    value = sb.ToString();
+                }
+                else
+                {
+                    int numStart = pos;
+                    while (pos < s.Length && ((s[pos] >= '0' && s[pos] <= '9') || s[pos] == '-' || s[pos] == '.')) pos++;
+                    if (pos == numStart) return false;
+                    value = s.Substring(numStart, pos - numStart);
+                }
+                values[col] = value;
+                if (pos == s.Length) break;
+                if (pos + 5 > s.Length || string.CompareOrdinal(s, pos, " AND ", 0, 5) != 0) return false;
+                pos += 5;
+            }
+
+            string V(string c) => values.TryGetValue(c, out var v) ? v : string.Empty;
+            double? amount = null;
+            if (values.TryGetValue("Amount", out var a))
+            {
+                if (!double.TryParse(a, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var d)) return false;
+                amount = d;
+            }
+            var parsed = new DetailRow(V("Series"), V("Prefix"), V("Code"), V("Suffix"), V("StateAbbr"), V("CityAbbr"),
+                V("Source"), V("TSJ"), string.Empty, amount, V("Description"));
+            try
+            {
+                // The canonical rebuild decides: column set, order, literals.
+                if (!string.Equals(BuildDeleteSql(key, parsed), s, StringComparison.Ordinal)) return false;
+            }
+            catch (LacerteSDKError)
+            {
+                return false;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (OverflowException)
+            {
+                return false;
+            }
+            clientKey = key;
+            row = parsed;
+            return true;
+        }
+
+        /// <summary>
+        /// The (column, SQL literal) pairs the INSERT writes for <paramref name="row"/>,
+        /// in order. Shared by the INSERT and the DELETE so the two can never
+        /// disagree about which columns identify a written row.
+        /// </summary>
+        private static List<(string Column, string Literal)> BuildColumns(string clientKey, DetailRow row)
+        {
             if (row == null) throw new ArgumentNullException(nameof(row));
             SqlTemplates.ValidateClient(clientKey);
             // Same content rules the session applies in both modes (lengths,
@@ -47,46 +181,21 @@ namespace LacertMCP.Server.Odbc
             // ImportSrc blank, Amount range/precision).
             BridgeInputValidation.ValidateDetailRowContent(row, Op);
 
-            var columns = new List<string>(10);
-            var values = new List<string>(10);
-
-            columns.Add("Series");
-            values.Add(RequiredInt(row.Series, "row.Series"));
+            var cols = new List<(string Column, string Literal)>(10);
+            cols.Add(("Series", RequiredInt(row.Series, "row.Series")));
             var prefix = OptionalInt(row.Prefix, "row.Prefix");
-            if (prefix != null)
-            {
-                columns.Add("Prefix");
-                values.Add(prefix);
-            }
-            columns.Add("Code");
-            values.Add(RequiredInt(row.Code, "row.Code"));
+            if (prefix != null) cols.Add(("Prefix", prefix));
+            cols.Add(("Code", RequiredInt(row.Code, "row.Code")));
             var suffix = OptionalInt(row.Suffix, "row.Suffix");
-            if (suffix != null)
-            {
-                columns.Add("Suffix");
-                values.Add(suffix);
-            }
+            if (suffix != null) cols.Add(("Suffix", suffix));
 
-            columns.Add("StateAbbr");
-            values.Add(Quote((row.StateAbbr ?? string.Empty).Trim(), "row.StateAbbr"));
-            columns.Add("CityAbbr");
-            values.Add(Quote((row.CityAbbr ?? string.Empty).Trim(), "row.CityAbbr"));
-            columns.Add("Source");
-            values.Add(Quote(BridgeInputValidation.NormalizeDetailSource(row.Source) ?? Reject("row.Source", "row.Source must be blank, Nonsource or Source."), "row.Source"));
-            columns.Add("TSJ");
-            values.Add(Quote(BridgeInputValidation.NormalizeTsj(row.TSJ) ?? Reject("row.TSJ", "row.TSJ must be blank, Taxpayer, Spouse or Joint."), "row.TSJ"));
-
-            if (row.Amount.HasValue)
-            {
-                columns.Add("Amount");
-                values.Add(FormatAmount(row.Amount.Value));
-            }
-
-            columns.Add("Description");
-            values.Add(Quote(row.Description ?? string.Empty, "row.Description"));
-
-            return "INSERT INTO [" + clientKey + "-Detail] (" + string.Join(", ", columns)
-                + ") VALUES (" + string.Join(", ", values) + ")";
+            cols.Add(("StateAbbr", Quote((row.StateAbbr ?? string.Empty).Trim(), "row.StateAbbr")));
+            cols.Add(("CityAbbr", Quote((row.CityAbbr ?? string.Empty).Trim(), "row.CityAbbr")));
+            cols.Add(("Source", Quote(BridgeInputValidation.NormalizeDetailSource(row.Source) ?? Reject("row.Source", "row.Source must be blank, Nonsource or Source."), "row.Source")));
+            cols.Add(("TSJ", Quote(BridgeInputValidation.NormalizeTsj(row.TSJ) ?? Reject("row.TSJ", "row.TSJ must be blank, Taxpayer, Spouse or Joint."), "row.TSJ")));
+            if (row.Amount.HasValue) cols.Add(("Amount", FormatAmount(row.Amount.Value)));
+            cols.Add(("Description", Quote(row.Description ?? string.Empty, "row.Description")));
+            return cols;
         }
 
         /// <summary>
@@ -290,6 +399,94 @@ namespace LacertMCP.Server.Odbc
             {
                 return false;
             }
+        }
+
+        // -------------------------------------------------------------------
+        // Restore (lacerte-mcp detail-restore) helpers
+        // -------------------------------------------------------------------
+
+        /// <summary>
+        /// A detail row read over ODBC, normalized exactly like the server's live
+        /// read path (strings trimmed, numbers invariant, Amount as double).
+        /// </summary>
+        public static DetailRow FromOdbcRow(IReadOnlyDictionary<string, object?> raw)
+            => LacerteSessionManager.ToDetailRow(raw);
+
+        /// <summary>
+        /// True when the driver COULD remove <paramref name="stored"/> for the
+        /// DELETE <see cref="BuildDeleteSql"/> builds from <paramref name="written"/>
+        /// under ANY plausible comparison rule — a deliberate superset of
+        /// <see cref="RowMatches"/>: strings trimmed, case-insensitive, and
+        /// matching when either is a prefix of the other (xBase "SET ANSI OFF"
+        /// semantics, where <c>Description = ''</c> matches everything); a blank
+        /// Prefix (not in the WHERE) matches any Prefix; Amount within 1.00;
+        /// unparsable stored numbers match. The restore refuses a row when this
+        /// set holds anything but identical copies, so how the Lacerte driver
+        /// really compares can't make it delete a row it can't put back.
+        /// </summary>
+        public static bool CouldDeleteMatch(DetailRow written, DetailRow stored)
+        {
+            if (written == null || stored == null) return false;
+            return LooseInt(written.Series, stored.Series)
+                && LooseInt(written.Prefix, stored.Prefix)
+                && LooseInt(written.Code, stored.Code)
+                && LooseInt(written.Suffix, stored.Suffix)
+                && LooseText(written.StateAbbr, stored.StateAbbr)
+                && LooseText(written.CityAbbr, stored.CityAbbr)
+                && (LooseText(written.Source, stored.Source)
+                    || TextEquals(BridgeInputValidation.NormalizeDetailSource(written.Source) ?? written.Source,
+                                  BridgeInputValidation.NormalizeDetailSource(stored.Source) ?? stored.Source))
+                && (LooseText(written.TSJ, stored.TSJ) || TextEquals(TsjForCompare(written.TSJ), TsjForCompare(stored.TSJ)))
+                && LooseAmount(written.Amount, stored.Amount)
+                && LooseText(written.Description, stored.Description);
+        }
+
+        /// <summary>
+        /// Exact identity of a stored row over all eleven columns (numbers
+        /// canonical, strings trimmed and case-SENSITIVE, ImportSrc included).
+        /// Two rows with the same key are interchangeable copies.
+        /// </summary>
+        public static string StrictKey(DetailRow r)
+        {
+            if (r == null) throw new ArgumentNullException(nameof(r));
+            string N(string? v)
+            {
+                var d = ParseNumber(v);
+                return d.HasValue ? d.Value.ToString("0.############", CultureInfo.InvariantCulture) : (v ?? string.Empty).Trim();
+            }
+            string T(string? v) => (v ?? string.Empty).Trim();
+            string amount;
+            if (!r.Amount.HasValue) amount = "<null>";
+            else
+            {
+                try { amount = ((decimal)r.Amount.Value).ToString("0.############", CultureInfo.InvariantCulture); }
+                catch (OverflowException) { amount = r.Amount.Value.ToString("R", CultureInfo.InvariantCulture); }
+            }
+            return string.Join("\u001f", N(r.Series), N(r.Prefix), N(r.Code), N(r.Suffix), T(r.StateAbbr), T(r.CityAbbr),
+                T(r.Source), T(r.TSJ), T(r.ImportSrc), amount, T(r.Description));
+        }
+
+        private static bool LooseInt(string? written, string? stored)
+        {
+            var w = ParseNumber(written);
+            if (w == null) return true; // not in the WHERE
+            var s = ParseNumber(stored);
+            if (s == null) return string.IsNullOrWhiteSpace(stored) ? w.Value == 0m : true;
+            return w.Value == s.Value;
+        }
+
+        private static bool LooseText(string? written, string? stored)
+        {
+            var w = (written ?? string.Empty).Trim();
+            var s = (stored ?? string.Empty).Trim();
+            return w.StartsWith(s, StringComparison.OrdinalIgnoreCase) || s.StartsWith(w, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool LooseAmount(double? written, double? stored)
+        {
+            if (!written.HasValue) return true; // not in the WHERE
+            if (!stored.HasValue) return Math.Abs(written.Value) < 1.0;
+            return Math.Abs(written.Value - stored.Value) < 1.0;
         }
     }
 }
