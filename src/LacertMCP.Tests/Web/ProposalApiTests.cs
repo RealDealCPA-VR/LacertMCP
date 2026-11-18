@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using LacertMCP.Server.Proposals;
+using LacertMCP.Tests.Proposals;
 using LacertMCP.Server.Session;
 using LacertMCP.Server.Session.Fixtures;
 using LacertMCP.Server.Tools;
@@ -135,7 +136,7 @@ namespace LacertMCP.Tests.Web
             _mgr = new LacerteSessionManager(new Dictionary<string, string?> { ["LACERTE_SIMULATION"] = "1" });
             await _mgr.Register();
             _mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I');
-            _store = new ProposalStore(Path.Combine(_dir, "proposals"));
+            _store = new ProposalStore(Path.Combine(_dir, "proposals"), ProposalTestSupport.NewPin(_dir));
             var services = new ServiceCollection().AddSingleton(new ProposalService(_mgr, _store)).BuildServiceProvider();
             _activity = new ActivityLog(persist: false);
             _access = new DeviceAccess(Path.Combine(_dir, "access.json"));
@@ -231,7 +232,7 @@ namespace LacertMCP.Tests.Web
         private void AssertActivityHasNoTaxpayerValues()
         {
             var all = string.Join("\n", _activity!.Recent(1000).Select(e => e.Message + " | " + e.Detail + " | " + e.Device));
-            foreach (var secret in new[] { "APPROVED-VALUE", "REJECTED-VALUE", "PROPOSAL W2", "ACME", "4321", "TAXPAYER-EXCERPT", "organizer", "W-2.pdf", "SECRET-NOTE", "note L" })
+            foreach (var secret in new[] { "APPROVED-VALUE", "REJECTED-VALUE", "PROPOSAL W2", "ACME", "4321", "TAXPAYER-EXCERPT", "organizer", "W-2.pdf", "SECRET-NOTE", "note L", "Brown", ProposalTestSupport.TestPin })
                 Assert.DoesNotContain(secret, all);
         }
 
@@ -258,7 +259,7 @@ namespace LacertMCP.Tests.Web
             Assert.Equal(403, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v })).Status);
             Assert.Equal(403, (await Post("/api/proposals/" + id + "/reject", new { note = "no" })).Status);
             Assert.Equal(403, (await Post("/api/proposals/" + id + "/return", new { note = "no" })).Status);
-            Assert.Equal(403, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = true })).Status);
+            Assert.Equal(403, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = true, pin = ProposalTestSupport.TestPin })).Status);
             Assert.Equal(403, (await Post("/api/proposals/" + id + "/commit", new { expectedVersion = v })).Status);
 
             var p = _store!.Get(id)!;
@@ -306,7 +307,7 @@ namespace LacertMCP.Tests.Web
             _remote = IPAddress.Parse(OwnerIp);
             Assert.Equal(200, (await Get("/api/proposals/" + id)).Status);
             await DecideAllAsync(id);
-            var approved = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), note = "SECRET-NOTE ok" });
+            var approved = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin, note = "SECRET-NOTE ok" });
             Assert.Equal(200, approved.Status);
             var approval = _store!.Get(id)!.Approval!;
             Assert.Equal("owner@example.com on owner-laptop", approval.By);
@@ -390,7 +391,7 @@ namespace LacertMCP.Tests.Web
         {
             var id = await SubmittedProposalAsync();
             Assert.Equal(200, (await Post("/api/proposals/" + id + "/line", new { lineId = "L1", decision = "approved", expectedVersion = Version(id) })).Status);
-            var r = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id) });
+            var r = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin });
             Assert.Equal(409, r.Status);
             var blockers = r.Json.GetProperty("blockers").EnumerateArray().Select(b => b.GetString()!).ToList();
             Assert.Contains(blockers, b => b.Contains("L2") && b.Contains("L3"));
@@ -440,7 +441,7 @@ namespace LacertMCP.Tests.Web
             Assert.Equal(409, (await Post("/api/proposals/" + id + "/commit", new { expectedVersion = Version(id) })).Status);
 
             await DecideAllAsync(id);
-            var approve = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id) });
+            var approve = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin });
             Assert.Equal(200, approve.Status);
             Assert.True(approve.Json.GetProperty("state").GetProperty("readyToCommit").GetBoolean());
 
@@ -488,11 +489,11 @@ namespace LacertMCP.Tests.Web
         {
             var id = await SubmittedProposalAsync();
             await DecideAllAsync(id);
-            Assert.Equal(200, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id) })).Status);
+            Assert.Equal(200, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin })).Status);
             Assert.Equal(200, (await Post("/api/proposals/" + id + "/commit", new { expectedVersion = Version(id) })).Status);
 
             // Only an Uncertain line can be resolved.
-            Assert.Equal(409, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L1", rowIsInReturn = true })).Status);
+            Assert.Equal(409, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L1", rowIsInReturn = true, pin = ProposalTestSupport.TestPin })).Status);
 
             // As if the detail write had failed after the row may have landed.
             _store!.Mutate(id, q =>
@@ -504,7 +505,7 @@ namespace LacertMCP.Tests.Web
             Assert.Equal("L3", view.Json.GetProperty("state").GetProperty("uncertainLineIds")[0].GetString());
 
             Assert.Equal(400, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3" })).Status);
-            var r = await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = true, note = "SECRET-NOTE saw it" });
+            var r = await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = true, pin = ProposalTestSupport.TestPin, note = "SECRET-NOTE saw it" });
             Assert.Equal(200, r.Status);
             Assert.Equal("Committed", r.Json.GetProperty("proposal").GetProperty("status").GetString());
             var l3 = _store.Get(id)!.Lines.Single(l => l.LineId == "L3");
@@ -514,6 +515,150 @@ namespace LacertMCP.Tests.Web
             var ev = _activity!.Recent().First(e => e.Category == "proposal");
             Assert.StartsWith("Resolved line L3 of proposal " + id, ev.Message);
             AssertActivityHasNoTaxpayerValues();
+        }
+
+        // ---- approval PIN ---------------------------------------------------------------------
+
+        private void AssertPinNeverLeaked(params RawHttp.Response[] responses)
+        {
+            var all = string.Join("\n", _activity!.Recent(1000).Select(e => e.Message + " | " + e.Detail + " | " + e.Device));
+            foreach (var secret in new[] { ProposalTestSupport.TestPin, "WRONG-PIN-77" })
+            {
+                Assert.DoesNotContain(secret, all);
+                foreach (var r in responses) Assert.DoesNotContain(secret, r.Body);
+                Assert.DoesNotContain(secret, File.ReadAllText(Path.Combine(_dir, ApprovalPin.FileName)));
+                foreach (var f in Directory.GetFiles(Path.Combine(_dir, "proposals"), "*.json")) Assert.DoesNotContain(secret, File.ReadAllText(f));
+            }
+        }
+
+        [Fact]
+        public async Task Approve_RequiresPinAndClientNumber_RecordsTarget()
+        {
+            var id = await SubmittedProposalAsync();
+            await DecideAllAsync(id);
+            var v = Version(id);
+
+            Assert.Equal(400, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = Client })).Status);
+            Assert.Equal(400, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, pin = ProposalTestSupport.TestPin })).Status);
+            var wrongClient = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = "1002", pin = ProposalTestSupport.TestPin });
+            Assert.Equal(409, wrongClient.Status);
+            Assert.Contains("not this proposal's client", wrongClient.Json.GetProperty("error").GetString());
+            Assert.Equal(0, _store!.Pin.Status().FailedAttempts); // the PIN wasn't even checked
+            Assert.Null(_store.Get(id)!.Approval);
+
+            var ok = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = " " + Client + " ", pin = ProposalTestSupport.TestPin });
+            Assert.Equal(200, ok.Status);
+            Assert.StartsWith("client 1001 · Bill Brown · Individual (1040) 2024 · ", ok.Json.GetProperty("state").GetProperty("entriesGoInto").GetString());
+            var approval = _store.Get(id)!.Approval!;
+            Assert.True(approval.PinVerified);
+            Assert.Equal("Bill Brown", approval.TargetReturn!.ClientName);
+            Assert.Equal("BROW", approval.TargetReturn.ClientId);
+            Assert.Equal(SeedData.DataPathIData2024, approval.TargetContext!.DataPath);
+            Assert.True(ok.Json.GetProperty("approvalPin").GetProperty("isSet").GetBoolean());
+            AssertPinNeverLeaked(wrongClient, ok);
+            AssertActivityHasNoTaxpayerValues();
+        }
+
+        [Fact]
+        public async Task Approve_WrongPin_Is403_ThenLocked429_LoggedWithoutThePin()
+        {
+            var id = await SubmittedProposalAsync();
+            await DecideAllAsync(id);
+            var v = Version(id);
+            var responses = new List<RawHttp.Response>();
+            for (int i = 1; i <= 4; i++)
+            {
+                var r = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = Client, pin = "WRONG-PIN-77" });
+                responses.Add(r);
+                Assert.Equal(403, r.Status);
+                Assert.Equal(5 - i, r.Json.GetProperty("remainingAttempts").GetInt32());
+                Assert.Contains("Wrong approval PIN", r.Json.GetProperty("error").GetString());
+            }
+            var locking = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = Client, pin = "WRONG-PIN-77" });
+            Assert.Equal(429, locking.Status);
+            Assert.True(locking.Json.TryGetProperty("lockedUntil", out _));
+            // Locked: even the right PIN is refused now.
+            var locked = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = v, clientNumber = Client, pin = ProposalTestSupport.TestPin });
+            Assert.Equal(429, locked.Status);
+            responses.Add(locking);
+            responses.Add(locked);
+
+            var p = _store!.Get(id)!;
+            Assert.Equal(ProposalStatus.Submitted, p.Status);
+            Assert.Null(p.Approval);
+            var list = await Get("/api/proposals");
+            Assert.NotEqual(JsonValueKind.Null, list.Json.GetProperty("approvalPin").GetProperty("lockedUntilUtc").ValueKind);
+
+            var refusals = _activity!.Recent().Where(e => e.Category == "security" && e.Message.StartsWith("Approval PIN refused for proposal " + id)).ToList();
+            Assert.Equal(6, refusals.Count);
+            Assert.Contains(refusals, e => e.Detail!.Contains("wrong PIN; 4 attempt(s) left"));
+            Assert.Contains(refusals, e => e.Detail!.Contains("locked"));
+            Assert.All(refusals, e => Assert.Contains("this computer (", e.Message));
+            AssertPinNeverLeaked(responses.ToArray());
+        }
+
+        [Fact]
+        public async Task Approve_NoPinSet_Is409_WithTheSetupCommand()
+        {
+            _store!.Pin.Reset();
+            var id = await SubmittedProposalAsync();
+            await DecideAllAsync(id);
+            var list = await Get("/api/proposals");
+            Assert.False(list.Json.GetProperty("approvalPin").GetProperty("isSet").GetBoolean());
+            var r = await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = "123987" });
+            Assert.Equal(409, r.Status);
+            Assert.Contains("lacerte-mcp approval-pin set", r.Json.GetProperty("error").GetString());
+            Assert.Equal("NotSet", r.Json.GetProperty("pinCheck").GetString());
+            Assert.Null(_store.Get(id)!.Approval);
+            Assert.Contains(_activity!.Recent(), e => e.Category == "security" && e.Detail!.Contains("no approval PIN is set"));
+        }
+
+        [Fact]
+        public async Task Resolve_RequiresThePin()
+        {
+            var id = await SubmittedProposalAsync();
+            await DecideAllAsync(id);
+            Assert.Equal(200, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin })).Status);
+            Assert.Equal(200, (await Post("/api/proposals/" + id + "/commit", new { expectedVersion = Version(id) })).Status);
+            _store!.Mutate(id, q =>
+            {
+                q.Lines.Single(l => l.LineId == "L3").Commit!.Status = LineCommitStatus.Uncertain;
+                q.Status = ProposalStatus.PartiallyCommitted;
+            });
+
+            Assert.Equal(400, (await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = true })).Status);
+            var wrong = await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = false, pin = "WRONG-PIN-77" });
+            Assert.Equal(403, wrong.Status);
+            Assert.Equal(4, wrong.Json.GetProperty("remainingAttempts").GetInt32());
+            var l3 = _store.Get(id)!.Lines.Single(l => l.LineId == "L3");
+            Assert.Equal(LineCommitStatus.Uncertain, l3.Commit!.Status);
+            Assert.Equal(0, l3.KeyGeneration);
+
+            var ok = await Post("/api/proposals/" + id + "/resolve", new { lineId = "L3", rowIsInReturn = false, pin = ProposalTestSupport.TestPin });
+            Assert.Equal(200, ok.Status);
+            Assert.Equal(0, _store.Pin.Status().FailedAttempts); // a right PIN resets the counter
+            Assert.Contains(_activity!.Recent(), e => e.Category == "security" && e.Message.Contains("(resolve)"));
+            AssertPinNeverLeaked(wrong, ok);
+        }
+
+        [Fact]
+        public async Task Commit_RefusesWhenTheClientWasRenamedAfterApproval()
+        {
+            var id = await SubmittedProposalAsync();
+            await DecideAllAsync(id);
+            Assert.Equal(200, (await Post("/api/proposals/" + id + "/approve", new { expectedVersion = Version(id), clientNumber = Client, pin = ProposalTestSupport.TestPin })).Status);
+            var detailBefore = (await _mgr!.ReadDetail(Client)).Count;
+            var row = _mgr.SimulationStoreForTest!.TryGetModule(SeedData.DataPathIData2024, 2024, 'I')!.Clients[Client];
+            row.Fields["C1_2"] = "Browning";
+
+            var r = await Post("/api/proposals/" + id + "/commit", new { expectedVersion = Version(id) });
+            Assert.Equal(409, r.Status);
+            var error = r.Json.GetProperty("error").GetString()!;
+            Assert.Contains("Approved for client 1001 · Bill Brown", error);
+            Assert.Contains("Bill Browning", error);
+            Assert.Equal(ProposalStatus.Approved, _store!.Get(id)!.Status);
+            Assert.Equal(detailBefore, (await _mgr.ReadDetail(Client)).Count);
+            Assert.NotEqual("APPROVED-VALUE", (await _mgr.ReadTable(1, Client)).Single().TryGetValue("C1_15", out var c) ? c : null);
         }
 
         [Fact]
@@ -538,6 +683,21 @@ namespace LacertMCP.Tests.Web
             Assert.Contains("/api/proposals", html);
             Assert.Contains("\"X-Lacerte-Admin\": \"1\"", html);
             Assert.Contains("Yes, write to the return", html); // in-page commit confirmation
+        }
+
+        [Fact]
+        public void Page_AsksForThePin_ShowsTheTargetReturn_AndThePinChangeTime()
+        {
+            var html = ControlPage.Html;
+            Assert.Contains("i.type = \"password\"", html);
+            Assert.Contains("\"Entries go into: \"", html);
+            Assert.Contains("Type the client number to confirm", html);
+            Assert.Contains("lacerte-mcp approval-pin set", html);
+            Assert.Contains("Approval PIN last changed ", html);
+            Assert.Contains("pin: pin", html);                 // approve + resolve send it
+            Assert.Contains("clientNumber: typed", html);
+            Assert.Contains("function takePin(i) { var v = i.value; i.value = \"\";", html); // cleared on every attempt
+            Assert.DoesNotContain("localStorage", html);
         }
 
         [Fact]

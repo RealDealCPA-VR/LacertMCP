@@ -28,6 +28,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Tests drive the interactive approval-PIN prompts through internal hooks (Commands/ConsoleInput.cs). -->
+    <InternalsVisibleTo Include="LacertMCP.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Reuse Credential Manager / registration helpers from the server assembly. -->
     <ProjectReference Include="..\LacertMCP.Server\LacertMCP.Server.csproj" />
   </ItemGroup>

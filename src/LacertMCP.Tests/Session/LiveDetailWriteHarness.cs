@@ -4,6 +4,7 @@ using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using LacertMCP.Server.Bridge;
 using LacertMCP.Server.Errors;
@@ -49,11 +50,29 @@ namespace LacertMCP.Tests.Session
             return (LacerteDsnReader)ctor!.Invoke(new object[] { cs, (Func<string, DbConnection>)(_ => new Conn(this)) });
         }
 
+        /// <summary>
+        /// DATA1 rows by client key, column → value (CHAR values are padded like the
+        /// driver does). Empty by default: a DATA1 query then returns no rows.
+        /// </summary>
+        public readonly Dictionary<string, Dictionary<string, object>> ClientRows =
+            new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+
         private DataTable Answer(string sql)
         {
             Sql.Add(sql);
             var fail = FailReads?.Invoke();
             if (fail != null) throw fail;
+            if (sql.IndexOf("[DATA1-Client Info]", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                var data1 = new DataTable();
+                var m = System.Text.RegularExpressions.Regex.Match(sql, "C1_0 = '([^']*)'");
+                if (m.Success && ClientRows.TryGetValue(m.Groups[1].Value, out var cols))
+                {
+                    foreach (var k in cols.Keys) data1.Columns.Add(k, typeof(object));
+                    data1.Rows.Add(cols.Values.Select(v => v is string s ? Pad(s, 20) : v).ToArray());
+                }
+                return data1;
+            }
             var start = sql.IndexOf('[');
             var end = sql.IndexOf("-Detail]", StringComparison.Ordinal);
             if (start < 0 || end < 0) return new DataTable();

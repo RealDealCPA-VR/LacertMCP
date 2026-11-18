@@ -21,6 +21,12 @@ namespace LacertMCP.Cli.Commands
     /// <para>The CLI approves, rejects, returns and resolves; it NEVER commits — the
     /// agent (<c>lacerte_proposal_commit</c>) or the control page does that. Approvals
     /// are recorded with channel "cli" and by = user@machine.</para>
+    ///
+    /// <para><c>approve --confirm</c> and <c>resolve --confirm</c> need the approval PIN
+    /// (<see cref="ApprovalPin"/>, in the parent of the proposal folder) typed at a
+    /// console: they print the return the entries go into, ask for the client
+    /// number (approve) and the PIN without echo, and refuse when input is
+    /// redirected.</para>
     /// </summary>
     public static class ProposalCommand
     {
@@ -79,7 +85,8 @@ namespace LacertMCP.Cli.Commands
         {
             var c = new Command("approve",
                 "Approve a Submitted proposal. Every line is approved except the ones you --reject (and lines whose dry run failed, which can't be approved). " +
-                "Without --confirm it only prints what would be approved.");
+                "Without --confirm it only prints what would be approved. With --confirm it shows the return the entries go into and asks you to type the client number " +
+                "and your approval PIN (interactive only; see `lacerte-mcp approval-pin`).");
             var id = new Argument<string>("id", "The proposal id.");
             var reject = new Option<string[]>("--reject", () => Array.Empty<string>(), "Line id to reject (repeatable), e.g. --reject L3 --reject L7.");
             var note = new Option<string?>("--note", "Note recorded with the approval.");
@@ -142,7 +149,8 @@ namespace LacertMCP.Cli.Commands
         {
             var c = new Command("resolve",
                 "After checking the client's detail rows in Lacerte, resolve an Uncertain line (a row that may or may not have been written): " +
-                "--in-return if the row IS there (it is never written again), --missing if it is NOT (the next commit writes it once).");
+                "--in-return if the row IS there (it is never written again), --missing if it is NOT (the next commit writes it once). " +
+                "With --confirm it asks for your approval PIN (interactive only).");
             var id = new Argument<string>("id", "The proposal id.");
             var line = new Option<string>("--line", "The Uncertain line id.") { IsRequired = true };
             var inReturn = new Option<bool>("--in-return", () => false, "The row is in the return.");
@@ -230,7 +238,7 @@ namespace LacertMCP.Cli.Commands
             }
             foreach (var p in rows)
             {
-                stdout.WriteLine($"- {p.Id}  {p.Status,-18} v{p.Version}  client {p.ClientNumber}  {p.Context.TaxYear} module {p.Context.Module}  \"{p.Title}\"");
+                stdout.WriteLine($"- {p.Id}  {p.Status,-18} v{p.Version}  client {p.ClientNumber}{(string.IsNullOrEmpty(p.ClientName) ? "" : " (" + p.ClientName + ")")}  {p.Context.TaxYear} module {p.Context.Module}  \"{p.Title}\"");
                 stdout.WriteLine($"    lines {p.LineCount} (approved {p.ApprovedLineCount}, rejected {p.RejectedLineCount}, pending {p.PendingLineCount}, failed dry run {p.InvalidLineCount}), " +
                                  $"manual items {p.ManualItemCount}, questions {p.QuestionCount}; by {p.Author}, updated {Time(p.UpdatedAt)}");
             }
@@ -252,12 +260,15 @@ namespace LacertMCP.Cli.Commands
         {
             var state = ProposalStore.Evaluate(p);
             o.WriteLine($"Proposal {p.Id}: {p.Title}");
+            o.WriteLine($"  Entries go into: {ProposalStore.DescribeTargetReturn(p)}");
+            if (p.TargetReturn == null) o.WriteLine($"  {ProposalStore.NoTargetReturnText}");
             o.WriteLine($"  Client {p.ClientNumber} | tax year {p.Context.TaxYear} | module {p.Context.Module} | {p.Context.DataPath}");
             o.WriteLine($"  Status {p.Status} | version {p.Version} | prepared by {p.Author} | created {Time(p.CreatedAt)} | updated {Time(p.UpdatedAt)}");
             o.WriteLine($"  Content hash {state.ContentHash}");
             if (p.Approval != null)
             {
-                o.WriteLine($"  Approved by {p.Approval.By} ({p.Approval.Channel}) at {Time(p.Approval.At)} for version {p.Approval.Version}" +
+                o.WriteLine($"  Approved by {p.Approval.By} ({p.Approval.Channel}{(p.Approval.PinVerified ? ", approval PIN verified" : "")}) at {Time(p.Approval.At)} for version {p.Approval.Version}" +
+                            (p.Approval.TargetReturn == null ? "" : $" and client {p.Approval.TargetReturn.ClientNumber} · {p.Approval.TargetReturn.ClientName}") +
                             (state.ApprovalCurrent ? "" : " -- OUTDATED: the proposal changed after approval") +
                             (string.IsNullOrEmpty(p.Approval.Note) ? "" : $" -- \"{p.Approval.Note}\""));
             }
@@ -412,21 +423,55 @@ namespace LacertMCP.Cli.Commands
                 return 0;
             }
 
+            if (ConsoleInput.IsInputRedirected)
+            {
+                stderr.WriteLine("Approving needs your approval PIN. " + ConsoleInput.RedirectedMessage);
+                return 1;
+            }
+            if (p.TargetReturn == null)
+            {
+                stderr.WriteLine(ProposalStore.NoTargetReturnText);
+                return 1;
+            }
+            var pinStatus = store.Pin.Status();
+            if (!pinStatus.IsSet)
+            {
+                stderr.WriteLine(ApprovalPin.SetupInstruction);
+                return 1;
+            }
+
+            stdout.WriteLine();
+            stdout.WriteLine($"Entries go into: {ProposalStore.DescribeTargetReturn(p)}");
+            var typed = ConsoleInput.ReadLine("Type the client number to confirm: ", stdout);
+            if (typed == null)
+            {
+                stderr.WriteLine("Cancelled. Nothing was approved.");
+                return 1;
+            }
+            var pin = ConsoleInput.ReadSecret("Approval PIN: ", stdout);
+            if (pin == null)
+            {
+                stderr.WriteLine("Cancelled. Nothing was approved.");
+                return 1;
+            }
+
             try
             {
-                foreach (var (line, decision, why) in plan)
-                {
-                    store.SetLineDecision(p.Id, line.LineId, decision, why.Length == 0 || why == "--reject" ? null : why, p.Version);
-                }
-                var approved = store.Approve(p.Id, by, ProposalStore.ChannelCli, p.Version, note);
+                var decisions = plan.ToDictionary(x => x.Line.LineId, x => x.Decision, StringComparer.Ordinal);
+                var approved = store.Approve(p.Id, by, ProposalStore.ChannelCli, p.Version, pin, typed, note, decisions);
                 stdout.WriteLine();
-                stdout.WriteLine($"Approved version {approved.Version} ({approvedCount} line(s)) by {by}. Content hash {approved.Approval!.ContentHash}.");
+                stdout.WriteLine($"Approved version {approved.Version} ({approvedCount} line(s)) by {by} for {ProposalStore.DescribeTargetReturn(approved)}. Content hash {approved.Approval!.ContentHash}.");
                 stdout.WriteLine("Nothing is written yet: the agent commits it with lacerte_proposal_commit (or use the control page).");
                 return 0;
             }
             catch (LacerteSDKError ex)
             {
                 return Fail(stderr, ex);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                stderr.WriteLine($"Couldn't check the approval PIN: {ex.Message}");
+                return 1;
             }
         }
 
@@ -495,15 +540,37 @@ namespace LacertMCP.Cli.Commands
                     : "Would record that this row is NOT in the return (the next commit writes it once, with a new idempotency key). Run again with --confirm.");
                 return 0;
             }
+            if (ConsoleInput.IsInputRedirected)
+            {
+                stderr.WriteLine("Resolving a line needs your approval PIN. " + ConsoleInput.RedirectedMessage);
+                return 1;
+            }
+            if (!store.Pin.Status().IsSet)
+            {
+                stderr.WriteLine(ApprovalPin.SetupInstruction);
+                return 1;
+            }
+            stdout.WriteLine($"Entries go into: {ProposalStore.DescribeTargetReturn(p)}");
+            var pin = ConsoleInput.ReadSecret("Approval PIN: ", stdout);
+            if (pin == null)
+            {
+                stderr.WriteLine("Cancelled. Nothing changed.");
+                return 1;
+            }
             try
             {
-                var updated = store.ResolveUncertainLine(p.Id, line.LineId, inReturn, by, ProposalStore.ChannelCli, note);
+                var updated = store.ResolveUncertainLine(p.Id, line.LineId, inReturn, by, ProposalStore.ChannelCli, pin, note);
                 stdout.WriteLine($"Recorded. Proposal {updated.Id} is now {updated.Status}.");
                 return 0;
             }
             catch (LacerteSDKError ex)
             {
                 return Fail(stderr, ex);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                stderr.WriteLine($"Couldn't check the approval PIN: {ex.Message}");
+                return 1;
             }
         }
     }

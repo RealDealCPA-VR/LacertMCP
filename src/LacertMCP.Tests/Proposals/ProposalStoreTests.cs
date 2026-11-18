@@ -21,7 +21,7 @@ namespace LacertMCP.Tests.Proposals
 
         public ProposalStoreTests()
         {
-            _store = new ProposalStore(_dir);
+            _store = NewStore(_dir);
         }
 
         public void Dispose() => TryDelete(_dir);
@@ -65,7 +65,7 @@ namespace LacertMCP.Tests.Proposals
         public void List_FiltersByClientAndStatus()
         {
             var a = NewProposal(_store, FieldLine("C1_15", "x"));
-            var b = _store.Create(Ctx(), "2002", "other", null, "stdio");
+            var b = _store.Create(Ctx(), "2002", "other", null, "stdio", Target("2002"));
             _store.Submit(a.Id, "stdio");
             Assert.Equal(2, _store.List().Count);
             Assert.Equal(a.Id, _store.List(new ProposalFilter { Status = ProposalStatus.Submitted }).Single().Id);
@@ -127,6 +127,10 @@ namespace LacertMCP.Tests.Proposals
             Assert.NotEqual(h, With(q => q.Lines[1].Source.Location = "Box 2"));
             Assert.NotEqual(h, With(q => q.ClientNumber = "1002"));
             Assert.NotEqual(h, With(q => q.Context.TaxYear = 2023));
+            Assert.NotEqual(h, With(q => q.TargetReturn!.ClientName = "Jane Smith"));
+            Assert.NotEqual(h, With(q => q.TargetReturn!.ClientNumber = "1002"));
+            Assert.NotEqual(h, With(q => q.TargetReturn!.ClientId = "OTHR"));
+            Assert.NotEqual(h, With(q => q.TargetReturn = null));
             Assert.NotEqual(h, With(q => q.ManualItems.Add(new ManualItem { ItemId = "M1", Description = "x", Reason = "y" })));
             Assert.NotEqual(h, With(q => q.Lines.RemoveAt(1)));
         }
@@ -162,7 +166,7 @@ namespace LacertMCP.Tests.Proposals
             var p = NewProposal(_store, FieldLine("C1_15", "x"));
             // Draft: no decisions, no approval, no reject / return.
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version)));
-            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Approve(p.Id, "me", "cli", p.Version)));
+            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Approve(p.Id, "me", "cli", p.Version, TestPin, "1001")));
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Reject(p.Id, "me", "cli", "no")));
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.ReturnForChanges(p.Id, "me", "cli", "no")));
 
@@ -183,7 +187,7 @@ namespace LacertMCP.Tests.Proposals
         [Fact]
         public void Submit_EmptyProposal_Is9024()
         {
-            var p = _store.Create(Ctx(), "1001", "t", null, "stdio");
+            var p = _store.Create(Ctx(), "1001", "t", null, "stdio", Target("1001"));
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Submit(p.Id, "stdio")));
         }
 
@@ -212,7 +216,7 @@ namespace LacertMCP.Tests.Proposals
             var p = NewProposal(_store, FieldLine("C1_15", "x"), FieldLine("C1_16", "y"));
             p = _store.Submit(p.Id, "stdio");
             p = _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version);
-            var ex = Assert.Throws<LacerteSDKError>(() => _store.Approve(p.Id, "me", "cli", p.Version));
+            var ex = Assert.Throws<LacerteSDKError>(() => _store.Approve(p.Id, "me", "cli", p.Version, TestPin, "1001"));
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, ex.StatusCode);
             Assert.Contains("L2", (string)ex.Context["reason"]!);
         }
@@ -223,7 +227,7 @@ namespace LacertMCP.Tests.Proposals
             var p = NewProposal(_store, FieldLine("C1_15", "x"));
             p = _store.Submit(p.Id, "stdio");
             p = _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Rejected, "no", p.Version);
-            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Approve(p.Id, "me", "cli", p.Version)));
+            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.Approve(p.Id, "me", "cli", p.Version, TestPin, "1001")));
         }
 
         [Fact]
@@ -233,7 +237,7 @@ namespace LacertMCP.Tests.Proposals
             p = _store.Submit(p.Id, "stdio");
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version - 1)));
             p = _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version);
-            var ex = Assert.Throws<LacerteSDKError>(() => _store.Approve(p.Id, "me", "cli", p.Version + 1));
+            var ex = Assert.Throws<LacerteSDKError>(() => _store.Approve(p.Id, "me", "cli", p.Version + 1, TestPin, "1001"));
             Assert.Contains("version", (string)ex.Context["reason"]!);
             Assert.Equal(ProposalStatus.Submitted, _store.Get(p.Id)!.Status);
         }
@@ -246,7 +250,7 @@ namespace LacertMCP.Tests.Proposals
             Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.SetLineDecision(p.Id, "L2", ReviewerDecision.Approved, null, p.Version)));
             p = _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version);
             p = _store.SetLineDecision(p.Id, "L2", ReviewerDecision.Rejected, null, p.Version);
-            Assert.Equal(ProposalStatus.Approved, _store.Approve(p.Id, "me", "cli", p.Version).Status);
+            Assert.Equal(ProposalStatus.Approved, _store.Approve(p.Id, "me", "cli", p.Version, TestPin, "1001").Status);
         }
 
         [Fact]
@@ -255,10 +259,10 @@ namespace LacertMCP.Tests.Proposals
             var p = NewProposal(_store, FieldLine("C1_15", "x"));
             p = _store.Submit(p.Id, "stdio");
             p = _store.SetLineDecision(p.Id, "L1", ReviewerDecision.Approved, null, p.Version);
-            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "me", "mcp", p.Version)));
-            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "me", "agent", p.Version)));
-            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "  ", "cli", p.Version)));
-            Assert.Equal(ProposalStatus.Approved, _store.Approve(p.Id, "me", "control-page", p.Version).Status);
+            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "me", "mcp", p.Version, TestPin, "1001")));
+            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "me", "agent", p.Version, TestPin, "1001")));
+            Assert.Equal(SyntheticStatusCodes.InvalidArgument, Code(() => _store.Approve(p.Id, "  ", "cli", p.Version, TestPin, "1001")));
+            Assert.Equal(ProposalStatus.Approved, _store.Approve(p.Id, "me", "control-page", p.Version, TestPin, "1001").Status);
         }
 
         [Fact]
@@ -290,7 +294,7 @@ namespace LacertMCP.Tests.Proposals
         [Fact]
         public void ConcurrentMutations_AreSerialized_NoLostUpdates()
         {
-            var p = _store.Create(Ctx(), "1001", "t", null, "stdio");
+            var p = _store.Create(Ctx(), "1001", "t", null, "stdio", Target("1001"));
             System.Threading.Tasks.Parallel.For(0, 20, i =>
                 _store.EditContent(p.Id, "stdio", "q" + i, q => q.Questions.Add(new ProposalQuestion { QuestionId = "Q" + i, Text = "t" + i })));
             var back = _store.Get(p.Id)!;
@@ -302,20 +306,20 @@ namespace LacertMCP.Tests.Proposals
         public void ResolveUncertainLine_OnlyForUncertain_MissingBumpsKeyGeneration()
         {
             var p = SubmitAndApprove(_store, NewProposal(_store, DetailLine(1, "a")));
-            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.ResolveUncertainLine(p.Id, "L1", true, "me", "cli", null)));
+            Assert.Equal(SyntheticStatusCodes.ProposalConflict, Code(() => _store.ResolveUncertainLine(p.Id, "L1", true, "me", "cli", TestPin, null)));
 
             _store.Mutate(p.Id, q =>
             {
                 q.Lines[0].Commit = new LineCommitResult { Status = LineCommitStatus.Uncertain };
                 q.Status = ProposalStatus.PartiallyCommitted;
             });
-            p = _store.ResolveUncertainLine(p.Id, "L1", rowIsInReturn: false, "me", "cli", "not in Lacerte");
+            p = _store.ResolveUncertainLine(p.Id, "L1", rowIsInReturn: false, "me", "cli", TestPin, "not in Lacerte");
             Assert.Equal(LineCommitStatus.Failed, p.Lines[0].Commit!.Status);
             Assert.Equal(1, p.Lines[0].KeyGeneration);
             Assert.Equal(ProposalStatus.CommitFailed, p.Status);
 
             _store.Mutate(p.Id, q => q.Lines[0].Commit!.Status = LineCommitStatus.Uncertain);
-            p = _store.ResolveUncertainLine(p.Id, "L1", rowIsInReturn: true, "me", "control-page", null);
+            p = _store.ResolveUncertainLine(p.Id, "L1", rowIsInReturn: true, "me", "control-page", TestPin, null);
             Assert.Equal(LineCommitStatus.Succeeded, p.Lines[0].Commit!.Status);
             Assert.Equal(ProposalStatus.Committed, p.Status);
         }

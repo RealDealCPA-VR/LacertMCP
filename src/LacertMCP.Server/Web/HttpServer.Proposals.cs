@@ -14,15 +14,23 @@ namespace LacertMCP.Server.Web
     /// 2026-11-18 "Approval model: Claude proposes, a person approves").
     ///
     /// <list type="bullet">
-    ///   <item><c>GET  /api/proposals?status=&amp;client=</c> — summaries + computed state.</item>
-    ///   <item><c>GET  /api/proposals/{id}</c> — the full proposal + state.</item>
+    ///   <item><c>GET  /api/proposals?status=&amp;client=</c> — summaries + computed state + approvalPin {isSet, changedAtUtc, lockedUntilUtc}.</item>
+    ///   <item><c>GET  /api/proposals/{id}</c> — the full proposal + state + approvalPin.</item>
     ///   <item><c>POST /api/proposals/{id}/line</c> {lineId, decision: approved|rejected|pending, note, expectedVersion}</item>
-    ///   <item><c>POST /api/proposals/{id}/approve</c> {expectedVersion, note}</item>
+    ///   <item><c>POST /api/proposals/{id}/approve</c> {expectedVersion, clientNumber, pin, note}</item>
     ///   <item><c>POST /api/proposals/{id}/reject</c> {note} (note required)</item>
     ///   <item><c>POST /api/proposals/{id}/return</c> {note} (note required)</item>
-    ///   <item><c>POST /api/proposals/{id}/resolve</c> {lineId, rowIsInReturn, note}</item>
+    ///   <item><c>POST /api/proposals/{id}/resolve</c> {lineId, rowIsInReturn, pin, note}</item>
     ///   <item><c>POST /api/proposals/{id}/commit</c> {expectedVersion}</item>
     /// </list>
+    ///
+    /// <para><b>Approval PIN.</b> Approve and resolve need the owner's approval PIN
+    /// (<see cref="ApprovalPin"/>), so an agent that can reach this API from this
+    /// computer still can't approve. Approve also needs the typed client number of
+    /// the return the entries go into. A wrong PIN is 403 {error,
+    /// remainingAttempts}; a lockout 429 {error, lockedUntil}; no PIN set 409 with
+    /// the setup command. Refusals are recorded in the activity log (who, which
+    /// proposal) — the PIN never is, and it never appears in a response.</para>
     ///
     /// <para><b>Who may call them.</b> Every endpoint here — the reads too, since
     /// proposals hold taxpayer data — is for a PERSON: this computer or the
@@ -173,7 +181,7 @@ namespace LacertMCP.Server.Web
                     state = p == null ? (JsonElement?)null : ProposalStore.ToJsonElement(ProposalStore.Evaluate(p)),
                 });
             }
-            await SendJson(res, 200, new { count = items.Count, folder = store.DirectoryPath, proposals = items }).ConfigureAwait(false);
+            await SendJson(res, 200, new { count = items.Count, folder = store.DirectoryPath, approvalPin = PinView(store), proposals = items }).ConfigureAwait(false);
         }
 
         private async Task GetProposalAsync(HttpListenerResponse res, ProposalStore store, string id)
@@ -184,13 +192,14 @@ namespace LacertMCP.Server.Web
                 await SendJson(res, 404, new { error = "No such proposal." }).ConfigureAwait(false);
                 return;
             }
-            await SendJson(res, 200, ProposalView(p)).ConfigureAwait(false);
+            await SendJson(res, 200, ProposalView(p, store)).ConfigureAwait(false);
         }
 
-        private static object ProposalView(Proposal p) => new
+        private static object ProposalView(Proposal p, ProposalStore store) => new
         {
             proposal = ProposalStore.ToJsonElement(p),
             state = ProposalStore.ToJsonElement(ProposalStore.Evaluate(p)),
+            approvalPin = PinView(store),
         };
 
         private async Task HandleProposalActionAsync(HttpListenerResponse res, ProposalService service, Caller caller, string id, string action, JsonElement body)
@@ -215,18 +224,31 @@ namespace LacertMCP.Server.Web
                     }
                     if (!TryInt(body, "expectedVersion", out var version)) { await BadRequest(res, "expectedVersion is required (the version you reviewed).").ConfigureAwait(false); return; }
                     var p = store.SetLineDecision(id, lineId, decision, note, version);
-                    await SendJson(res, 200, ProposalView(p)).ConfigureAwait(false);
+                    await SendJson(res, 200, ProposalView(p, store)).ConfigureAwait(false);
                     return;
                 }
                 case "approve":
                 {
                     if (!TryInt(body, "expectedVersion", out var version)) { await BadRequest(res, "expectedVersion is required (the version you reviewed).").ConfigureAwait(false); return; }
-                    var p = store.Approve(id, by, channel, version, note);
+                    var confirmClient = Str(body, "clientNumber").Trim();
+                    if (confirmClient.Length == 0) { await BadRequest(res, "clientNumber is required: type the client number of the return the entries go into.").ConfigureAwait(false); return; }
+                    var pin = Str(body, "pin");
+                    if (pin.Length == 0) { await BadRequest(res, "Enter your approval PIN.").ConfigureAwait(false); return; }
+                    Proposal p;
+                    try
+                    {
+                        p = store.Approve(id, by, channel, version, pin, confirmClient, note);
+                    }
+                    catch (LacerteSDKError ex) when (PinCheckOf(ex) != null)
+                    {
+                        RecordPinRefusal(ex, id, "approve", caller);
+                        throw;
+                    }
                     var approved = p.Lines.Count(l => l.ReviewerDecision == ReviewerDecision.Approved);
                     var rejected = p.Lines.Count(l => l.ReviewerDecision == ReviewerDecision.Rejected);
                     _activity.Record("success", "proposal", "Approved proposal " + p.Id + " for client " + ToolActivity.Plain(p.ClientNumber), caller.Name,
-                        approved + " line(s) approved, " + rejected + " rejected; version " + p.Version);
-                    await SendJson(res, 200, ProposalView(p)).ConfigureAwait(false);
+                        approved + " line(s) approved, " + rejected + " rejected; version " + p.Version + "; approval PIN verified");
+                    await SendJson(res, 200, ProposalView(p, store)).ConfigureAwait(false);
                     return;
                 }
                 case "reject":
@@ -243,7 +265,7 @@ namespace LacertMCP.Server.Web
                     _activity.Record(action == "reject" ? "warn" : "info", "proposal",
                         (action == "reject" ? "Rejected proposal " : "Returned proposal ") + p.Id + (action == "reject" ? "" : " for changes") + " (client " + ToolActivity.Plain(p.ClientNumber) + ")",
                         caller.Name, "version " + p.Version);
-                    await SendJson(res, 200, ProposalView(p)).ConfigureAwait(false);
+                    await SendJson(res, 200, ProposalView(p, store)).ConfigureAwait(false);
                     return;
                 }
                 case "resolve":
@@ -251,11 +273,22 @@ namespace LacertMCP.Server.Web
                     var lineId = Str(body, "lineId").Trim();
                     if (lineId.Length == 0) { await BadRequest(res, "lineId is required.").ConfigureAwait(false); return; }
                     if (!TryBool(body, "rowIsInReturn", out var inReturn)) { await BadRequest(res, "rowIsInReturn is required: true if you found the row in Lacerte, false if it is missing.").ConfigureAwait(false); return; }
-                    var p = store.ResolveUncertainLine(id, lineId, inReturn, by, channel, note);
+                    var pin = Str(body, "pin");
+                    if (pin.Length == 0) { await BadRequest(res, "Enter your approval PIN.").ConfigureAwait(false); return; }
+                    Proposal p;
+                    try
+                    {
+                        p = store.ResolveUncertainLine(id, lineId, inReturn, by, channel, pin, note);
+                    }
+                    catch (LacerteSDKError ex) when (PinCheckOf(ex) != null)
+                    {
+                        RecordPinRefusal(ex, id, "resolve", caller);
+                        throw;
+                    }
                     var resolved = p.Lines.FirstOrDefault(l => string.Equals(l.LineId, lineId, StringComparison.OrdinalIgnoreCase))?.LineId ?? "?";
                     _activity.Record("info", "proposal", "Resolved line " + ToolActivity.Plain(resolved) + " of proposal " + p.Id + " (client " + ToolActivity.Plain(p.ClientNumber) + ")",
                         caller.Name, inReturn ? "found in the return" : "not in the return; the next commit writes it");
-                    await SendJson(res, 200, ProposalView(p)).ConfigureAwait(false);
+                    await SendJson(res, 200, ProposalView(p, store)).ConfigureAwait(false);
                     return;
                 }
                 case "commit":
@@ -286,12 +319,53 @@ namespace LacertMCP.Server.Web
                         report = ProposalStore.ToJsonElement(report),
                         proposal = ProposalStore.ToJsonElement(after),
                         state = ProposalStore.ToJsonElement(ProposalStore.Evaluate(after)),
+                        approvalPin = PinView(store),
                     }).ConfigureAwait(false);
                     return;
                 }
                 default:
                     await SendJson(res, 404, new { error = "Not found." }).ConfigureAwait(false);
                     return;
+            }
+        }
+
+        /// <summary>"NotSet" / "Wrong" / "Locked" when the store refused because of the approval PIN, else null.</summary>
+        private static string? PinCheckOf(LacerteSDKError ex)
+            => ex.Context != null && ex.Context.TryGetValue("pinCheck", out var v) ? v as string : null;
+
+        /// <summary>A refused PIN in the activity log: who, which proposal, what kind of refusal — never the PIN.</summary>
+        private void RecordPinRefusal(LacerteSDKError ex, string id, string action, Caller caller)
+        {
+            var check = PinCheckOf(ex);
+            string detail;
+            switch (check)
+            {
+                case "Wrong":
+                    detail = "wrong PIN; " + (ex.Context.TryGetValue("remainingAttempts", out var left) ? left : "?") + " attempt(s) left before the lockout";
+                    break;
+                case "Locked":
+                    detail = "approvals locked after too many wrong PINs"
+                        + (ex.Context.TryGetValue("lockedUntil", out var until) && until is DateTimeOffset u ? " until " + u.UtcDateTime.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC" : "");
+                    break;
+                default:
+                    detail = "no approval PIN is set (run `lacerte-mcp approval-pin set` on this PC)";
+                    break;
+            }
+            _activity.Record(check == "NotSet" ? "warn" : "error", "security",
+                "Approval PIN refused for proposal " + id + " (" + action + ") by " + ReviewerIdentity(caller), caller.Name, detail);
+        }
+
+        /// <summary>The approval PIN's public state (no hash) for the Proposals tab; null when it can't be read.</summary>
+        private static object? PinView(ProposalStore store)
+        {
+            try
+            {
+                var s = store.Pin.Status();
+                return new { isSet = s.IsSet, changedAtUtc = s.ChangedAtUtc, lockedUntilUtc = s.LockedUntilUtc, setupCommand = "lacerte-mcp approval-pin set" };
+            }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                return null;
             }
         }
 
@@ -330,6 +404,28 @@ namespace LacertMCP.Server.Web
         private static async Task SendProposalErrorAsync(HttpListenerResponse res, ProposalStore store, LacerteSDKError ex)
         {
             var reason = ex.Context.TryGetValue("reason", out var r) ? r as string : null;
+            switch (PinCheckOf(ex))
+            {
+                case "Wrong":
+                    await SendJson(res, 403, new
+                    {
+                        error = reason,
+                        pinCheck = "Wrong",
+                        remainingAttempts = ex.Context.TryGetValue("remainingAttempts", out var left) ? left : null,
+                    }).ConfigureAwait(false);
+                    return;
+                case "Locked":
+                    await SendJson(res, 429, new
+                    {
+                        error = reason,
+                        pinCheck = "Locked",
+                        lockedUntil = ex.Context.TryGetValue("lockedUntil", out var until) ? until : null,
+                    }).ConfigureAwait(false);
+                    return;
+                case "NotSet":
+                    await SendJson(res, 409, new { error = reason, pinCheck = "NotSet", setupCommand = "lacerte-mcp approval-pin set" }).ConfigureAwait(false);
+                    return;
+            }
             int http;
             if (ex.StatusCode == SyntheticStatusCodes.ProposalConflict) http = 409;
             else if (ex.StatusCode == SyntheticStatusCodes.InvalidArgument)

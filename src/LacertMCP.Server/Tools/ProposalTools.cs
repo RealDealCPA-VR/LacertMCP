@@ -45,7 +45,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Start a proposal for one client in the ACTIVE context (dataPath, taxYear, module): the place to put every entry you intend to make, for the operator to review and approve before anything is written. Checks the client exists. Returns the proposal (id, status Draft, version).")]
+        [Description("Start a proposal for one client in the ACTIVE context (dataPath, taxYear, module): the place to put every entry you intend to make, for the operator to review and approve before anything is written. Checks the client exists and records its number and name as the target return (state.entriesGoInto). Returns the proposal (id, status Draft, version).")]
         public Task<string> LacerteProposalCreate(
             [Description("Lacerte ClientNumber in the active context.")] string clientNumber,
             [Description("Short title, e.g. \"2024 1065 from trial balance\". Default: client + year + module.")] string? title = null,
@@ -135,7 +135,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Submit a Draft / ReturnedForChanges proposal for review. Locks it against agent edits until the operator approves, rejects or returns it. Then tell the operator to review it on the control page (Proposals) or with `lacerte-mcp proposal show <id>` — you cannot approve it yourself.")]
+        [Description("Submit a Draft / ReturnedForChanges proposal for review. Locks it against agent edits until the operator approves, rejects or returns it. Then tell the operator to review it on the control page (Proposals) or with `lacerte-mcp proposal show <id>` — they approve it with their approval PIN; you cannot approve it yourself.")]
         public Task<string> LacerteProposalSubmit(
             [Description("The proposal id.")] string proposalId)
         {
@@ -182,7 +182,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Write an APPROVED proposal to the return. Refused unless a person approved it and it hasn't changed since (version + content hash). Writes only the approved lines, in the proposal's own context, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection). Field failures are recorded and the commit continues; a detail-row error after which the row may be on the return stops it (that line is Uncertain: never retry it — the operator checks Lacerte and resolves it). A PartiallyCommitted / CommitFailed proposal can be committed again: only unfinished lines run. Report each line's result to the operator; verified=null means not confirmed by a read-back.")]
+        [Description("Write an APPROVED proposal to the return. Refused unless a person approved it and it hasn't changed since (version + content hash), and unless the client still exists under the approved name (9024; nothing written). Writes only the approved lines, in the proposal's own context, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection). Field failures are recorded and the commit continues; a detail-row error after which the row may be on the return stops it (that line is Uncertain: never retry it — the operator checks Lacerte and resolves it). A PartiallyCommitted / CommitFailed proposal can be committed again: only unfinished lines run. Report each line's result to the operator; verified=null means not confirmed by a read-back.")]
         public Task<string> LacerteProposalCommit(
             [Description("The proposal id.")] string proposalId,
             CancellationToken cancellationToken = default)

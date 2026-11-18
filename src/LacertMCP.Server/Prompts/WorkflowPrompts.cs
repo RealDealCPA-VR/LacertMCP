@@ -409,8 +409,8 @@ Step 5 — Build a proposal (nothing is written to the return yet)
   • Anything the preparer must decide goes to `lacerte_proposal_add_questions`.
 
 Step 6 — Submit for review (HARD GATE: a person approves)
-  • Call `lacerte_proposal_submit`, then tell the operator the proposal id, the number of lines, manual items and questions, and that they review and approve it on the control page (Proposals) or on the Lacerte PC with `lacerte-mcp proposal show <id>` and `lacerte-mcp proposal approve <id> --confirm`.
-  • You cannot approve a proposal, and nothing is written until a person approves it. Do not enter this return with `lacerte_field_write` / `lacerte_detail_write` or their bulk forms: the proposal is the record of what was approved (a server running with LACERTE_REQUIRE_APPROVAL=1 refuses direct writes with 9023).
+  • Call `lacerte_proposal_submit`, then tell the operator the proposal id, the return it goes into (`state.entriesGoInto`), the number of lines, manual items and questions, and that they review and approve it on the control page (Proposals) or on the Lacerte PC with `lacerte-mcp proposal show <id>` and `lacerte-mcp proposal approve <id> --confirm`, confirming the client number and entering their approval PIN.
+  • You cannot approve a proposal (never ask for, guess or enter the approval PIN), and nothing is written until a person approves it. Do not enter this return with `lacerte_field_write` / `lacerte_detail_write` or their bulk forms: the proposal is the record of what was approved (a server running with LACERTE_REQUIRE_APPROVAL=1 refuses direct writes with 9023).
   • If the operator returns it for changes (status ReturnedForChanges; their note is in `lastReview`), make the changes and submit again. Changing an approved proposal revokes its approval.
 
 Step 7 — Commit after approval

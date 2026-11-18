@@ -22,7 +22,24 @@ namespace LacertMCP.Tests.Proposals
             catch (UnauthorizedAccessException) { }
         }
 
+        /// <summary>The approval PIN the test stores are set up with.</summary>
+        public const string TestPin = "test-pin-2468";
+
+        /// <summary>An approval PIN in <paramref name="dir"/> with cheap PBKDF2 (tests only), set to <see cref="TestPin"/> unless <paramref name="set"/> is false.</summary>
+        public static ApprovalPin NewPin(string dir, bool set = true)
+        {
+            var pin = new ApprovalPin(dir) { Iterations = 1000 };
+            if (set) pin.Set(TestPin, null);
+            return pin;
+        }
+
+        /// <summary>A store whose proposals AND approval-pin.json live in <paramref name="dir"/> (never the shared temp folder).</summary>
+        public static ProposalStore NewStore(string dir, bool pinSet = true) => new ProposalStore(dir, NewPin(dir, pinSet));
+
         public static ProposalContext Ctx() => new ProposalContext { DataPath = @"C:\Lacerte\24Tax\IData", TaxYear = 2024, Module = "I" };
+
+        public static ProposalTargetReturn Target(string clientNumber = "1001", string name = "John Smith")
+            => new ProposalTargetReturn { ClientNumber = clientNumber, ClientName = name, ClientId = "SMIT" };
 
         public static ProposalLine FieldLine(string field, object value, bool ok = true) => new ProposalLine
         {
@@ -51,7 +68,7 @@ namespace LacertMCP.Tests.Proposals
         /// <summary>A Draft proposal with the given lines (ids L1..Ln), created through the store's agent path.</summary>
         public static Proposal NewProposal(ProposalStore store, params ProposalLine[] lines)
         {
-            var p = store.Create(Ctx(), "1001", "test proposal", "notes", "stdio");
+            var p = store.Create(Ctx(), "1001", "test proposal", "notes", "stdio", Target());
             if (lines.Length == 0) return p;
             return store.EditContent(p.Id, "stdio", "lines", q =>
             {
@@ -73,7 +90,7 @@ namespace LacertMCP.Tests.Proposals
                 var d = Array.IndexOf(reject, l.LineId) >= 0 ? ReviewerDecision.Rejected : ReviewerDecision.Approved;
                 p = store.SetLineDecision(p.Id, l.LineId, d, null, p.Version);
             }
-            return store.Approve(p.Id, "reviewer@pc", ProposalStore.ChannelCli, p.Version, "looks right");
+            return store.Approve(p.Id, "reviewer@pc", ProposalStore.ChannelCli, p.Version, TestPin, p.ClientNumber, "looks right");
         }
     }
 }

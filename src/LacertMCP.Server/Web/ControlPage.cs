@@ -88,7 +88,7 @@ namespace LacertMCP.Server.Web
   button.danger { color: var(--bad); border-color: var(--bad); background: var(--panel); }
   button:disabled { opacity: .5; cursor: default; }
   button:focus-visible, select:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  select, input[type=text] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+  select, input[type=text], input[type=password] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .banner { border-radius: 9px; padding: 10px 12px; margin: 0 0 12px; font-size: 13.5px; overflow-wrap: anywhere; }
   .banner.ok { background: var(--ok-bg); color: var(--ok); } .banner.warn { background: var(--warn-bg); color: var(--warn); }
@@ -135,6 +135,8 @@ namespace LacertMCP.Server.Web
   .meta > div:nth-child(odd) { color: var(--muted); }
   .ctrl { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
   .ctrl input[type=text] { flex: 1; min-width: 200px; }
+  .ctrl input[type=password] { width: 170px; }
+  .target-return { border: 2px solid var(--info); border-radius: 10px; padding: 10px 12px; background: var(--info-bg); color: var(--text); font-weight: 600; font-size: 15px; margin: 12px 0; overflow-wrap: anywhere; }
   .excerpt { font-style: italic; }
   .t-ok { color: var(--ok); } .t-warn { color: var(--warn); } .t-bad { color: var(--bad); font-weight: 600; }
   .confirm { border: 2px solid var(--bad); border-radius: 10px; padding: 12px 14px; background: var(--bad-bg); margin-top: 10px; }
@@ -203,7 +205,8 @@ namespace LacertMCP.Server.Web
     <div class="banner warn" id="propPrivacy">Proposals contain taxpayer data: amounts, descriptions and excerpts from the client's documents. Review them on a screen only you can see.</div>
     <div class="panel" id="propListPanel">
       <h2>Proposals</h2>
-      <p class="lead">Entries an agent prepared for a client's return, with where each value came from. Nothing is written to Lacerte until you approve a proposal here and commit it. Decide every line, then approve the proposal; or send it back to the agent with a note.</p>
+      <p class="lead">Entries an agent prepared for a client's return, with where each value came from. Nothing is written to Lacerte until you approve a proposal here with your approval PIN and commit it. Decide every line, then approve the proposal; or send it back to the agent with a note.</p>
+      <div id="propPin"></div>
       <div class="row" style="margin-bottom:10px">
         <select id="propStatus" aria-label="Status">
           <option value="">All statuses</option>
@@ -554,7 +557,23 @@ namespace LacertMCP.Server.Web
   // refresh never wipes a note being typed. Typed notes live in prop.notes,
   // keyed by proposal + input, and are put back on every render.
   var activeTab = "overview";
-  var prop = { list: null, listError: null, openId: null, detail: null, renderedKey: null, notes: {}, confirm: false, busy: null, report: null, err: null };
+  var prop = { list: null, listError: null, openId: null, detail: null, renderedKey: null, notes: {}, confirm: false, busy: null, report: null, err: null, pin: null };
+  var PIN_SETUP = "No approval PIN is set, so nothing can be approved. On the Lacerte PC, open a console and run: lacerte-mcp approval-pin set";
+  // The approval PIN is read from its input on click, sent once, and the input is
+  // cleared right away. It is never kept in prop, the notes or the page's storage.
+  function pinInput(label) {
+    var i = el("input"); i.type = "password"; i.placeholder = label || "Approval PIN"; i.maxLength = 64;
+    i.autocomplete = "off"; i.setAttribute("aria-label", label || "Approval PIN"); i.spellcheck = false;
+    return i;
+  }
+  function takePin(i) { var v = i.value; i.value = ""; return v; }
+  function pinState() { var s = prop.pin || {}; return { set: !!s.isSet, locked: s.lockedUntilUtc ? new Date(s.lockedUntilUtc) > new Date() : false, until: s.lockedUntilUtc, changed: s.changedAtUtc }; }
+  function pinNotice(box) {
+    var ps = pinState();
+    if (!prop.pin) return;
+    if (!ps.set) { box.appendChild(el("div", "banner warn", PIN_SETUP)); return; }
+    if (ps.locked) box.appendChild(el("div", "banner err", "Approvals are locked after too many wrong PINs until " + when(ps.until) + "."));
+  }
   var STATUS_LABEL = { Draft: "Draft (agent still working)", Submitted: "Waiting for review", Approved: "Approved, not committed", Rejected: "Rejected", ReturnedForChanges: "Returned for changes", Committing: "Writing to Lacerte", Committed: "Committed", PartiallyCommitted: "Partly committed", CommitFailed: "Commit failed" };
   var STATUS_TONE = { Submitted: "info", Approved: "ok", Committed: "ok", ReturnedForChanges: "warn", PartiallyCommitted: "bad", CommitFailed: "bad", Committing: "info" };
   var COMMIT_LABEL = { Running: "Was being written when the server stopped", Succeeded: "Written and verified", SucceededUnverified: "Written, not verified", Failed: "Not written", Uncertain: "May already be on the return", Skipped: "Skipped (the commit stopped earlier)" };
@@ -620,7 +639,7 @@ namespace LacertMCP.Server.Web
     if (st) q.push("status=" + encodeURIComponent(st));
     if (cl) q.push("client=" + encodeURIComponent(cl));
     return api("GET", "/api/proposals" + (q.length ? "?" + q.join("&") : ""))
-      .then(function (j) { prop.list = j; prop.listError = null; renderPropList(); })
+      .then(function (j) { prop.list = j; prop.listError = null; if (j.approvalPin !== undefined) prop.pin = j.approvalPin; renderPropList(); })
       .catch(function (e) { prop.listError = e.message; renderPropList(); });
   }
 
@@ -630,6 +649,12 @@ namespace LacertMCP.Server.Web
     if (prop.listError) { msg.appendChild(el("div", "banner err", "Couldn't load proposals: " + prop.listError)); return; }
     if (!prop.list) return;
     $("propFolder").textContent = prop.list.folder || "";
+    var pb = $("propPin"); clear(pb);
+    if (prop.pin) {
+      var ps = pinState();
+      pinNotice(pb);
+      if (ps.set) pb.appendChild(el("p", "small muted", "Approval PIN last changed " + (ps.changed ? when(ps.changed) : "(unknown)") + ". If you didn't change it then, someone else did: on the Lacerte PC run lacerte-mcp approval-pin reset --confirm, then set a new one."));
+    }
     var rows = prop.list.proposals || [];
     if (!rows.length) {
       var tr0 = el("tr"); var td0 = el("td", "empty", ($("propStatus").value || $("propClient").value.trim()) ? "No proposals match these filters." : "No proposals yet. When an agent submits one, it appears here.");
@@ -698,9 +723,11 @@ namespace LacertMCP.Server.Web
 
   function setDetail(view, force) {
     var p = view.proposal;
-    var key = [p.id, p.version, p.status, p.updatedAt].join("|");
+    var pk = view.approvalPin ? [view.approvalPin.isSet, view.approvalPin.changedAtUtc, view.approvalPin.lockedUntilUtc].join("/") : "";
+    var key = [p.id, p.version, p.status, p.updatedAt, pk].join("|");
     var changed = key !== prop.renderedKey;
     prop.detail = view;
+    if (view.approvalPin !== undefined) prop.pin = view.approvalPin;
     if (changed) prop.confirm = false;
     if (changed || force) { prop.renderedKey = key; renderDetail(); }
   }
@@ -760,11 +787,15 @@ namespace LacertMCP.Server.Web
     kv("Data folder", p.context.dataPath);
     kv("Prepared by", p.author + " · created " + when(p.createdAt) + " · updated " + when(p.updatedAt));
     if (p.notes) kv("Agent's notes", p.notes);
+    box.appendChild(el("div", "target-return", "Entries go into: " + (st.entriesGoInto || "")));
+    if (!p.targetReturn) box.appendChild(el("div", "banner err", "This proposal has no recorded client identity, so it can't be approved. Ask the agent to create a new proposal."));
     box.appendChild(hd);
 
     if (p.approval) {
       var ap = p.approval;
-      var t = "Approved by " + ap.by + " (" + ap.channel + ") on " + when(ap.at) + " for version " + ap.version + (ap.note ? ". Note: " + ap.note : ".");
+      var t = "Approved by " + ap.by + " (" + ap.channel + (ap.pinVerified ? ", approval PIN verified" : "") + ") on " + when(ap.at) + " for version " + ap.version
+        + (ap.targetReturn ? " and client " + ap.targetReturn.clientNumber + (ap.targetReturn.clientName ? " · " + ap.targetReturn.clientName : "") : "")
+        + (ap.note ? ". Note: " + ap.note : ".");
       var ab = el("div", "banner " + (st.approvalCurrent ? "ok" : "err"), st.approvalCurrent ? t : t + " OUT OF DATE: the proposal changed after this approval, so it can't be committed until it is approved again.");
       ab.style.marginTop = "12px"; box.appendChild(ab);
     }
@@ -885,13 +916,20 @@ namespace LacertMCP.Server.Web
       var dd = (l.target && l.target.detail) || {};
       rz.appendChild(el("p", null, "This row may already be on the return. In Lacerte, open client " + p.clientNumber + " and look for: " + targetText(l) + ", amount " + money(dd.amount) + (dd.description ? ", “" + dd.description + "”" : "") + ". Then say what you found."));
       rz.appendChild(el("p", "small", "It's in the return: marks the line written; it is not written again. It's missing: the next commit writes it once."));
+      var rps = pinState();
+      if (!rps.set) rz.appendChild(el("p", "small t-bad", PIN_SETUP));
+      else if (rps.locked) rz.appendChild(el("p", "small t-bad", "Locked after too many wrong PINs until " + when(rps.until) + "."));
       var rctl = el("div", "ctrl");
       rctl.appendChild(noteInput("resolve:" + l.lineId, "What you checked (optional)"));
+      var rpin = pinInput("Approval PIN");
+      rctl.appendChild(rpin);
       var yes = el("button", null, "It's in the return");
       var no = el("button", "danger", "It's missing");
-      yes.disabled = no.disabled = !!prop.busy;
+      yes.disabled = no.disabled = !!prop.busy || !rps.set || rps.locked;
       var resolve = function (inReturn) {
-        act("resolve", { lineId: l.lineId, rowIsInReturn: inReturn, note: noteVal("resolve:" + l.lineId) },
+        var pin = takePin(rpin);
+        if (!pin) { prop.err = { text: "Enter your approval PIN to resolve " + l.lineId + "." }; renderDetail(); return; }
+        act("resolve", { lineId: l.lineId, rowIsInReturn: inReturn, pin: pin, note: noteVal("resolve:" + l.lineId) },
           l.lineId + (inReturn ? " marked as in the return." : " marked as missing; the next commit writes it."),
           function () { delete prop.notes[nk("resolve:" + l.lineId)]; });
       };
@@ -922,15 +960,33 @@ namespace LacertMCP.Server.Web
 
     if (p.status === "Submitted") {
       box.appendChild(el("p", null, st.approvedLineCount + " approved · " + st.rejectedLineCount + " rejected · " + st.pendingLineCount + " not decided" + (st.invalidLineCount ? " · " + st.invalidLineCount + " failed dry run" : "")));
+      var aps = pinState();
+      var ad = el("div", "confirm");
+      ad.appendChild(el("div", "target-return", "Entries go into: " + (st.entriesGoInto || "")));
+      ad.appendChild(el("p", "small", "Approving says these entries belong in this client's return. Type the client number to confirm it, and enter your approval PIN."));
+      pinNotice(ad);
+      if (aps.set && aps.changed) ad.appendChild(el("p", "small muted", "Approval PIN last changed " + when(aps.changed) + "."));
       var r1 = el("div", "ctrl");
-      r1.appendChild(noteInput("approve", "Note for the approval record (optional)"));
+      var cn = noteInput("confirmClient", "Type the client number to confirm");
+      cn.maxLength = 64; cn.style.flex = "0 1 220px"; cn.style.minWidth = "160px";
+      r1.appendChild(cn);
+      var apin = pinInput("Approval PIN");
+      r1.appendChild(apin);
+      ad.appendChild(r1);
+      var r1b = el("div", "ctrl");
+      r1b.appendChild(noteInput("approve", "Note for the approval record (optional)"));
       var apb = el("button", "primary", "Approve proposal (version " + p.version + ")");
-      apb.disabled = !!prop.busy || !st.readyToApprove;
+      apb.disabled = !!prop.busy || !st.readyToApprove || !aps.set || aps.locked;
+      if (!aps.set) apb.title = PIN_SETUP;
       apb.addEventListener("click", function () {
-        act("approve", { expectedVersion: p.version, note: noteVal("approve") }, "Approved version " + p.version + ". Commit it when you're ready.",
-          function () { delete prop.notes[nk("approve")]; });
+        var pin = takePin(apin);
+        var typed = noteVal("confirmClient").trim();
+        if (!typed) { prop.err = { text: "Type the client number of the return the entries go into." }; renderDetail(); return; }
+        if (!pin) { prop.err = { text: "Enter your approval PIN." }; renderDetail(); return; }
+        act("approve", { expectedVersion: p.version, clientNumber: typed, pin: pin, note: noteVal("approve") }, "Approved version " + p.version + ". Commit it when you're ready.",
+          function () { delete prop.notes[nk("approve")]; delete prop.notes[nk("confirmClient")]; });
       });
-      r1.appendChild(apb); box.appendChild(r1);
+      r1b.appendChild(apb); ad.appendChild(r1b); box.appendChild(ad);
       if (!st.readyToApprove) blockersList("Can't approve yet:");
     }
 

@@ -80,6 +80,20 @@ namespace LacertMCP.Server.Proposals
         public string Module { get; set; } = string.Empty;
     }
 
+    /// <summary>
+    /// Which client return the entries go into, captured from the client row when
+    /// the proposal was created. Part of the content hash; the approval records it
+    /// and the commit refuses when the client is gone or its name changed.
+    /// </summary>
+    public sealed class ProposalTargetReturn
+    {
+        public string ClientNumber { get; set; } = string.Empty;
+        /// <summary>Individual: first + last name (C1_1, C1_2); other modules: the entity name (C1_1). Empty when the return has no name.</summary>
+        public string ClientName { get; set; } = string.Empty;
+        /// <summary>The client's ClientID when the row carries one (simulation); null otherwise.</summary>
+        public string? ClientId { get; set; }
+    }
+
     /// <summary>Where a value came from.</summary>
     public sealed class SourceCitation
     {
@@ -198,6 +212,12 @@ namespace LacertMCP.Server.Proposals
         public string ContentHash { get; set; } = string.Empty;
         public Dictionary<string, ReviewerDecision> LineDecisions { get; set; } = new Dictionary<string, ReviewerDecision>();
         public string? Note { get; set; }
+        /// <summary>The return the person approved the entries for (client number + name); the commit checks the return still matches.</summary>
+        public ProposalTargetReturn? TargetReturn { get; set; }
+        /// <summary>The (dataPath, taxYear, module) the person approved.</summary>
+        public ProposalContext? TargetContext { get; set; }
+        /// <summary>True when the approval PIN was verified for this approval.</summary>
+        public bool PinVerified { get; set; }
     }
 
     /// <summary>One entry in the proposal's audit trail.</summary>
@@ -232,6 +252,8 @@ namespace LacertMCP.Server.Proposals
         public string Author { get; set; } = string.Empty;
         public ProposalContext Context { get; set; } = new ProposalContext();
         public string ClientNumber { get; set; } = string.Empty;
+        /// <summary>The client identity captured at create; null on proposals made before it was recorded (they can't be approved).</summary>
+        public ProposalTargetReturn? TargetReturn { get; set; }
         public string Title { get; set; } = string.Empty;
         public ProposalStatus Status { get; set; } = ProposalStatus.Draft;
         /// <summary>Bumps on every content change. An approval is for one version.</summary>
@@ -265,6 +287,10 @@ namespace LacertMCP.Server.Proposals
     {
         public string Id { get; set; } = string.Empty;
         public string ClientNumber { get; set; } = string.Empty;
+        /// <summary>The client's name captured at create (null when not recorded).</summary>
+        public string? ClientName { get; set; }
+        /// <summary>"client 1001 · John Smith · Individual (1040) 2024 · C:\..." — where the entries go.</summary>
+        public string EntriesGoInto { get; set; } = string.Empty;
         public string Title { get; set; } = string.Empty;
         public ProposalStatus Status { get; set; }
         public int Version { get; set; }
@@ -285,6 +311,8 @@ namespace LacertMCP.Server.Proposals
     public sealed class ProposalState
     {
         public string ContentHash { get; set; } = string.Empty;
+        /// <summary>"client 1001 · John Smith · Individual (1040) 2024 · C:\..." — the return the entries go into.</summary>
+        public string EntriesGoInto { get; set; } = string.Empty;
         /// <summary>An approval exists and still matches the current version and content hash.</summary>
         public bool ApprovalCurrent { get; set; }
         /// <summary>Approve() would succeed (Submitted, every line decided, at least one approved, no approved invalid line).</summary>

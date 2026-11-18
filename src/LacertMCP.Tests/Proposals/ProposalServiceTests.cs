@@ -33,8 +33,12 @@ namespace LacertMCP.Tests.Proposals
         {
             AccessMapInMemorySeed.EnsureWritableFieldSeeded(module: 'I', table: 1, field: "C1_15");
             AccessMapInMemorySeed.EnsureWritableFieldSeeded(module: 'I', table: 1, field: "C1_71");
-            _store = new ProposalStore(System.IO.Path.Combine(_dir, "proposals"));
+            _store = new ProposalStore(System.IO.Path.Combine(_dir, "proposals"), NewPin(_dir));
         }
+
+        /// <summary>The live harness's DATA1 row for SMIT (padded CHAR columns like the driver).</summary>
+        private static void SeedLiveClient(FakeDetailDb db, string first = "John", string last = "Smith")
+            => db.ClientRows["SMIT"] = new Dictionary<string, object> { ["C1_0"] = "SMIT", ["C1_1"] = first, ["C1_2"] = last, ["C1_15"] = "OLD" };
 
         public void Dispose() => TryDelete(_dir);
 
@@ -212,7 +216,7 @@ namespace LacertMCP.Tests.Proposals
             p = _store.SetLineDecision(id, "L1", ReviewerDecision.Approved, null, p.Version);
             p = _store.SetLineDecision(id, "L2", ReviewerDecision.Rejected, "not this one", p.Version);
             p = _store.SetLineDecision(id, "L3", ReviewerDecision.Approved, null, p.Version);
-            _store.Approve(id, "preparer", ProposalStore.ChannelControlPage, p.Version);
+            _store.Approve(id, "preparer", ProposalStore.ChannelControlPage, p.Version, TestPin, Client);
 
             var report = Ok(await tools.LacerteProposalCommit(id));
             Assert.Equal("Committed", report.GetProperty("status").GetString());
@@ -470,7 +474,7 @@ namespace LacertMCP.Tests.Proposals
             };
 
         private Proposal NewLiveProposal() => _store.Create(
-            new ProposalContext { DataPath = LiveDetailWriteHarness.DataPath, TaxYear = 2024, Module = "I" }, "SMIT", "live", null, "stdio");
+            new ProposalContext { DataPath = LiveDetailWriteHarness.DataPath, TaxYear = 2024, Module = "I" }, "SMIT", "live", null, "stdio", Target("SMIT", "John Smith"));
 
         [Fact]
         public async Task Live_AddLines_DetailDryRun_EnforcesDictionaryAndSuffix()
@@ -480,6 +484,7 @@ namespace LacertMCP.Tests.Proposals
             {
                 var db = new FakeDetailDb();
                 db.For("SMIT");
+                SeedLiveClient(db);
                 var runner = new FakeDetailWriteRunner();
                 using var mgr = LiveDetailWriteHarness.NewEnabled(db, runner, snap);
                 var service = new ProposalService(mgr, _store);
@@ -524,6 +529,7 @@ namespace LacertMCP.Tests.Proposals
             {
                 var db = new FakeDetailDb();
                 db.For("SMIT");
+                SeedLiveClient(db);
                 var runner = new FakeDetailWriteRunner();
                 using var mgr = LiveDetailWriteHarness.NewEnabled(db, runner, snap);
                 var service = new ProposalService(mgr, _store);
@@ -566,7 +572,7 @@ namespace LacertMCP.Tests.Proposals
                 Assert.Contains("L2", (string)ex.Context["reason"]!);
 
                 // The operator checked Lacerte: ROW-B is missing → the next commit writes it once, with a new key.
-                _store.ResolveUncertainLine(p.Id, "L2", rowIsInReturn: false, "preparer", ProposalStore.ChannelCli, "not there");
+                _store.ResolveUncertainLine(p.Id, "L2", rowIsInReturn: false, "preparer", ProposalStore.ChannelCli, TestPin, "not there");
                 var r3 = await service.CommitAsync(p.Id);
                 Assert.Equal(ProposalStatus.Committed, r3.Status);
                 Assert.Equal(4, runner.Calls.Count);
@@ -587,6 +593,7 @@ namespace LacertMCP.Tests.Proposals
             {
                 var db = new FakeDetailDb();
                 db.For("SMIT");
+                SeedLiveClient(db);
                 var runner = new FakeDetailWriteRunner();
                 using var mgr = LiveDetailWriteHarness.NewEnabled(db, runner, snap);
                 var service = new ProposalService(mgr, _store);

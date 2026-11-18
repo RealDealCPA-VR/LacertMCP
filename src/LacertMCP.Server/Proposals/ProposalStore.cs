@@ -37,7 +37,12 @@ namespace LacertMCP.Server.Proposals
     /// <see cref="ReturnForChanges"/>, <see cref="ResolveUncertainLine"/>) are for
     /// HUMAN channels only — the control page and the CLI. No MCP tool calls them
     /// (pinned by a reflection test). Agent edits go through
-    /// <see cref="ProposalService"/>; they are internal to this assembly.</para>
+    /// <see cref="ProposalService"/>; they are internal to this assembly.
+    /// <see cref="Approve"/> and <see cref="ResolveUncertainLine"/> also need the
+    /// owner's approval PIN (<see cref="Pin"/>, <c>approval-pin.json</c> in the data
+    /// folder), so an agent with shell access on this PC still can't approve; an
+    /// approval also confirms the client number and records the target return
+    /// (<see cref="ProposalTargetReturn"/>) that the commit re-checks.</para>
     /// </summary>
     public sealed class ProposalStore
     {
@@ -80,14 +85,20 @@ namespace LacertMCP.Server.Proposals
             "firm's retention policy. Do not edit the files by hand: an edited proposal no longer matches its\r\n" +
             "approval and will not be committed.\r\n";
 
-        public ProposalStore(string directory)
+        /// <param name="directory">The proposal folder.</param>
+        /// <param name="pin">The approval PIN to check on approve / resolve. Default: <c>approval-pin.json</c> in the folder's parent (the data folder).</param>
+        public ProposalStore(string directory, ApprovalPin? pin = null)
         {
             if (string.IsNullOrWhiteSpace(directory)) throw new ArgumentException("directory is required", nameof(directory));
             DirectoryPath = Path.GetFullPath(directory);
+            Pin = pin ?? ApprovalPin.ForProposalDirectory(DirectoryPath);
         }
 
         /// <summary>The folder holding the proposal files.</summary>
         public string DirectoryPath { get; }
+
+        /// <summary>The approval PIN <see cref="Approve"/> and <see cref="ResolveUncertainLine"/> check.</summary>
+        public ApprovalPin Pin { get; }
 
         /// <summary>Clock seam for tests.</summary>
         internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
@@ -172,7 +183,7 @@ namespace LacertMCP.Server.Proposals
         /// <summary>Computed review state: content hash, whether the approval is current, what blocks approve / commit.</summary>
         public static ProposalState Evaluate(Proposal p)
         {
-            var state = new ProposalState { ContentHash = ComputeContentHash(p) };
+            var state = new ProposalState { ContentHash = ComputeContentHash(p), EntriesGoInto = DescribeTargetReturn(p) };
             state.AgentEditable = IsAgentEditable(p.Status);
             foreach (var l in p.Lines)
             {
@@ -213,21 +224,24 @@ namespace LacertMCP.Server.Proposals
 
         /// <summary>
         /// SHA-256 (lowercase hex) over everything an approval covers: id, context,
-        /// client, title, notes, every line's agent-authored content (kind, target,
-        /// value, dictionary id, source, reasoning, confidence), manual items and
+        /// client, the target return's identity (client number, name, client id),
+        /// title, notes, every line's agent-authored content (kind, target, value,
+        /// dictionary id, source, reasoning, confidence), manual items and
         /// questions. NOT over previews, reviewer decisions, commit results,
         /// timestamps or history — those change without changing what was approved.
         /// </summary>
         public static string ComputeContentHash(Proposal p)
         {
+            var target = p.TargetReturn;
             var canonical = new object?[]
             {
-                "lacerte-proposal/1",
+                "lacerte-proposal/2",
                 p.Id,
                 p.Context.DataPath,
                 p.Context.TaxYear,
                 (p.Context.Module ?? string.Empty).ToUpperInvariant(),
                 p.ClientNumber,
+                target == null ? null : new object?[] { target.ClientNumber, target.ClientName, target.ClientId },
                 p.Title,
                 p.Notes,
                 p.Lines.Select(CanonicalLine).ToArray(),
@@ -327,11 +341,18 @@ namespace LacertMCP.Server.Proposals
         /// <summary>
         /// Approves a Submitted proposal. Requires every line decided (Approved or
         /// Rejected), at least one Approved line, no Approved line with a failed dry
-        /// run, and <paramref name="expectedVersion"/> == the current version.
-        /// Records <see cref="ProposalApproval"/> (who, channel, when, version,
-        /// content hash, per-line decisions).
+        /// run, <paramref name="expectedVersion"/> == the current version, a
+        /// recorded target return, <paramref name="confirmClientNumber"/> equal to
+        /// the proposal's client number, and the right approval
+        /// <paramref name="pin"/> (<see cref="Pin"/>; not set / wrong / locked →
+        /// 9024 with <c>pinCheck</c> in the context, and nothing changes).
+        /// <paramref name="lineDecisions"/> (the CLI) decides lines in the same
+        /// step, after the PIN is verified. Records <see cref="ProposalApproval"/>
+        /// (who, channel, when, version, content hash, per-line decisions, the target
+        /// return and context, pinVerified).
         /// </summary>
-        public Proposal Approve(string id, string by, string channel, int expectedVersion, string? note = null)
+        public Proposal Approve(string id, string by, string channel, int expectedVersion, string? pin, string? confirmClientNumber,
+            string? note = null, IReadOnlyDictionary<string, ReviewerDecision>? lineDecisions = null)
         {
             RequireHumanChannel(channel);
             by = RequireBy(by);
@@ -339,8 +360,20 @@ namespace LacertMCP.Server.Proposals
             {
                 RequireStatus(p, "approve", ProposalStatus.Submitted);
                 RequireVersion(p, expectedVersion);
+                if (lineDecisions != null)
+                {
+                    foreach (var kv in lineDecisions)
+                    {
+                        var line = FindLine(p, kv.Key);
+                        if (kv.Value == ReviewerDecision.Approved && !line.Preview.Ok)
+                            throw Conflict(p, "Line " + line.LineId + " failed its dry run and can't be approved.");
+                        line.ReviewerDecision = kv.Value;
+                    }
+                }
                 var blockers = ApproveBlockers(p);
                 if (blockers.Count > 0) throw Conflict(p, string.Join(" ", blockers));
+                RequireConfirmedClient(p, confirmClientNumber);
+                RequirePin(p, pin);
                 var now = Clock();
                 p.Approval = new ProposalApproval
                 {
@@ -351,10 +384,41 @@ namespace LacertMCP.Server.Proposals
                     ContentHash = ComputeContentHash(p),
                     LineDecisions = p.Lines.ToDictionary(l => l.LineId, l => l.ReviewerDecision, StringComparer.Ordinal),
                     Note = Trim(note, 2000),
+                    TargetReturn = CopyTarget(p.TargetReturn!),
+                    TargetContext = new ProposalContext { DataPath = p.Context.DataPath, TaxYear = p.Context.TaxYear, Module = p.Context.Module },
+                    PinVerified = true,
                 };
                 p.Status = ProposalStatus.Approved;
-                AddEvent(p, by, channel, "approved", note);
+                AddEvent(p, by, channel, "approved", "Entries go into: " + DescribeTargetReturn(p) + (string.IsNullOrWhiteSpace(note) ? "" : ". " + note));
             });
+        }
+
+        /// <summary>The typed client number must be the proposal's (the person confirms the return the entries go into).</summary>
+        private static void RequireConfirmedClient(Proposal p, string? confirmClientNumber)
+        {
+            var typed = (confirmClientNumber ?? string.Empty).Trim();
+            if (typed.Length == 0)
+                throw Conflict(p, "Type the client number to confirm the return the entries go into (" + DescribeTargetReturn(p) + ").");
+            if (!string.Equals(typed, p.ClientNumber, StringComparison.OrdinalIgnoreCase))
+                throw Conflict(p, "The client number you typed (" + Trim(typed, 64) + ") is not this proposal's client: the entries go into " + DescribeTargetReturn(p) + ". Nothing was approved.");
+        }
+
+        /// <summary>Verifies the approval PIN; throws 9024 (pinCheck NotSet / Wrong / Locked) when it isn't right. Never includes the PIN.</summary>
+        private void RequirePin(Proposal p, string? pin)
+        {
+            var check = Pin.Verify(pin);
+            if (check.IsOk) return;
+            var ctx = new Dictionary<string, object?>
+            {
+                ["proposalId"] = p.Id,
+                ["status"] = p.Status.ToString(),
+                ["version"] = p.Version,
+                ["reason"] = ApprovalPin.Describe(check),
+                ["pinCheck"] = check.Outcome.ToString(),
+            };
+            if (check.Outcome == ApprovalPinOutcome.Wrong) ctx["remainingAttempts"] = check.RemainingAttempts;
+            if (check.LockedUntilUtc.HasValue) ctx["lockedUntil"] = check.LockedUntilUtc.Value;
+            throw new LacerteSDKError(SyntheticStatusCodes.ProposalConflict, ctx);
         }
 
         /// <summary>Rejects the proposal (terminal). Allowed from Submitted, Approved or ReturnedForChanges.</summary>
@@ -390,8 +454,10 @@ namespace LacertMCP.Server.Proposals
         /// landed): <paramref name="rowIsInReturn"/> true marks it Succeeded (no
         /// re-write); false marks it Failed with a fresh idempotency key generation so
         /// the next commit writes it once. Doesn't change the approved content.
+        /// Needs the approval <paramref name="pin"/> (it decides whether a row is
+        /// written): not set / wrong / locked → 9024 and nothing changes.
         /// </summary>
-        public Proposal ResolveUncertainLine(string id, string lineId, bool rowIsInReturn, string by, string channel, string? note)
+        public Proposal ResolveUncertainLine(string id, string lineId, bool rowIsInReturn, string by, string channel, string? pin, string? note)
         {
             RequireHumanChannel(channel);
             by = RequireBy(by);
@@ -407,6 +473,7 @@ namespace LacertMCP.Server.Proposals
                 {
                     throw Conflict(p, "A commit is running; resolve the line after it finishes.");
                 }
+                RequirePin(p, pin);
                 var commit = line.Commit!;
                 commit.At = Clock();
                 if (rowIsInReturn)
@@ -429,7 +496,7 @@ namespace LacertMCP.Server.Proposals
         // Agent-side mutations (internal: ProposalService / ProposalTools)
         // =================================================================
 
-        internal Proposal Create(ProposalContext context, string clientNumber, string title, string? notes, string author)
+        internal Proposal Create(ProposalContext context, string clientNumber, string title, string? notes, string author, ProposalTargetReturn? targetReturn)
         {
             Directory.CreateDirectory(DirectoryPath);
             EnsureReadme();
@@ -442,6 +509,7 @@ namespace LacertMCP.Server.Proposals
                 Author = author,
                 Context = context,
                 ClientNumber = clientNumber,
+                TargetReturn = targetReturn,
                 Title = title,
                 Notes = notes,
                 Status = ProposalStatus.Draft,
@@ -536,8 +604,12 @@ namespace LacertMCP.Server.Proposals
             if (!p.Lines.Any(l => l.ReviewerDecision == ReviewerDecision.Approved)) b.Add("At least one line must be approved.");
             var badApproved = p.Lines.Where(l => l.ReviewerDecision == ReviewerDecision.Approved && !l.Preview.Ok).Select(l => l.LineId).ToList();
             if (badApproved.Count > 0) b.Add("Lines that failed their dry run can't be approved: " + string.Join(", ", badApproved) + ".");
+            if (p.TargetReturn == null) b.Add(NoTargetReturnText);
             return b;
         }
+
+        public const string NoTargetReturnText =
+            "This proposal has no recorded client identity (it was created before the target return was captured), so nobody can confirm which return it goes into. Ask the agent to create a new proposal.";
 
         private static List<string> CommitBlockers(Proposal p, ProposalState state)
         {
@@ -549,6 +621,11 @@ namespace LacertMCP.Server.Proposals
             }
             if (p.Approval == null) b.Add("There is no approval.");
             else if (!state.ApprovalCurrent) b.Add("The proposal changed after it was approved (version or content hash differs); it must be approved again.");
+            else
+            {
+                var mismatch = ApprovalTargetMismatch(p);
+                if (mismatch != null) b.Add(mismatch);
+            }
             if (p.Approval != null && state.ApprovalCurrent && state.UnfinishedApprovedLineCount == 0)
             {
                 b.Add(state.UncertainLineIds.Count > 0
@@ -603,6 +680,69 @@ namespace LacertMCP.Server.Proposals
         // =================================================================
 
         public static bool IsValidId(string? id) => id != null && s_idShape.IsMatch(id);
+
+        // ---- target return ------------------------------------------------------------------
+
+        /// <summary>
+        /// Where the entries go: "client 1001 · John Smith · Individual (1040) 2024 · C:\Lacerte\24Tax\IData".
+        /// Displays put "Entries go into: " in front.
+        /// </summary>
+        public static string DescribeTargetReturn(Proposal p)
+        {
+            var t = p.TargetReturn;
+            var number = t?.ClientNumber ?? p.ClientNumber;
+            var name = t == null ? "(client name not recorded)"
+                : string.IsNullOrWhiteSpace(t.ClientName) ? "(no name on the return)" : NormalizeSpaces(t.ClientName);
+            return "client " + number + " · " + name + " · " + FormName(p.Context.Module) + " "
+                + p.Context.TaxYear.ToString(CultureInfo.InvariantCulture) + " · " + p.Context.DataPath;
+        }
+
+        /// <summary>"Individual (1040)", "Partnership (1065)", ... or "module X" for an unknown letter.</summary>
+        public static string FormName(string? module)
+        {
+            var m = (module ?? string.Empty).Trim();
+            var info = m.Length == 1 ? Schema.Modules.GetByChar(char.ToUpperInvariant(m[0])) : null;
+            if (info == null) return "module " + m;
+            var form = info.TaxTypeAliases.FirstOrDefault(a => a.Length > 0 && char.IsDigit(a[0]));
+            return form == null ? info.Name : info.Name + " (" + form + ")";
+        }
+
+        /// <summary>Trim + collapse internal whitespace.</summary>
+        public static string NormalizeSpaces(string? s)
+            => Regex.Replace((s ?? string.Empty).Trim(), @"\s+", " ");
+
+        /// <summary>Names match after trimming, collapsing whitespace and ignoring case.</summary>
+        public static bool SameClientName(string? a, string? b)
+            => string.Equals(NormalizeSpaces(a), NormalizeSpaces(b), StringComparison.OrdinalIgnoreCase);
+
+        internal static ProposalTargetReturn CopyTarget(ProposalTargetReturn t)
+            => new ProposalTargetReturn { ClientNumber = t.ClientNumber, ClientName = t.ClientName, ClientId = t.ClientId };
+
+        /// <summary>
+        /// Why the approval's recorded target (client number, name, context) is not
+        /// the proposal's, or null when it is. Approvals made before the target was
+        /// recorded have none and can't be committed.
+        /// </summary>
+        internal static string? ApprovalTargetMismatch(Proposal p)
+        {
+            var a = p.Approval;
+            if (a == null) return null;
+            var t = p.TargetReturn;
+            if (t == null) return NoTargetReturnText;
+            if (a.TargetReturn == null || a.TargetContext == null)
+                return "The approval doesn't record which return it was for (approved before the target return was captured). Return the proposal and approve it again with the approval PIN.";
+            var approvedCtx = a.TargetContext;
+            var sameContext = string.Equals(approvedCtx.DataPath, p.Context.DataPath, StringComparison.OrdinalIgnoreCase)
+                && approvedCtx.TaxYear == p.Context.TaxYear
+                && string.Equals(approvedCtx.Module, p.Context.Module, StringComparison.OrdinalIgnoreCase);
+            var sameClient = string.Equals((a.TargetReturn.ClientNumber ?? string.Empty).Trim(), (t.ClientNumber ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase)
+                && string.Equals((t.ClientNumber ?? string.Empty).Trim(), (p.ClientNumber ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase)
+                && SameClientName(a.TargetReturn.ClientName, t.ClientName);
+            if (sameContext && sameClient) return null;
+            return "The approval was for client " + a.TargetReturn.ClientNumber + " · " + NormalizeSpaces(a.TargetReturn.ClientName) + " · "
+                + FormName(approvedCtx.Module) + " " + approvedCtx.TaxYear.ToString(CultureInfo.InvariantCulture) + " · " + approvedCtx.DataPath
+                + ", but the proposal is for " + DescribeTargetReturn(p) + ". It must be approved again.";
+        }
 
         internal ProposalLine FindLine(Proposal p, string lineId)
         {
@@ -719,6 +859,8 @@ namespace LacertMCP.Server.Proposals
         {
             Id = p.Id,
             ClientNumber = p.ClientNumber,
+            ClientName = p.TargetReturn?.ClientName,
+            EntriesGoInto = DescribeTargetReturn(p),
             Title = p.Title,
             Status = p.Status,
             Version = p.Version,

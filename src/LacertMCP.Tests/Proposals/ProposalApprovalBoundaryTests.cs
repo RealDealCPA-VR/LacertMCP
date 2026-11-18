@@ -55,7 +55,35 @@ namespace LacertMCP.Tests.Proposals
             var calls = Enumerable.Repeat(cli, 1).Concat(cli.GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public))
                 .SelectMany(CalledMethods).ToList();
             Assert.Contains(calls, m => m.DeclaringType == typeof(ProposalStore) && m.Name == nameof(ProposalStore.Approve));
-            Assert.Contains(calls, m => m.DeclaringType == typeof(ProposalStore) && m.Name == nameof(ProposalStore.SetLineDecision));
+            Assert.Contains(calls, m => m.DeclaringType == typeof(ProposalStore) && m.Name == nameof(ProposalStore.ResolveUncertainLine));
+        }
+
+        /// <summary>
+        /// No MCP tool (nor anything else in the server outside the store and the
+        /// control page) may set, verify, reset or read the approval PIN.
+        /// </summary>
+        [Fact]
+        public void NoServerTypeOutsideTheStoreAndControlPage_TouchesTheApprovalPin()
+        {
+            var asm = typeof(ApprovalPin).Assembly;
+            var pinMethods = new[] { nameof(ApprovalPin.Verify), nameof(ApprovalPin.Set), nameof(ApprovalPin.Reset), nameof(ApprovalPin.Status) };
+            var offenders = new List<string>();
+            foreach (var type in asm.GetTypes())
+            {
+                if (IsWithin(type, typeof(ApprovalPin)) || IsWithin(type, typeof(ProposalStore))) continue;
+                if ((type.Namespace ?? string.Empty).StartsWith("LacertMCP.Server.Web", StringComparison.Ordinal)) continue;
+                foreach (var called in CalledMethods(type))
+                {
+                    if (called.DeclaringType == typeof(ApprovalPin) && Enumerable.Contains(pinMethods, called.Name))
+                        offenders.Add(type.FullName + " -> " + called.Name);
+                    if (called.DeclaringType == typeof(ProposalStore) && called.Name == "get_" + nameof(ProposalStore.Pin))
+                        offenders.Add(type.FullName + " -> ProposalStore.Pin");
+                }
+            }
+            Assert.True(offenders.Count == 0, "Approval PIN used outside the human channels:\n" + string.Join("\n", offenders.Distinct()));
+
+            // Positive control: the store does verify it.
+            Assert.Contains(CalledMethods(typeof(ProposalStore)), m => m.DeclaringType == typeof(ApprovalPin) && m.Name == nameof(ApprovalPin.Verify));
         }
 
         [Fact]

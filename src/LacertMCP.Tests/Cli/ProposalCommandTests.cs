@@ -11,21 +11,43 @@ namespace LacertMCP.Tests.Cli
 {
     /// <summary>
     /// <c>lacerte-mcp proposal list | show | approve | reject | return | resolve</c>
-    /// against a temp store (the same files the server writes).
+    /// against a temp store (the same files the server writes). The interactive
+    /// prompts (client number, approval PIN) are driven through ConsoleInput's test hooks.
     /// </summary>
+    [Collection(ConsoleInputHooksCollection.Name)]
     public sealed class ProposalCommandTests : IDisposable
     {
         private readonly string _dir = NewTempDir();
         private readonly ProposalStore _store;
         private readonly StringWriter _out = new StringWriter();
         private readonly StringWriter _err = new StringWriter();
+        private string? _typedPin = TestPin;
+        private string? _typedLine = "1001";
+        private bool _redirected;
+        private readonly List<string> _prompts = new List<string>();
 
         public ProposalCommandTests()
         {
-            _store = new ProposalStore(_dir);
+            _store = NewStore(_dir);
+            ConsoleInput.InputRedirectedForTests = () => _redirected;
+            ConsoleInput.PinReaderForTests = prompt => { _prompts.Add(prompt); return _typedPin; };
+            ConsoleInput.LineReaderForTests = prompt => { _prompts.Add(prompt); return _typedLine; };
         }
 
-        public void Dispose() => TryDelete(_dir);
+        public void Dispose()
+        {
+            ConsoleInput.InputRedirectedForTests = null;
+            ConsoleInput.PinReaderForTests = null;
+            ConsoleInput.LineReaderForTests = null;
+            TryDelete(_dir);
+        }
+
+        private void AssertPinNeverPrinted()
+        {
+            Assert.DoesNotContain(TestPin, _out.ToString());
+            Assert.DoesNotContain(TestPin, _err.ToString());
+            Assert.DoesNotContain(TestPin, File.ReadAllText(Path.Combine(_dir, ApprovalPin.FileName)));
+        }
 
         private Proposal Submitted()
         {
@@ -67,6 +89,7 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal(0, ProposalCommand.RunShow(_store, p.Id, _out, _err));
             var show = _out.ToString();
             Assert.Contains("Client 1001", show);
+            Assert.Contains("Entries go into: client 1001 · John Smith · Individual (1040) 2024 · C:\\Lacerte\\24Tax\\IData", show);
             Assert.Contains("table 1 C1_15 = \"Acme LLC\"", show);
             Assert.Contains("Series 11 Code 1 Suffix 1000", show);
             Assert.Contains("52,000.50", show);
@@ -110,8 +133,16 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal(ReviewerDecision.Approved, back.Approval.LineDecisions["L1"]);
             Assert.Equal(ReviewerDecision.Rejected, back.Approval.LineDecisions["L2"]);
             Assert.Equal(ReviewerDecision.Rejected, back.Approval.LineDecisions["L3"]);
+            Assert.True(back.Approval.PinVerified);
+            Assert.Equal("John Smith", back.Approval.TargetReturn!.ClientName);
+            Assert.Equal("1001", back.Approval.TargetReturn.ClientNumber);
+            Assert.Equal(2024, back.Approval.TargetContext!.TaxYear);
             Assert.True(ProposalStore.Evaluate(back).ReadyToCommit);
-            Assert.Contains("Nothing is written yet", _out.ToString());
+            var text = _out.ToString();
+            Assert.Contains("Entries go into: client 1001 · John Smith", text);
+            Assert.Contains("Nothing is written yet", text);
+            Assert.Equal(new[] { "Type the client number to confirm: ", "Approval PIN: " }, _prompts.ToArray());
+            AssertPinNeverPrinted();
         }
 
         [Fact]
@@ -127,6 +158,47 @@ namespace LacertMCP.Tests.Cli
             var draft = NewProposal(_store, FieldLine("C1_15", "x"));
             Assert.Equal(1, ProposalCommand.RunApprove(_store, draft.Id, Array.Empty<string>(), null, null, true, "me", _out, _err));
             Assert.Contains("Only a Submitted proposal", _err.ToString());
+            Assert.Empty(_prompts); // refused before asking for the PIN
+        }
+
+        [Fact]
+        public void Approve_WrongPin_OrWrongClient_ChangesNothing_NotEvenLineDecisions()
+        {
+            var p = Submitted();
+            _typedPin = "not-the-pin-99";
+            Assert.Equal(1, ProposalCommand.RunApprove(_store, p.Id, Array.Empty<string>(), null, p.Version, true, "me", _out, _err));
+            Assert.Contains("Wrong approval PIN. 4 attempts left", _err.ToString());
+            Assert.Equal(1, _store.Pin.Status().FailedAttempts);
+
+            _typedPin = TestPin;
+            _typedLine = "1002";
+            Assert.Equal(1, ProposalCommand.RunApprove(_store, p.Id, Array.Empty<string>(), null, p.Version, true, "me", _out, _err));
+            Assert.Contains("not this proposal's client", _err.ToString());
+
+            var back = _store.Get(p.Id)!;
+            Assert.Equal(ProposalStatus.Submitted, back.Status);
+            Assert.Null(back.Approval);
+            Assert.All(back.Lines, l => Assert.Equal(ReviewerDecision.Pending, l.ReviewerDecision));
+            Assert.DoesNotContain("not-the-pin-99", _out.ToString() + _err.ToString());
+            AssertPinNeverPrinted();
+        }
+
+        [Fact]
+        public void Approve_RedirectedInput_OrNoPinSet_IsRefused()
+        {
+            var p = Submitted();
+            _redirected = true;
+            Assert.Equal(1, ProposalCommand.RunApprove(_store, p.Id, Array.Empty<string>(), null, p.Version, true, "me", _out, _err));
+            Assert.Contains("run it yourself in a console", _err.ToString());
+            Assert.Empty(_prompts);
+            // Without --confirm (a preview) redirected input is fine.
+            Assert.Equal(0, ProposalCommand.RunApprove(_store, p.Id, Array.Empty<string>(), null, p.Version, false, "me", _out, _err));
+
+            _redirected = false;
+            _store.Pin.Reset();
+            Assert.Equal(1, ProposalCommand.RunApprove(_store, p.Id, Array.Empty<string>(), null, p.Version, true, "me", _out, _err));
+            Assert.Contains("lacerte-mcp approval-pin set", _err.ToString());
+            Assert.Equal(ProposalStatus.Submitted, _store.Get(p.Id)!.Status);
         }
 
         [Fact]
@@ -162,10 +234,23 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal(1, ProposalCommand.RunResolve(_store, p.Id, "L1", true, true, null, true, "me", _out, _err));
             Assert.Equal(0, ProposalCommand.RunResolve(_store, p.Id, "L1", true, false, null, false, "me", _out, _err));
             Assert.Equal(LineCommitStatus.Uncertain, _store.Get(p.Id)!.Lines[0].Commit!.Status);
+
+            // Redirected input and a wrong PIN are refused; nothing changes.
+            _redirected = true;
+            Assert.Equal(1, ProposalCommand.RunResolve(_store, p.Id, "L1", true, false, null, true, "me", _out, _err));
+            _redirected = false;
+            _typedPin = "wrong-pin-123";
+            Assert.Equal(1, ProposalCommand.RunResolve(_store, p.Id, "L1", true, false, null, true, "me", _out, _err));
+            Assert.Contains("Wrong approval PIN", _err.ToString());
+            Assert.Equal(LineCommitStatus.Uncertain, _store.Get(p.Id)!.Lines[0].Commit!.Status);
+
+            _typedPin = TestPin;
             Assert.Equal(0, ProposalCommand.RunResolve(_store, p.Id, "L1", true, false, "seen in Lacerte", true, "me", _out, _err));
             var back = _store.Get(p.Id)!;
             Assert.Equal(LineCommitStatus.Succeeded, back.Lines[0].Commit!.Status);
             Assert.Equal(ProposalStatus.Committed, back.Status);
+            Assert.Contains("Entries go into: client 1001", _out.ToString());
+            AssertPinNeverPrinted();
         }
 
         [Fact]

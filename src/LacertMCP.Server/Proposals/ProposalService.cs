@@ -98,7 +98,53 @@ namespace LacertMCP.Server.Proposals
                 Module = ctx.Module.ToString(),
             };
             var t = ProposalStore.Trim(title, 200) ?? (client + " " + ctx.Year.ToString(CultureInfo.InvariantCulture) + " (module " + ctx.Module + ")");
-            return Store.Create(context, client, t, ProposalStore.Trim(notes, 4000), CurrentAuthor());
+            return Store.Create(context, client, t, ProposalStore.Trim(notes, 4000), CurrentAuthor(), TargetFromRow(client, ctx.Module, row));
+        }
+
+        /// <summary>
+        /// The client's identity from its DATA1 row, named the way the client tools
+        /// name it (lacerte_client_find / lacerte_client_list): Individual returns
+        /// are first name (C1_1) + last name (C1_2); every other module is the
+        /// entity name (C1_1). Simulation and live rows both carry the DBF column
+        /// codes verbatim (live strings right-trimmed); the lookup ignores case. The
+        /// client id comes from the row's clientId (simulation seed) when present.
+        /// </summary>
+        internal static ProposalTargetReturn TargetFromRow(string clientNumber, char module, IReadOnlyDictionary<string, object?> row)
+        {
+            var first = Column(row, "C1_1");
+            var name = first;
+            if (char.ToUpperInvariant(module) == 'I')
+            {
+                var last = Column(row, "C1_2");
+                name = (first + " " + last).Trim();
+            }
+            var id = Column(row, "clientId");
+            var number = Column(row, "clientNumber");
+            return new ProposalTargetReturn
+            {
+                ClientNumber = number.Length > 0 ? number : clientNumber,
+                ClientName = ProposalStore.NormalizeSpaces(name),
+                ClientId = id.Length == 0 ? null : id,
+            };
+        }
+
+        private static string Column(IReadOnlyDictionary<string, object?> row, string key)
+        {
+            object? v = null;
+            if (!row.TryGetValue(key, out v))
+            {
+                foreach (var kv in row)
+                {
+                    if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)) { v = kv.Value; break; }
+                }
+            }
+            return v switch
+            {
+                null => string.Empty,
+                string s => s.Trim(),
+                IFormattable f => f.ToString(null, CultureInfo.InvariantCulture).Trim(),
+                _ => v.ToString()?.Trim() ?? string.Empty,
+            };
         }
 
         internal async Task<(Proposal Proposal, IReadOnlyList<string> LineIds)> AddLinesAsync(
@@ -521,6 +567,17 @@ namespace LacertMCP.Server.Proposals
             var pid = Process.GetCurrentProcess().Id;
             var work = new List<string>();
             var alreadyDone = 0;
+
+            // The return the entries go into, as it is NOW: re-read the client in the
+            // proposal's own context before anything is written (also on a re-commit).
+            var before = Store.GetRequired(proposalId);
+            ReturnNow? now = null;
+            if (before.TargetReturn != null && before.Approval?.TargetReturn != null)
+            {
+                var row = await InProposalScope(before, ctx => _session.ReadClient(before.ClientNumber, ct)).ConfigureAwait(false);
+                now = new ReturnNow(row == null ? null : TargetFromRow(before.ClientNumber, ModuleChar(before), row));
+            }
+
             var started = Store.Mutate(proposalId, p =>
             {
                 if (p.Status == ProposalStatus.Committing)
@@ -543,6 +600,7 @@ namespace LacertMCP.Server.Proposals
                 var hash = ProposalStore.ComputeContentHash(p);
                 if (!string.Equals(hash, approval.ContentHash, StringComparison.Ordinal))
                     throw ProposalStore.Conflict(p, "The proposal's content no longer matches what was approved (content hash differs); it must be reviewed and approved again.");
+                CheckTargetReturn(p, now);
 
                 foreach (var l in p.Lines)
                 {
@@ -648,6 +706,49 @@ namespace LacertMCP.Server.Proposals
             }
             return report;
         }
+
+        /// <summary>The client as the return holds it at commit time (Identity null = the client is gone).</summary>
+        private sealed class ReturnNow
+        {
+            public ReturnNow(ProposalTargetReturn? identity) { Identity = identity; }
+            public ProposalTargetReturn? Identity { get; }
+        }
+
+        private static char ModuleChar(Proposal p)
+            => string.IsNullOrEmpty(p.Context.Module) ? ' ' : p.Context.Module[0];
+
+        /// <summary>
+        /// Refuses the commit (9024, nothing written) unless the proposal has a
+        /// recorded target return, the approval was for that same target (client
+        /// number, name, context), and the client still exists in the proposal's
+        /// context under the approved name (trimmed, whitespace collapsed, case
+        /// ignored).
+        /// </summary>
+        private static void CheckTargetReturn(Proposal p, ReturnNow? now)
+        {
+            var target = p.TargetReturn ?? throw ProposalStore.Conflict(p, ProposalStore.NoTargetReturnText);
+            var mismatch = ProposalStore.ApprovalTargetMismatch(p);
+            if (mismatch != null) throw ProposalStore.Conflict(p, mismatch);
+            var approved = p.Approval!.TargetReturn!;
+            var approvedText = "client " + approved.ClientNumber + " · " + ShowName(approved.ClientName);
+            var where = ProposalStore.FormName(p.Context.Module) + " " + p.Context.TaxYear.ToString(CultureInfo.InvariantCulture) + " · " + p.Context.DataPath;
+            if (now == null)
+                throw ProposalStore.Conflict(p, "The return the entries go into could not be checked before the commit. Nothing was written.");
+            if (now.Identity == null)
+            {
+                throw ProposalStore.Conflict(p, "Approved for " + approvedText + " (" + where + "), but there is no client " + target.ClientNumber
+                    + " in that return folder now (deleted, renumbered or moved). Nothing was written. Check the client in Lacerte; if the entries belong to another client, reject this proposal and ask the agent for a new one.");
+            }
+            if (!ProposalStore.SameClientName(now.Identity.ClientName, approved.ClientName))
+            {
+                throw ProposalStore.Conflict(p, "Approved for " + approvedText + " (" + where + "), but that return now holds client "
+                    + now.Identity.ClientNumber + " · " + ShowName(now.Identity.ClientName)
+                    + ". Nothing was written. The name is part of what was approved: if it is the same taxpayer under a new name, reject this proposal and ask the agent to prepare a new one; if it is a different client, reject it.");
+            }
+        }
+
+        private static string ShowName(string? name)
+            => string.IsNullOrWhiteSpace(name) ? "(no name on the return)" : ProposalStore.NormalizeSpaces(name);
 
         /// <summary>Lines left "Running": a field is re-written next time (Failed); a detail row may have landed (Uncertain).</summary>
         private static void RecoverInterrupted(Proposal p)
