@@ -83,6 +83,26 @@ namespace LacertMCP.Tests.Session
             Assert.True(mgr.TryGetIdempotencyEntryForTest("rv-timeout", out _));
         }
 
+        // The server (not just the guided prompt) refuses a live detail row whose
+        // Series/Code the verified dictionary doesn't list — commit AND dry run.
+        [Fact]
+        public async Task LiveRow_UnmappedSeriesCode_Is9012_BeforeAnyReadOrWrite()
+        {
+            var db = new FakeDetailDb();
+            db.For("SMIT");
+            var runner = new FakeDetailWriteRunner();
+            using var mgr = NewEnabled(db, runner, _dir);   // maps only Series 11 / Code 1
+            var unmapped = new DetailRow("12", "", "7", "1000", "", "", "Source", "Taxpayer", "", 100, "interest");
+
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("SMIT", unmapped));
+            Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, ex.StatusCode);
+            Assert.Contains("field dictionary", (string)ex.Context["reason"]!);
+            var dry = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("SMIT", unmapped, dryRun: true));
+            Assert.Equal(SyntheticStatusCodes.UnknownFieldAccess, dry.StatusCode);
+            Assert.Empty(runner.Calls);
+            Assert.Empty(System.IO.Directory.GetFiles(_dir)); // no backup taken either
+        }
+
         [Fact]
         public async Task LiveRow_WithoutSuffix_IsRefusedBeforeAnything()
         {

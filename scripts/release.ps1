@@ -251,7 +251,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $dumperStage 'LacertMCP.FieldAccessD
 # install-http.ps1 sets the server up as an always-on tailnet service + control page.
 Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'scripts/install-http.ps1') -Destination $stageRoot -Force
 
-foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
+foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md', 'REGRESSION_CHECKLIST.md')) {
     $src = Join-Path $script:RepoRoot $f
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination $stageRoot -Force
@@ -264,7 +264,7 @@ if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force 
 
 # Compress server/ + cli/ + any docs into one zip.
 $toZip = @($serverStage, $cliStage, $dumperStage, (Join-Path $stageRoot 'install-http.ps1'))
-foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md')) {
+foreach ($f in @('README.md', 'LICENSE', 'CHANGELOG.md', 'REGRESSION_CHECKLIST.md')) {
     $p = Join-Path $stageRoot $f
     if (Test-Path -LiteralPath $p) { $toZip += $p }
 }

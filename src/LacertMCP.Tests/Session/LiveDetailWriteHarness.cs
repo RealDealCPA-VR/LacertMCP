@@ -184,7 +184,31 @@ namespace LacertMCP.Tests.Session
             mgr.LiveReaderFactory = db.Factory;
             mgr.DetailWriteRunner = runner;
             mgr.DetailSnapshotDirectory = snapshotDir;
+            SeedVerifiedDetailMapping(snapshotDir);
             return mgr;
+        }
+
+        /// <summary>
+        /// Live detail writes only target Series/Code the verified field
+        /// dictionary lists (R8-review gate). Point the loader (AsyncLocal test
+        /// seam — this runs synchronously in the test body, so it flows into the
+        /// awaited calls) at a dictionary that maps the harness's W-2 row
+        /// (Series 11, Code 1) for module I. Lives under the snapshot dir's
+        /// "dict" subfolder so the test's cleanup removes it.
+        /// </summary>
+        public static void SeedVerifiedDetailMapping(string snapshotDir)
+        {
+            // Some tests deliberately pass a FILE as the snapshot dir; keep the
+            // dictionary beside it then.
+            var root = System.IO.File.Exists(snapshotDir) ? snapshotDir + ".dict" : System.IO.Path.Combine(snapshotDir, "dict");
+            System.IO.Directory.CreateDirectory(root);
+            var entry = new LacertMCP.Server.Schema.FieldDictionaryEntry("1040.w2_wages", "W-2 wages", "1040", "1a",
+                LacertMCP.Server.Schema.FieldDictionaryLoader.KindDetail, null, null, 11, 1, null, null, false, false,
+                "amount", null, null, "TY2024 on TEST-PC", LacertMCP.Server.Schema.FieldDictionaryLoader.SourceManual);
+            System.IO.File.WriteAllText(System.IO.Path.Combine(root, "individual.json"),
+                LacertMCP.Server.Schema.FieldDictionaryLoader.Serialize('I', new[] { entry }));
+            LacertMCP.Server.Schema.FieldDictionaryLoader.RootOverrideForTests.Value = root;
+            LacertMCP.Server.Schema.FieldDictionaryLoader.ReloadCaches();
         }
 
         /// <summary>Runner behavior that "inserts" <paramref name="row"/> into the fake table, then reports success.</summary>

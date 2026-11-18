@@ -39,6 +39,26 @@ namespace LacertMCP.Tests.Prompts
             Assert.Contains("at least two", text); // 1065 partners note
         }
 
+        // R8-review — retry advice differs for append-only detail rows, keys
+        // are unique per source line, dry runs carry no key.
+        [Fact]
+        public void Body_DetailRetryAndKeyAdvice()
+        {
+            var text = Body("1041");
+            Assert.Contains("NEVER retry", text);
+            Assert.Contains("rowWritten", text);
+            Assert.Contains("<source line number>", text);
+            Assert.Contains("NO idempotency key", text);
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task LacertePrompts_RendersTheRequestedReturnType()
+        {
+            var json = await PromptsCatalogTool.LacertePrompts("lacerte_entity_return_entry", returnType: "1065");
+            Assert.Contains("Form 1065", json);
+            Assert.DoesNotContain("Form 1120,", json);
+        }
+
         [Fact]
         public void UnknownReturnType_AsksInsteadOfGuessing()
         {

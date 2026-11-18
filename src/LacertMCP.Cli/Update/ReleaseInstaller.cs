@@ -101,7 +101,7 @@ namespace LacertMCP.Cli.Update
 
         // dumper\ ships from v0.2.1 on; a dir the release doesn't carry is left alone.
         private static readonly string[] ManagedDirs = { "server", "cli", "dumper" };
-        private static readonly string[] RootDocs = { "README.md", "LICENSE", "CHANGELOG.md" };
+        private static readonly string[] RootDocs = { "README.md", "LICENSE", "CHANGELOG.md", "REGRESSION_CHECKLIST.md" };
 
         // Earlier updates copied install-http.ps1 into the install root. Run from
         // there, it resolved its source to the install itself and deleted server\

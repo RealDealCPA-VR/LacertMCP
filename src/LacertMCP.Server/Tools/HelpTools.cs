@@ -339,6 +339,20 @@ namespace LacertMCP.Server.Tools
                 defaultValue = "C:\\Lacerte",
                 purpose = "Root scanned by lacerte_list_datapaths when discovering {YY}Tax\\{Module}Data folders.",
             },
+            new
+            {
+                name = "LACERTE_LIVE_DETAIL_WRITES",
+                required = "optional",
+                defaultValue = "off",
+                purpose = "1 lets live detail-row writes (income, deduction, K-1 amounts) through, only for Series/Code in the verified field dictionary; off (9202) until verified on the Lacerte PC. The installer sets it with -LiveDetailWrites.",
+            },
+            new
+            {
+                name = "LACERTE_DETAIL_SNAPSHOT_DIR",
+                required = "optional",
+                defaultValue = "%APPDATA%\\lacerte-mcp\\detail-snapshots",
+                purpose = "Fully qualified folder for the per-client detail-row backups taken before the first live write (taxpayer data).",
+            },
         };
 
         // First-call example: lacerte_session_status per the P18-024 verdict
@@ -397,6 +411,7 @@ namespace LacertMCP.Server.Tools
         // inside the MCP can tell the operator the right next move.
         private static object[] RelatedCli() => new object[]
         {
+            new { name = "lacerte-mcp map-diff snapshot|compare|record", purpose = "Operator, on the Lacerte PC: record verified field-dictionary mappings (one known value entered between two snapshots)." },
             new { name = "lacerte-mcp tools --names-only", purpose = "List every MCP tool the server registers (reflection only, no stdio boot)." },
             new { name = "lacerte-mcp tools --name <tool>", purpose = "Deep-print one tool's full parameter surface incl. per-parameter descriptions." },
             new { name = "lacerte-mcp status --json", purpose = "Snapshot of registration state, mode, storage backend, platform. Zero wire I/O." },

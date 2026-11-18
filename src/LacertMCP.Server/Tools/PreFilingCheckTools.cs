@@ -394,8 +394,10 @@ namespace LacertMCP.Server.Tools
             {
                 foreach (var row in forms)
                 {
+                    // Lacerte's stored form id is unverified ("1120S" vs "1120-S"):
+                    // compare with hyphens and spaces removed.
                     if (row.TryGetValue("C7_1", out var v) && v is string s
-                        && s.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                        && s.Replace("-", string.Empty).Replace(" ", string.Empty).IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         hasMainForm = true;
                         break;

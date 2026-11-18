@@ -74,7 +74,9 @@ namespace LacertMCP.Server.Prompts
             "Windsurf that do not surface MCP prompts as slash-commands).")]
         public static Task<string> LacertePrompts(
             [Description("Optional prompt name. Omit to list all available recipes; pass e.g. \"lacerte_client_intake\" to fetch the full body.")]
-            string? name = null)
+            string? name = null,
+            [Description("Only for lacerte_entity_return_entry: the return type to render it for (1120, 1120S, 1065 or 1041). Default 1120.")]
+            string? returnType = null)
             => WrapToolHandler.Run(() =>
             {
                 if (string.IsNullOrWhiteSpace(name))
@@ -109,7 +111,7 @@ namespace LacertMCP.Server.Prompts
                     });
                 }
 
-                var body = RenderPromptBody(entry.Name);
+                var body = RenderPromptBody(entry.Name, returnType);
                 return Task.FromResult<object>(new
                 {
                     found = true,
@@ -126,7 +128,7 @@ namespace LacertMCP.Server.Prompts
         /// extracting the user-message text. Keeps a single source of truth —
         /// future edits to a prompt body automatically flow through this tool.
         /// </summary>
-        internal static string RenderPromptBody(string promptName)
+        internal static string RenderPromptBody(string promptName, string? returnType = null)
         {
             GetPromptResult result;
             switch (promptName)
@@ -144,7 +146,7 @@ namespace LacertMCP.Server.Prompts
                     result = WorkflowPrompts.CsvIntake();
                     break;
                 case "lacerte_entity_return_entry":
-                    result = WorkflowPrompts.EntityReturnEntry();
+                    result = WorkflowPrompts.EntityReturnEntry(string.IsNullOrWhiteSpace(returnType) ? "1120" : returnType!);
                     break;
                 default:
                     return string.Empty;

@@ -29,6 +29,9 @@
     -Port 8767                        listening port
     -Simulation                       run with built-in sample data instead of live Lacerte
                                       (-Simulation:$false switches a simulation install back to live)
+    -LiveDetailWrites                 let agents write detail rows (income, deduction, K-1 amounts) to
+                                      real returns. Turn on only after the REGRESSION_CHECKLIST
+                                      "FP-2 live items" pass on this PC (-LiveDetailWrites:$false turns it off)
     -Uninstall                        remove everything this script added
 #>
 [CmdletBinding()]
@@ -36,6 +39,7 @@ param(
     [string]$DataRoot = '',
     [int]$Port = 8767,
     [switch]$Simulation,
+    [switch]$LiveDetailWrites,
     [switch]$Uninstall
 )
 
@@ -128,6 +132,7 @@ if (-not $saved -and (Test-Path $launcher)) {
             dataRoot   = $fromVbs['LACERTE_DATA_ROOT']
             port       = if ($fromVbs['LACERTE_HTTP_PORT']) { [int]$fromVbs['LACERTE_HTTP_PORT'] } else { $null }
             simulation = ($fromVbs['LACERTE_SIMULATION'] -eq '1')
+            liveDetailWrites = ($fromVbs['LACERTE_LIVE_DETAIL_WRITES'] -eq '1')
         }
     } catch { $saved = $null }
 }
@@ -135,6 +140,7 @@ $oldPort = if ($saved -and $saved.port) { [int]$saved.port } else { $null }
 if (-not $PSBoundParameters.ContainsKey('Port') -and $oldPort) { $Port = $oldPort }
 if (-not $PSBoundParameters.ContainsKey('DataRoot') -and $saved -and $saved.dataRoot) { $DataRoot = [string]$saved.dataRoot }
 $useSimulation = if ($PSBoundParameters.ContainsKey('Simulation')) { [bool]$Simulation } elseif ($saved) { [bool]$saved.simulation } else { $false }
+$useDetailWrites = if ($PSBoundParameters.ContainsKey('LiveDetailWrites')) { [bool]$LiveDetailWrites } elseif ($saved -and $saved.liveDetailWrites) { [bool]$saved.liveDetailWrites } else { $false }
 if (-not $DataRoot) { $DataRoot = 'C:\Lacerte' }
 if (-not $Uninstall -and -not (Test-Path -LiteralPath $DataRoot)) {
     Write-Host "WARNING: the data root $DataRoot doesn't exist on this PC, so agents won't be able to open any returns." -ForegroundColor Yellow
@@ -267,6 +273,7 @@ $envLines += "env(""LACERTE_HTTP_PORT"") = ""$Port"""
 # Always confine the server to the data root, so a remote agent can't point it at any local path.
 $envLines += "env(""LACERTE_DATA_ROOT"") = ""$DataRoot"""
 if ($DataRoot.StartsWith('\\')) { $envLines += 'env("LACERTE_ALLOW_UNC") = "1"' }
+if ($useDetailWrites) { $envLines += 'env("LACERTE_LIVE_DETAIL_WRITES") = "1"' }
 $vbs = @"
 ' Lacerte MCP launcher, added by install-http.ps1. Delete this file (or run
 ' install-http.ps1 -Uninstall) to stop it starting at logon.
@@ -282,7 +289,7 @@ Loop
 # (an accented user name, say) survives; ASCII would turn those letters into "?".
 Set-Content -Path $launcher -Value $vbs -Encoding Unicode
 
-[ordered]@{ dataRoot = $DataRoot; port = $Port; simulation = [bool]$useSimulation } |
+[ordered]@{ dataRoot = $DataRoot; port = $Port; simulation = [bool]$useSimulation; liveDetailWrites = [bool]$useDetailWrites } |
     ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 
 Write-Host '==> Starting'
@@ -333,6 +340,11 @@ if (Test-Path $tailscale) {
 if (-not $ip) { $ip = "<this PC's Tailscale IP>" }
 Write-Host ''
 Write-Host "Data root: $DataRoot   (the server only opens Lacerte clients under it; re-run with -DataRoot to change it)"
+if ($useDetailWrites) {
+    Write-Host 'Detail-row writes: ON (only for Series/Code in the verified field dictionary; re-run with -LiveDetailWrites:$false to turn off)'
+} else {
+    Write-Host 'Detail-row writes: off (re-run with -LiveDetailWrites after the REGRESSION_CHECKLIST "FP-2 live items" pass)'
+}
 Write-Host ''
 Write-Host 'Field writes: only a few built-in fields are writable (none for Corporate, S-Corp or Fiduciary).'
 Write-Host 'To allow another field, confirm in Lacerte that it is an input field, then:'

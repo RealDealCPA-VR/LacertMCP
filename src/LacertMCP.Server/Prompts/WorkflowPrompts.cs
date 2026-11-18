@@ -400,9 +400,12 @@ Step 4 — Map the source to the dictionary
 
 Step 5 — Dry run, then commit
   • Field targets: `lacerte_field_write` (or `lacerte_field_write_bulk` for many) with `dryRun: true` first. If a field is refused (9012 / 9001), it isn't writable — move it to the manual list; never work around it.
-  • Detail targets: `lacerte_detail_write` / `lacerte_detail_write_bulk` with `dryRun: true` first. In live mode these need the operator to have enabled detail writes (9202 says so); if refused, move the rows to the manual list.
-  • Show the dry-run results, get approval, then repeat WITHOUT dryRun, with stable idempotency keys (e.g. ""{form}-<client>-<dictionary id>"").
-  • Check every result: `verified: true` is done; `verified: null` means accepted but not confirmed — list it for the operator to check in Lacerte; 9022 WriteNotVerified means the stored value differs — STOP and report it (a retry with the same key re-writes once the cause is fixed, e.g. the return was open in Lacerte).
+  • Detail targets: `lacerte_detail_write` / `lacerte_detail_write_bulk` with `dryRun: true` first, always passing the entry's `suffix` (and `prefix` if the entry has one). In live mode these need the operator to have enabled detail writes (9202 says so), and the server refuses any Series/Code not in the dictionary (9012); if refused, move the rows to the manual list.
+  • Dry runs: pass NO idempotency key (a key used on a dry run conflicts with the real write, 9102).
+  • Show the dry-run results, get approval, then repeat WITHOUT dryRun, with an idempotency key that is unique per SOURCE LINE: ""{form}-<client>-<dictionary id>-<source line number>"" (several W-2s, 1099s or K-1 lines can share one dictionary id; reusing a key would silently skip the later rows).
+  • Check every result: `verified: true` is done; `verified: null` means accepted but not confirmed — list it for the operator to check in Lacerte.
+  • 9022 WriteNotVerified on a FIELD write: the stored value differs — STOP and report it; once the cause is fixed (e.g. the return was open in Lacerte) a retry with the same key re-writes it.
+  • 9022 (or any error whose context says `rowWritten: yes / unknown`) on a DETAIL row: the row may already be in the return. NEVER retry it — the same key is locked and won't write again. Read the rows with `lacerte_detail_read` and report; only if the row is clearly missing, write it with a NEW key after the operator agrees.
 
 Step 6 — Owners
   • {OwnersNote(module)}

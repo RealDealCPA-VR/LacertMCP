@@ -568,6 +568,48 @@ namespace LacertMCP.Server.Session
         }
 
         /// <summary>
+        /// Live detail rows may only target a Series/Code (and Prefix/Suffix,
+        /// when the entry pins them) that the module's VERIFIED field dictionary
+        /// lists for the tax year: the SDK doesn't validate detail rows, so the
+        /// server — not just the guided prompt — refuses codes nobody has
+        /// mapped on this install (they would land on the wrong input line).
+        /// </summary>
+        private static void RequireDictionaryDetail(SessionContext ctx, DetailRow row)
+        {
+            int.TryParse((row.Series ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var series);
+            int.TryParse((row.Code ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var code);
+            int? prefix = int.TryParse((row.Prefix ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) ? p : (int?)null;
+            int? suffix = int.TryParse((row.Suffix ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : (int?)null;
+
+            IReadOnlyList<Schema.FieldDictionaryEntry> entries;
+            try
+            {
+                entries = Schema.FieldDictionaryLoader.GetEntries(ctx.Module);
+            }
+            catch (Exception)
+            {
+                entries = Array.Empty<Schema.FieldDictionaryEntry>();
+            }
+            var match = entries.FirstOrDefault(e => !e.IsField
+                && e.Series == series && e.Code == code
+                && (!e.Prefix.HasValue || e.Prefix == prefix)
+                && (!e.Suffix.HasValue || e.Suffix == suffix)
+                && e.AppliesToYear(ctx.Year));
+            if (match != null) return;
+
+            throw new LacerteSDKError(SyntheticStatusCodes.UnknownFieldAccess, new Dictionary<string, object?>
+            {
+                ["op"] = "WriteDetail",
+                ["module"] = ctx.Module.ToString(),
+                ["taxYear"] = ctx.Year,
+                ["series"] = row.Series,
+                ["code"] = row.Code,
+                ["reason"] = "This detail Series/Code isn't in the verified field dictionary for this module and year, so it isn't written to a real return. "
+                    + "Check lacerte_field_dictionary for the mapped codes; an operator adds new ones on the Lacerte PC with `lacerte-mcp map-diff`. Enter this amount in Lacerte meanwhile.",
+            });
+        }
+
+        /// <summary>
         /// Live dry run: validates the row and builds the INSERT exactly as the
         /// commit would — no read, no backup, no worker.
         /// </summary>
@@ -575,6 +617,7 @@ namespace LacertMCP.Server.Session
         {
             var key = LiveClientKey(clientNumber);
             DetailRowWriter.RequireLiveSuffix(row);
+            RequireDictionaryDetail(ctx, row);
             DetailRowWriter.BuildInsertSql(key, row);
             return new DetailWriteOutcome(StatusCodes.Success, KnownDetailSnapshot(ctx, key), null,
                 "Dry run: the row passed validation and the INSERT was built; nothing was written and no backup was taken.");
@@ -590,6 +633,7 @@ namespace LacertMCP.Server.Session
             var key = LiveClientKey(clientNumber);
             // Validate + build before touching anything.
             DetailRowWriter.RequireLiveSuffix(row);
+            RequireDictionaryDetail(ctx, row);
             var sql = DetailRowWriter.BuildInsertSql(key, row);
 
             lock (GetClientWriteLock(key))
