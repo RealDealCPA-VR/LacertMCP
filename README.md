@@ -15,6 +15,7 @@ A local Windows MCP server that exposes Intuit Lacerte tax software (TY18+) as t
 Bounding expectations up front saves a triage loop with the LLM:
 
 * **Return preparation only as far as it's mapped and enabled** — every module (1040, 1120, 1120-S, 1065, 1041, …) can be read in full and clients can be created. Income/deduction/K-1 amounts (detail rows) are written only when live detail writes are switched on (`install-http.ps1 -LiveDetailWrites`, i.e. `LACERTE_LIVE_DETAIL_WRITES=1`, after REGRESSION_CHECKLIST "FP-2 live items") AND their Series/Code is in the verified field dictionary — the server refuses anything else (9012). Client-level fields are writable when the access map enables them (3 built in, `field-access set`) or the dictionary maps them. The dictionaries ship empty; they're recorded on the Lacerte PC with `lacerte-mcp map-diff`. Until then return data is entered in Lacerte. See `docs/plans/filing-preparation.md`.
+* **The AI never approves its own work** — for return preparation Claude builds a *proposal* (every intended entry with its source document and reasoning, plus hand-entry items and questions). Only a person approves it, on the control page's Proposals tab or with `lacerte-mcp proposal approve`; no MCP tool can. `install-http.ps1 -RequireApproval` (`LACERTE_REQUIRE_APPROVAL=1`) makes that the only way agents can write to a return. See `docs/plans/ai-preparation-roadmap.md`.
 * **No e-filing actions** — read-only EF status via `lacerte_ef_status` (TY19+). Submitting, retransmitting, or correcting an e-file still happens in Lacerte's own UI.
 * **No printing, PDF rendering, or third-party export** — DBF read/write + COM field-write only. Use Lacerte's File → Print or Print to PDF for any rendered output.
 * **No organizer, client portal, letter template, or diagnostics-detail access** — those live in non-DBF Lacerte surfaces this MCP doesn't wire up.
@@ -184,6 +185,7 @@ env:
 | `LACERTE_SIM_EXPIRED` | testing only | unset | `1` simulates an expired 24h auth session. |
 | `LACERTE_DATA_ROOT` | optional | `C:\Lacerte` | Root scanned by `lacerte_list_datapaths` when discovering `{YY}Tax\{Module}Data` folders. |
 | `LACERTE_LIVE_DETAIL_WRITES` | optional | unset (off) | `1` enables live detail-row writes (income, deduction, K-1 amounts) through the Lacerte ODBC driver, run in a separate worker process with a per-client snapshot before the first write and a read-back after each. Off until verified on the Lacerte PC (REGRESSION_CHECKLIST "FP-2 live items"); while off, live detail writes return 9202. |
+| `LACERTE_REQUIRE_APPROVAL` | optional | unset (off) | `1` refuses the direct write tools (`lacerte_field_write`, `lacerte_update_return`, `lacerte_detail_write` and their bulk forms; dry runs still work) with 9023: data reaches a return only through a proposal a person approved, committed with `lacerte_proposal_commit`. Set by `install-http.ps1 -RequireApproval`. |
 | `LACERTE_DETAIL_SNAPSHOT_DIR` | optional | `%APPDATA%\lacerte-mcp\detail-snapshots` | Absolute folder for the pre-write detail-row snapshots (they contain taxpayer data and are not cleaned up automatically). |
 | `LACERTE_MCP_FORCE_FILE_STORE` | testing / dev | unset | `1` bypasses Windows Credential Manager and uses the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json` (auto-on off-Windows). |
 | `LACERTE_PARITY_RECORDING` | testing only | unset | Path to recorded parity JSON consumed by the `BothModesData` test harness (live ↔ sim contract recorder). |
@@ -234,7 +236,7 @@ If the first call returns `success: false` with `statusCode: 9007 LoginExpired` 
 
 ## Tools
 
-The server registers **43 MCP tools**, grouped below by the same categories `lacerte_help(topic: "tools")` reports (`HelpTools.ToolsByCategory()` is the authoritative categorization; a bidirectional parity test keeps it in lock-step with the registered surface). Paginated read envelopes return `rows`, `total`, `limit`, `offset`, `returnedCount`, `hasMore`, `nextOffset` (legacy `count` + per-domain aliases retained until v0.2).
+The server registers **53 MCP tools**, grouped below by the same categories `lacerte_help(topic: "tools")` reports (`HelpTools.ToolsByCategory()` is the authoritative categorization; a bidirectional parity test keeps it in lock-step with the registered surface). Paginated read envelopes return `rows`, `total`, `limit`, `offset`, `returnedCount`, `hasMore`, `nextOffset` (legacy `count` + per-domain aliases retained until v0.2).
 
 ### Session (6)
 
@@ -321,8 +323,25 @@ The server registers **43 MCP tools**, grouped below by the same categories `lac
 | `lacerte_field_dictionary` | `module`, `search?`, `taxYear?` | Verified map from tax concepts (e.g. 1120 gross receipts, K-1 boxes) to DATA1-4 columns or detail Series/Code, recorded on the Lacerte PC with `lacerte-mcp map-diff`. Empty modules return a `note`: don't guess field or detail codes. A listed field with no literal access-map entry is classified by the SDK range rules. |
 | `lacerte_return_codes` | none | All 28 TAPIStatus + 5 TPSDKStatus + synthetic 9xxx codes with `origin`/`originGroup` discriminators. |
 | `lacerte_reload_schema` | none | Drop in-process FieldAccessMap caches so fresh shards take effect without a restart (a restart invalidates the 24h auth ticket). |
-| `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 43 tools by category, env vars, limits, first-call, prompts. |
+| `lacerte_help` | `topic?` | Distilled README inline — overview, modes, all 53 tools by category, env vars, limits, first-call, prompts. |
 | `lacerte_prompts` | `name?` | List or fetch the 5 canonical workflow prompt bodies inline. |
+
+### Proposals (10)
+
+Proposal-then-approve: the agent prepares a return as a proposal, a person reviews and approves it, then the agent commits it. Every line is dry-run validated when added; nothing touches the return before approval. No tool can approve: approval happens on the control page (Proposals tab, from this computer or the owner's device) or with `lacerte-mcp proposal approve` on the Lacerte PC. The approval is bound to the proposal's version and content hash, so any later change revokes it. Proposals are stored as JSON under `LACERTE_HTTP_DATA_DIR\proposals` (else `%APPDATA%\lacerte-mcp\proposals`).
+
+| Tool | Params | What it does |
+| --- | --- | --- |
+| `lacerte_proposal_create` | `clientNumber`, `title?` | Start a proposal for one client in the active context (status Draft). |
+| `lacerte_proposal_add_lines` | `proposalId`, `lines[]` | Add field or detail-row lines, each with `dictionaryId`, `source` (document, page, location, excerpt), `confidence` and optional `reasoning`. Each line is dry-run validated on the spot; a failing line can't be approved. |
+| `lacerte_proposal_update_line` | `proposalId`, `lineId`, `line` | Replace a line; it is validated again and its review decision resets. |
+| `lacerte_proposal_remove_line` | `proposalId`, `lineId` | Remove a line. |
+| `lacerte_proposal_add_manual_items` | `proposalId`, `items[]` | Source lines the preparer must enter by hand (unmapped or not writable). |
+| `lacerte_proposal_add_questions` | `proposalId`, `questions[]` | Open questions for the preparer. |
+| `lacerte_proposal_submit` | `proposalId` | Submit for review; locks it against agent edits. |
+| `lacerte_proposal_get` | `proposalId` | The full proposal plus state (`contentHash`, `approvalCurrent`, `readyToCommit`, `blockers`). |
+| `lacerte_proposal_list` | `clientNumber?`, `status?` | Proposals, newest first. |
+| `lacerte_proposal_commit` | `proposalId` | Write an approved, unchanged proposal: only approved lines, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection; idempotency keys `proposal-{id}-v{version}-{lineId}`). Re-running after a partial commit runs only unfinished lines; an Uncertain detail line stops it until a person resolves it. |
 
 ## Prompts
 
@@ -380,6 +399,8 @@ The `origin` field is either:
 - `"sdk"` — codes **0–204**, real Lacerte SDK TAPIStatus (0–28) or TPSDKStatus (200–204) state. Look up the code in Intuit's SDK documentation; remediation is **operator-side** (the operator typically needs to fix something in Lacerte itself, re-auth, or correct a tax-data input).
 - `"synthetic"` — codes **9001–9299**, minted by this MCP **before** any SDK call. Pre-flight validation (9001–9099), auth lifecycle (9100–9199), or COM bridge / runtime (9200–9299). Remediation is usually **MCP-side** (fix the tool call args, flip a server config flag, or run a CLI command like `lacerte-mcp register`).
 
+Two codes belong to the approval workflow: **9023 ApprovalRequired** (a direct write tool was called while `LACERTE_REQUIRE_APPROVAL=1`; put the entry in a proposal) and **9024 ProposalConflict** (the proposal's status or version doesn't allow that step, e.g. editing a submitted proposal or committing one that changed after approval).
+
 Call the `lacerte_return_codes` tool for the full code catalog with names, severities, user messages, remediation strings, and the same `origin` discriminator per code. See `DECISIONS.md` 2026-05-30 "Synthetic statusCode range" + 2026-05-30 "Error envelope carries `origin` discriminator" for the design rationale.
 
 All `userMessage` and `remediation` strings are **en-US only** (see `DECISIONS.md` 2026-05-30 "Status messages are en-US only"). SDK-echoed text in `context.reason` / `context.rawError` is passed through unmodified.
@@ -399,6 +420,7 @@ TL;DR:
 | `lacerte-mcp doctor` | Pre-flight probes for the install; exit 0/1/2 contract (3 reserved for "not implemented here", see `field-access discover`). |
 | `lacerte-mcp detail-restore {list,plan,apply}` | Undo the MCP's own live detail-row writes for a client from its write journal (`<backup>.journal.jsonl` next to the pre-write backup): `plan` shows which journaled rows are still present; `apply --confirm` removes exactly one copy per journaled row and verifies. Rows entered in Lacerte are never touched. ODBC DELETE on the Lacerte driver is unverified: try it on a TEST client first (REGRESSION_CHECKLIST "FP-2 restore live items"). |
 | `lacerte-mcp map-diff {snapshot,compare,record}` | Build the field dictionary on the Lacerte PC: snapshot a test client, enter ONE known value in Lacerte, snapshot again, `compare` shows what changed, `record` saves the mapping (only when exactly one cell or detail row changed). See `src/LacertMCP.Server/Schema/FieldDictionary/README.md`. |
+| `lacerte-mcp proposal {list,show,approve,reject,return,resolve}` | Review proposals on the Lacerte PC: `show <id>` prints every line with its source, preview, manual items and questions; `approve <id> [--reject L3] [--version N] --confirm` approves every line except the rejected ones; `reject` / `return` need `--note`; `resolve <id> --line L --in-return\|--missing --confirm` settles an Uncertain detail line after checking Lacerte. Without `--confirm` nothing changes. |
 | `lacerte-mcp update` | Update the install from the latest GitHub release (or fast-forward a git checkout); `--check` to only look, `--schedule daily` to automate. |
 
 ### `lacerte-mcp register [--app-name X] [--tax-year Y] [--reset]`
@@ -533,7 +555,7 @@ The setup involves an interactive Intuit consent dialog, a 24-hour ticket expiry
 - **Diagnosis:** Three independent failure modes — boot crash, broken assembly registration, or host-config mismatch — present with the same silent symptom because most MCP hosts swallow the spawned process's stderr by default.
 - **Fix (3-step diagnostic ladder):**
   1. **Confirm the server binary actually boots.** From PowerShell on the same machine the host is running on, run `& "C:\path\to\LacertMCP.Server.exe"` directly (use the absolute path you put in the host config). If it exits immediately with a CLR loader error, jump to the `BadImageFormatException` entry above (App.config missing or modified). If it hangs waiting for stdio input, that is healthy — Ctrl+C and continue to step 2.
-  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists 43 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
+  2. **Confirm the assembly registers tools at all.** Run `& "C:\path\to\lacerte-mcp.exe" tools --names-only` (reflection only, no stdio handshake — see the CLI section above). If this lists 53 tools beginning with `lacerte_`, the server is healthy and the problem is in the host config: typically (a) wrong path in the host JSON `command` field — note that `LacertMCP.Server.exe` and `lacerte-mcp.exe` are **different binaries**, only the former is the MCP server; (b) unescaped backslashes in the JSON path string (use forward slashes — `"command": "C:/LacertMCP/server/LacertMCP.Server.exe"` — or doubled backslashes); (c) `LACERTE_LIVE=1` set in the host's `env` block on a machine with no registered AppID, causing the server to fail at boot before completing the MCP handshake (run `lacerte-mcp doctor` to confirm AppID state). If `tools --names-only` returns nothing or errors, the build is broken — run `dotnet build src/LacertMCP.sln` and retry.
   3. **Inspect the host's stderr capture for the spawned process.** Claude Desktop writes spawned-MCP stderr to `%APPDATA%\Claude\logs\mcp*.log` (one file per server, named after the `mcpServers` key). Cursor writes to its own `~/.cursor/logs/` tree; Windsurf surfaces it in its log pane. The exit code and any uncaught exception will be there. If the log is empty, the host may not be invoking the binary at all — re-check the config path on disk.
 
 ### `lacerte_field_write` returned success but my change is not visible in Lacerte

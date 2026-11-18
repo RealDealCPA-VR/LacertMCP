@@ -1,5 +1,15 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, night) — proposal-then-approve
+
+- Decision: Claude prepares returns into a proposal; only a person approves (DECISIONS 2026-11-18). Built in two worktree agents + coordinator:
+  - Core: `src/LacertMCP.Server/Proposals/` (store, service, commit), 10 `lacerte_proposal_*` tools (53 tools), synthetic 9023 ApprovalRequired / 9024 ProposalConflict, `LACERTE_REQUIRE_APPROVAL=1` blocks real direct writes, `lacerte-mcp proposal list|show|approve|reject|return|resolve`, `lacerte_entity_return_entry` prompt rewritten to prepare into a proposal.
+  - Control page: Proposals tab + `/api/proposals*` (HttpServer.Proposals.cs), allowed only from this computer or the owner's device and only from the control page itself (X-Lacerte-Admin + same-origin).
+  - Installer `-RequireApproval` (remembered in install.json).
+- Approval binds to version + content hash; commit idempotency keys `proposal-{id}-v{version}-{lineId}`; Uncertain detail lines stop the commit until a person resolves them.
+- Open decision: an agent with shell access on the Lacerte PC or the owner's device could still approve (endpoint or CLI). Needs a human-only secret or OS user separation.
+- Tests 2263 passed, 11 skipped, 0 failed (two runs); build 0 warnings. Not pushed.
+
 ## Last Session Summary (2026-11-18, late) — v0.2.5 + AI-preparation roadmap
 
 - Released v0.2.5 (bulk preview token, detail-restore). The v0.2.4 tag points at a commit whose CI build failed (C# 14 bound array.Reverse() to the span overload; fixed in e6ddf37); it has no release and can be deleted.

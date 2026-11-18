@@ -6,7 +6,7 @@ description: |
 
 # Lacerte MCP — operator skill
 
-You drive Intuit Lacerte tax software through a stdio MCP server exposing 43 tools, all named `lacerte_*`. This skill grounds you in the conventions, the catalog, the error space, and the recovery recipes so you can use the surface deterministically without trial and error.
+You drive Intuit Lacerte tax software through a stdio MCP server exposing 53 tools, all named `lacerte_*`. This skill grounds you in the conventions, the catalog, the error space, and the recovery recipes so you can use the surface deterministically without trial and error.
 
 ---
 
@@ -146,7 +146,7 @@ Error:
 
 ---
 
-## Tool catalog (43 tools)
+## Tool catalog (53 tools)
 
 Format: `lacerte_<name>(args) → return shape — purpose`.
 
@@ -216,6 +216,20 @@ Format: `lacerte_<name>(args) → return shape — purpose`.
 - `lacerte_year_over_year(clientNumber: string, fromYear: int, toYear: int, scope: "demographics"|"detailTotals"|"all" = "all", seriesIds?: int[]) → { clientNumber, fromYear, toYear, scope, seriesIds, fromDataPath, toDataPath, foundInFromYear, foundInToYear, demographicsDiff, detailTotalsDiff, errors }` — diff a client across two tax years. Path rewrites `{YY}Tax` segment in active context's dataPath. `(toYear - fromYear) ≤ 5`. Default seriesIds: `[11, 12, 13, 20]` (Wages/Interest/Dividends/Income). ALWAYS check `foundInFromYear`/`foundInToYear` — a typo'd clientNumber returns both false, NOT a "no changes" diff. Error rows use the canonical `taxYear` key.
 - `lacerte_diff_clients(client1Number: string, client2Number: string, includeSubclients: bool = true, includeStates: bool = true, includeDetail: bool = false, ignoreFields?: string[]) → { client1Number, client2Number, summary, dataOne: { fields: [{ field, a, b }] }, subclients, states, detail, ignoredFields }` — structured field-by-field diff. Same-context only. Returns ONLY differing rows. Built-in ignore: `clientNumber`. Detail rows are compared across all 11 `DetailRow` fields (TSJ / Source / Prefix / Suffix / CityAbbr / ImportSrc included); rows lacking a diff key are counted in `rowsWithoutKey` instead of silently vanishing.
 - `lacerte_field_history(clientNumber: string, field: string, sinceUtc?: string, limit: int = 100) → { clientNumber, field, rows: [{ ts, cid, value, dryRun, statusCode, succeeded, durationMs }], total, truncated, logPath, hint?, redactionNote }` — audit log for one (clientNumber, field) pair sourced from WireLog JSONL. Requires `LACERTE_DEBUG_WIRE=1`. Each row carries `succeeded: true/false` — a rejected write is distinguishable from a landed one. `limit` clamped to 1000; when total exceeds limit the NEWEST rows are kept (display stays oldest-first). `value` is `"***"` for every row by design (disk-scope redaction is unconditional). Default window: 14 days.
+
+### Proposals (10 tools) — how return preparation is done
+
+Prepare returns as a proposal; a person approves it; then commit. You can NEVER approve a proposal (no tool does; approval is on the control page or the CLI), and you must not route around it with the direct write tools. When the server runs with `LACERTE_REQUIRE_APPROVAL=1`, real direct writes return `9023 ApprovalRequired`.
+
+- `lacerte_proposal_create(clientNumber, title?)` — start one for a client in the active context (status Draft).
+- `lacerte_proposal_add_lines(proposalId, lines[])` — field lines `{kind:"field", table, field, value, subClientId?, stateAbbrev?}` or detail lines `{kind:"detail", detail:{series, code, amount, description, suffix, prefix?, ...}}`, each with `dictionaryId`, `source {document, page?, location?, excerpt?}`, `confidence` (high/medium/low), `reasoning?`. Each is dry-run validated when added; `preview.ok=false` lines can't be approved — fix or remove them.
+- `lacerte_proposal_update_line(proposalId, lineId, line)` / `lacerte_proposal_remove_line(proposalId, lineId)`.
+- `lacerte_proposal_add_manual_items(proposalId, items[])` — unmapped or refused source lines the preparer enters by hand. Never work around a 9012 / 9001 / 9202 refusal.
+- `lacerte_proposal_add_questions(proposalId, questions[])` — decisions for the preparer.
+- `lacerte_proposal_submit(proposalId)` — locks it; then tell the operator the id and where to review (control page Proposals, or `lacerte-mcp proposal show <id>`).
+- `lacerte_proposal_get(proposalId)` / `lacerte_proposal_list(clientNumber?, status?)` — `state.readyToCommit`, `state.blockers`, `lastReview` (the reviewer's note when ReturnedForChanges).
+- `lacerte_proposal_commit(proposalId)` — only when status is Approved and `state.readyToCommit` is true. Writes only approved lines. A PartiallyCommitted / CommitFailed proposal can be committed again (only unfinished lines run). An **Uncertain** detail line: NEVER retry or re-add it; ask the operator to check Lacerte and resolve it.
+- `9024 ProposalConflict` — the status or version doesn't allow the step; read `state.blockers`.
 
 ### Prompts catalog tool
 

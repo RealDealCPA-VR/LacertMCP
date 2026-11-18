@@ -1619,7 +1619,11 @@ Starting point (2026-11-18 morning): reads every return type and creates clients
 
 ### AI preparation with human review (roadmap 2026-11-18: docs/plans/ai-preparation-roadmap.md)
 - [ ] Phase A: live verification on the Lacerte PC (checklists) + investigate reading calculated results (DATA6, Lacerte exports, ask Intuit).
-- [ ] Decide: approval model (proposal-then-approve recommended), first return type, who maps fields, §7216 / data-handling review.
-- [ ] Phase B: map the first return type; proposal + control-page review/approval; source-document intake with citations.
+- [x] Decide: approval model -> proposal-then-approve (DECISIONS 2026-11-18).
+- [ ] Decide: first return type, who maps fields, §7216 / data-handling review.
+- [x] Phase B (part): proposals — store, 10 `lacerte_proposal_*` tools, commit through the guarded write paths, `lacerte-mcp proposal` CLI, control-page Proposals tab (review, approve, reject, return, resolve, commit), `LACERTE_REQUIRE_APPROVAL` / installer `-RequireApproval`, prompt rewritten to prepare into a proposal.
+- [ ] Decide: approver identity. An agent with shell access on the Lacerte PC or the owner's device can still call the approve endpoint or CLI; closing that needs a human-only secret (per-approval PIN) or OS user separation.
+- [ ] Proposals follow-ups: line decisions in the activity log with reviewer name; let a CommitFailed proposal be returned for changes; live commit verified on the Lacerte PC (after FP-2 live items).
+- [ ] Phase B (rest): map the first return type; source-document intake with citations.
 - [ ] Phase C: parallel run on last year's returns; error threshold.
 - [ ] Phase D/E: other return types incl. a 1040 workflow; encryption/retention of backups and journals; compliance sign-off.

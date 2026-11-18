@@ -19,7 +19,7 @@
 | Guided entry workflow (`lacerte_entity_return_entry`) | **Done** for 1120 / 1120-S / 1065 / 1041; no 1040 workflow |
 | Pre-filing checks | **Done** for 1040 / 1065 / 1120 / 1120-S / 1041 (structural rules only) |
 | See Lacerte's calculated return or diagnostics | **Not possible today.** The SDK exposes inputs, not results |
-| Review queue / approval record | **Not built.** Approval happens in chat, write by write |
+| Review queue / approval record | **Built** (after v0.2.5): proposals, control-page Proposals tab, `lacerte-mcp proposal`, `-RequireApproval`. Live commit not yet verified on the Lacerte PC |
 | Source-document intake and traceability | **Not built** |
 
 ---
@@ -64,7 +64,9 @@
 - a record of who approved what;
 - an easy way to send the return back with corrections.
 
-**Proposed design (needs your decision, see below):**
+**Built (2026-11-18), as designed below.** Not yet built: the post-commit review packet, and source documents shown beside each line (item 5).
+
+**Design:**
 - **Proposal.** Claude prepares into a proposal, not straight into the return. The proposal is per client and per year, and holds:
   - every intended entry: target, value, the source document and page or box it came from, and Claude's reasoning where there was judgement;
   - the dry-run results;

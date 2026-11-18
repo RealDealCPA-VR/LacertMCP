@@ -17,7 +17,7 @@ Run before declaring any task complete. Catches silent breakage in adjacent code
 
 - [ ] `& C:/Users/VR/Projects/LacertMCP/src/LacertMCP.Server/bin/x64/Debug/LacertMCP.Server.exe` starts the stdio MCP server without throwing (kill after confirming startup).
 - [ ] Simulation banner prints when expected (off-Windows or `LACERTE_SIMULATION=1`).
-- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` plus `Prompts/PromptsCatalogTool.cs` (43 tools today — count the decorated methods rather than trusting a hard-coded number, since this drifts every time a tool is added; `HelpTools.ToolsByCategory()` must list the same set, enforced by the bidirectional parity test in `HelpToolsTests`).
+- [ ] All expected tools appear in the tool list — count matches the `[McpServerTool]`-decorated methods under `src/LacertMCP.Server/Tools/` plus `Prompts/PromptsCatalogTool.cs` (53 tools today — count the decorated methods rather than trusting a hard-coded number, since this drifts every time a tool is added; `HelpTools.ToolsByCategory()` must list the same set, enforced by the bidirectional parity test in `HelpToolsTests`).
 
 ## CLI smoke
 

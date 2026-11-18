@@ -332,7 +332,7 @@ To switch from live to sim mode, drop `LACERTE_LIVE` + `LACERTE_DATA_PATH` and a
 
 ## 7. Tool catalog
 
-The server registers 43 MCP tools (the authoritative categorization is `HelpTools.ToolsByCategory()`, kept in lock-step with the registered surface by a bidirectional parity test — `lacerte_help(topic: "tools")` reports the same 43). Each tool method is decorated with `[McpServerTool]` and lives under `src/LacertMCP.Server/Tools/` (plus `Prompts/PromptsCatalogTool.cs` for `lacerte_prompts`). The exact tool name on the wire is the snake_case form of the C# method name (e.g. `LacerteClientList` → `lacerte_client_list`). Discovery happens via `WithToolsFromAssembly()` in `Program.cs`.
+The server registers 53 MCP tools (the authoritative categorization is `HelpTools.ToolsByCategory()`, kept in lock-step with the registered surface by a bidirectional parity test — `lacerte_help(topic: "tools")` reports the same 53). Each tool method is decorated with `[McpServerTool]` and lives under `src/LacertMCP.Server/Tools/` (plus `Prompts/PromptsCatalogTool.cs` for `lacerte_prompts`). The exact tool name on the wire is the snake_case form of the C# method name (e.g. `LacerteClientList` → `lacerte_client_list`). Discovery happens via `WithToolsFromAssembly()` in `Program.cs`.
 
 Every tool returns one of two JSON envelope shapes (see `Errors/WrapToolHandler.cs`):
 
@@ -752,6 +752,33 @@ The `value` column is always the redacted `"***"` sentinel — disk-scope redact
 
 ---
 
+### 7i. Proposals (prepare, then a person approves)
+
+Return preparation goes through a **proposal**: Claude puts every intended entry into it, a person reviews and approves it, and only then does Claude commit it to the return. No MCP tool can approve. Approval happens on the control page's **Proposals** tab (from the Lacerte PC itself or the owner's device) or with `lacerte-mcp proposal approve` on the Lacerte PC. The approval is bound to the proposal's version and content hash: any change after approval revokes it. With `LACERTE_REQUIRE_APPROVAL=1` (`install-http.ps1 -RequireApproval`) the direct write tools refuse real writes (9023), so a proposal is the only way agents can change a return.
+
+Statuses: Draft → Submitted → Approved → Committing → Committed (or PartiallyCommitted / CommitFailed, which can be committed again), plus Rejected and ReturnedForChanges (the agent fixes it and submits again).
+
+#### `lacerte_proposal_create`
+Start a proposal for one client in the active context. Params: `clientNumber`, `title?`. Checks the client exists.
+
+#### `lacerte_proposal_add_lines`
+Add up to 200 lines per call to a Draft or ReturnedForChanges proposal. A line is a field write (`{kind:"field", table, field, value, subClientId?, stateAbbrev?}`) or a detail row (`{kind:"detail", detail:{series, code, amount, description, suffix, prefix?, ...}}`), with `dictionaryId`, `source` (`document`, `page?`, `location?`, `excerpt?`; required), `reasoning?` and `confidence` (high / medium / low; required). Each line is dry-run validated through the real write path when added; a line whose preview fails can't be approved.
+
+#### `lacerte_proposal_update_line` / `lacerte_proposal_remove_line`
+Replace (re-validated, review decision reset) or remove one line.
+
+#### `lacerte_proposal_add_manual_items` / `lacerte_proposal_add_questions`
+Source lines the preparer must enter by hand (unmapped or refused targets), and open questions for the preparer.
+
+#### `lacerte_proposal_submit`
+Submit for review. The proposal is locked against agent edits until the reviewer approves, rejects or returns it.
+
+#### `lacerte_proposal_get` / `lacerte_proposal_list`
+Read one proposal (lines, sources, previews, decisions, commit results, approval record and `state`: `contentHash`, `approvalCurrent`, `readyToCommit`, `blockers`), or list proposals by `clientNumber?` / `status?`. Both work on read-only devices.
+
+#### `lacerte_proposal_commit`
+Write an approved, unchanged proposal: only the approved lines, in the proposal's own context, through the guarded write paths (read-back, dictionary gate, backup, duplicate protection). Idempotency keys are `proposal-{id}-v{version}-{lineId}`, so a retry never writes twice. Field failures are recorded and the commit continues. A detail line that may already be on the return becomes **Uncertain** and stops the commit: a person checks Lacerte and resolves it (control page or `lacerte-mcp proposal resolve`), then commit again runs only unfinished lines.
+
 ## 8. Prompts catalog
 
 Five first-class MCP prompts registered via `WithPromptsFromAssembly()` in `Program.cs`. Discoverable through the standard MCP `prompts/list` handshake. In Claude Desktop, type `/` to surface them; in Cursor, `@lacerte`. Source: `src/LacertMCP.Server/Prompts/WorkflowPrompts.cs`.
@@ -935,6 +962,21 @@ Exit-code contract:
 
 Status badges adapt to the active terminal encoding: pretty Unicode glyphs (`✓ ⚠ ✗`) on UTF-8 terminals (Windows Terminal, PowerShell 7), `[OK] [WARN] [FAIL] [--]` on legacy code pages.
 
+### `lacerte-mcp proposal`
+
+Review and approve proposals on the Lacerte PC (the same actions as the control page's Proposals tab). Reads the server's proposal folder (`LACERTE_HTTP_DATA_DIR\proposals`, else `%APPDATA%\lacerte-mcp\proposals`; `--dir` to override).
+
+| Command | What it does |
+| --- | --- |
+| `proposal list [--client N] [--status S]` | Proposals, newest first. |
+| `proposal show <id>` | Every line with target, value, source, reasoning, dry-run preview and decision; manual items; questions; approval record. |
+| `proposal approve <id> [--reject L3 ...] [--version N] [--note X] --confirm` | Approve every line except the `--reject`ed ones (lines whose dry run failed can't be approved). `--version` refuses if the proposal changed since you looked. Without `--confirm` it only prints what would be approved. |
+| `proposal reject <id> --note X --confirm` | Reject it (final). |
+| `proposal return <id> --note X --confirm` | Send it back to the agent for changes. |
+| `proposal resolve <id> --line L --in-return\|--missing --confirm` | Settle an Uncertain detail line after checking the client's detail rows in Lacerte: `--in-return` if the row is there (never written again), `--missing` if not (the next commit writes it once). |
+
+Committing is done by the agent (`lacerte_proposal_commit`) or the control page's Commit button, after approval.
+
 ### `lacerte-mcp update`
 
 Keeps the install current with what is published on GitHub. A new version exists once a `v*` tag is pushed and the Release workflow has attached `LacertMCP-v<x.y.z>.zip`.
@@ -997,6 +1039,7 @@ Resolved at process startup unless otherwise noted. Live in your MCP host's `env
 | `LACERTE_IDEMPOTENCY_PERSIST_PATH` | optional | `%APPDATA%/lacerte-mcp/idempotency-cache.json` | Override the persistence path. |
 | `LACERTE_SIM_EXPIRED` | testing only | unset | `1` simulates an expired 24h auth session. |
 | `LACERTE_LIVE_DETAIL_WRITES` | optional | unset (off) | `1` enables live detail-row writes through the Lacerte ODBC driver (separate worker process, per-client snapshot before the first write, read-back after each). Leave off until the REGRESSION_CHECKLIST "FP-2 live items" pass on the Lacerte PC; while off, live detail writes return 9202. |
+| `LACERTE_REQUIRE_APPROVAL` | optional | unset (off) | `1` refuses real writes from `lacerte_field_write`, `lacerte_update_return`, `lacerte_detail_write` and their bulk forms (9023; dry runs still work): data reaches a return only through an approved proposal. Set by `install-http.ps1 -RequireApproval`. |
 | `LACERTE_DETAIL_SNAPSHOT_DIR` | optional | `%APPDATA%\lacerte-mcp\detail-snapshots` | Absolute folder for pre-write detail-row snapshots (taxpayer data; not cleaned up automatically). |
 | `LACERTE_MCP_FORCE_FILE_STORE` | testing / dev | unset | `1` bypasses Windows Credential Manager and uses the file-based AppID store at `%APPDATA%\lacerte-mcp\config.json` (auto-on off-Windows). |
 | `LACERTE_PARITY_RECORDING` | testing only | unset | Path to recorded parity JSON consumed by the `BothModesData` test harness. |
@@ -1108,8 +1151,10 @@ What it takes, and what is in place:
    - Ask Claude to call `lacerte_reload_schema`. Recorded entries survive `lacerte-mcp update` and installer re-runs. Copy them into the source tree to ship them in a release.
 2. **Client-level fields** listed in the dictionary become writable under the SDK manual's range rules (a literal access-map entry or year overlay still wins).
 3. **Amounts (detail rows)** need live detail writes switched on: after the REGRESSION_CHECKLIST "FP-2 live items" pass, re-run `install-http.ps1 -LiveDetailWrites` (remembered in install.json; it sets `LACERTE_LIVE_DETAIL_WRITES=1`). Even then the server writes only Series/Code listed in the verified dictionary (else 9012). Each client's detail rows are snapshotted before the first write, every write is read back, and a row that may have landed locks its idempotency key so a retry can never append a duplicate. Bulk detail writes need the `previewToken` from a passing dry run of the same entries. To undo the MCP's own rows for a client, use `lacerte-mcp detail-restore plan --journal <file>` then `apply --journal <file> --confirm` (journals sit next to the backups; `detail-restore list` shows them). Rows entered in Lacerte are never touched; try restore on a TEST client first.
-4. **Enter the return** with the `lacerte_entity_return_entry` prompt (returnType 1120, 1120S, 1065 or 1041). It stops when the dictionary has no mappings, shows a source-to-field table for approval, dry-runs every write, and finishes with `lacerte_pre_filing_check`.
-5. Close and reopen the client in Lacerte to see the changes; Lacerte computes the forms. Filing stays in Lacerte.
+4. **Claude prepares the return as a proposal** with the `lacerte_entity_return_entry` prompt (returnType 1120, 1120S, 1065 or 1041). It stops when the dictionary has no mappings. Otherwise it builds a proposal: every mapped value with its source document, page and box, its reasoning and a confidence; every line dry-run validated; unmapped lines listed for hand entry; questions for you. Then it submits the proposal and tells you its id. Nothing is written yet.
+5. **You review and approve.** On the control page open **Proposals**, review each line beside its source, reject any you disagree with, and approve; or send it back with a note. On the Lacerte PC the same is `lacerte-mcp proposal show <id>` then `lacerte-mcp proposal approve <id> --confirm`. Claude can't approve. To make proposals the only way agents can write, re-run `install-http.ps1 -RequireApproval`.
+6. **Commit.** Claude commits the approved proposal (`lacerte_proposal_commit`), or you press Commit on the control page. Only approved lines are written, each read back. If a detail line is marked Uncertain, check the client's detail rows in Lacerte and resolve it; then commit again. Claude finishes with `lacerte_pre_filing_check`.
+7. Close and reopen the client in Lacerte to see the changes; Lacerte computes the forms. Enter the manual items. Filing stays in Lacerte.
 
 ---
 
@@ -1185,6 +1230,8 @@ Source: `src/LacertMCP.Server/Errors/SyntheticStatusCodes.cs`.
 | 9019 | LiveReplaceIndexUnsupported | preflight | `lacerte_detail_write` `replaceIndex` supplied in live mode. | Read existing rows, append corrected row, delete stale one via future `lacerte_detail_delete`. |
 | 9020 | BulkBatchTooLarge | preflight | A bulk tool's entries exceed its cap (field/detail bulk: 500 via `LACERTE_BULK_WRITE_MAX`; create bulk: 100 via `LACERTE_BULK_CREATE_MAX`). | Split into ≤ `maxAllowed` chunks with a shared `idempotencyKey` prefix; or override the cap via the env var in `context.envOverride`. |
 | 9021 | BulkBatchCountMismatch | preflight | `expectedCount` does not match `entries.Length`. | Inspect `context.expected/actual`; fix entries or update assertion. |
+| 9023 | ApprovalRequired | preflight | A direct write tool was called for a real write while `LACERTE_REQUIRE_APPROVAL=1`. | Put the entry in a proposal (`lacerte_proposal_*`); a person approves it, then `lacerte_proposal_commit`. |
+| 9024 | ProposalConflict | preflight | The proposal's status or version doesn't allow that step (editing a submitted proposal, committing one that isn't approved or changed after approval, a stale `--version`). | `lacerte_proposal_get` to see `status` and `state.blockers`; follow them. |
 | 9101 | ReAuthRequired | auth | 24h Intuit auth ticket expired (reactive detection — NotSignedIn slipped past the proactive probe). | Run `lacerte-mcp login`. |
 | 9102 | IdempotencyConflict | auth | Same idempotency key reused with a different payload fingerprint — different args, a flipped `dryRun`, or a `lacerte_set_context` switch of dataPath/taxYear/module (the context triple is part of the fingerprint). | Pick a fresh key (e.g. the `-preview`/commit prefix convention), or replay the original payload byte-for-byte in the original context. |
 | 9103 | InvalidAppId | auth | Supplied AppID failed bridge-boundary shape check. | Re-run `lacerte-mcp unregister` then `lacerte-mcp register`; or fix the `LACERTE_APPID` env var. |

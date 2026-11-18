@@ -309,7 +309,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
 
 <header class="topbar">
   <div class="wrap">
-    <div class="brand">Lacerte MCP <span>v0.2.2</span></div>
+    <div class="brand">Lacerte MCP <span>v0.2.5+</span></div>
     <nav class="nav" aria-label="Sections">
       <a href="#what">I · What it is</a>
       <a href="#flow">II · How a request flows</a>
@@ -386,10 +386,10 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
         <text x="468" y="108" class="d-s">Always on: a Startup launcher starts it at sign-in and restarts it if it stops</text>
         <rect x="468" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
         <text x="480" y="148" class="d-m">/mcp</text>
-        <text x="480" y="168" class="d-s">the 43 tools</text>
+        <text x="480" y="168" class="d-s">the 53 tools</text>
         <rect x="630" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
         <text x="642" y="148" class="d-m">/  control page</text>
-        <text x="642" y="168" class="d-s">health, access, activity</text>
+        <text x="642" y="168" class="d-s">access, proposals, activity</text>
         <rect x="792" y="122" width="150" height="62" rx="6" class="d-chip"></rect>
         <text x="804" y="148" class="d-m">who is this?</text>
         <text x="804" y="168" class="d-s">tailscale whois → level</text>
@@ -502,6 +502,16 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
         <div class="stop"><b>Result</b><div class="codes"><span class="code-chip ok">success: true · verified</span></div></div>
       </li>
     </ol>
+
+    <h3 style="margin:30px 0 10px;font-size:var(--step-1)">Preparing a return: Claude proposes, you approve</h3>
+    <p>For return preparation Claude doesn't write straight into the return. It builds a <b>proposal</b>, you review and approve it, and only then is it written. Claude can't approve its own work: no tool does that.</p>
+    <div class="panel pipe">
+      <div class="gh"><span class="who">Claude</span><h4>Reads the documents</h4><p>Matches each source line to a verified field-dictionary mapping.</p></div>
+      <div class="gh"><span class="who">Claude</span><h4>Builds the proposal</h4><p>Every entry with its document, page and box, reasoning and confidence; each one dry-run checked. Unmapped lines go on a hand-entry list; questions for you.</p></div>
+      <div class="pc"><span class="who">You · control page</span><h4>Review</h4><p>Open <b>Proposals</b>, go line by line, reject what you disagree with, or send it back with a note.</p></div>
+      <div class="pc"><span class="who">You</span><h4>Approve</h4><p>Approval is tied to that exact version: if anything changes afterwards, it has to be approved again.</p></div>
+      <div class="gh"><span class="who">Claude or you</span><h4>Commit</h4><p>Only approved lines are written, each read back, with backup and duplicate protection.</p></div>
+    </div>
   </section>
 
   <!-- ============================================================ PART III -->
@@ -589,6 +599,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
             <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" register</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Map what Claude may fill</h4><p>Claude only enters amounts whose Lacerte detail code is in the verified field dictionary &mdash; the server refuses anything else &mdash; and the dictionary starts empty. Build it with a test client, one line at a time, starting with the return type you file most:</p><p class="where">a. Snapshot the test client</p><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" map-diff snapshot --data-path C:\Lacerte\24Tax\CData --year 2024 --module C --client 1001 --out before.json</pre><button class="copy" type="button">Copy</button></div><p class="where">b. In Lacerte, enter one known value on one input screen (e.g. gross receipts 12345), then close the client</p><p class="where">c. Snapshot again</p><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" map-diff snapshot --data-path C:\Lacerte\24Tax\CData --year 2024 --module C --client 1001 --out after.json</pre><button class="copy" type="button">Copy</button></div><p class="where">d. Record it (refused unless exactly that one value changed)</p><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" map-diff record --before before.json --after after.json --id 1120.gross_receipts --concept "Gross receipts" --form 1120 --line 1a --expect 12345</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Switch on detail-row writes, after checking them</h4><p>Amounts (income, deductions, K-1 items) are written as detail rows. That path is built but off until it has been checked on your PC (the "FP-2 live items" in <code>REGRESSION_CHECKLIST.md</code>, which ships in the release folder, using a test client). Then re-run the installer with the switch below; it remembers the setting. Each client's rows are saved before the first write, and every write is read back.</p><div class="cmd"><pre>powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -LiveDetailWrites</pre><button class="copy" type="button">Copy</button></div></div></li>
+          <li><div><h4>Require your approval for every return change (recommended)</h4><p>With this switch, Claude can change a return only through a proposal you approved; its direct write tools are refused (9023). Proposals are reviewed on the control page's <b>Proposals</b> tab, from this PC or your own device. The installer remembers the setting.</p><div class="cmd"><pre>powershell -ExecutionPolicy Bypass -File .\install-http.ps1 -RequireApproval</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Enable individual client fields by hand (optional)</h4><p>Client-level fields are writable when the access map enables them: 3 are built in (1040 and 1065 only), dictionary-mapped ones follow the SDK's rules, and every other field is refused. Enable each field you want agents to change, one at a time, after confirming in Lacerte that it's an input field. Change <code>--module</code> (I, C, S, P, F…), <code>--table</code> and <code>--field</code> to suit. An automatic builder for the whole map isn't available yet.</p>
             <div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" field-access set --module I --table 1 --field C1_15 --access ReadWrite</pre><button class="copy" type="button">Copy</button></div></div></li>
           <li><div><h4>Turn on nightly updates</h4><p>Optional, and no admin needed. Installs each new release at 03:00; if the PC was asleep or off then, it runs as soon as you're signed in again. Every run is written to <code>update.log</code>.</p>
@@ -653,9 +664,10 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
           <tr data-group="data"><td><code>LACERTE_APP_NAME</code></td><td class="def">Operator Lacerte MCP</td><td>Name shown in Intuit's consent dialog; the CLI registers under the same name.</td></tr>
           <tr data-group="network"><td><code>LACERTE_HTTP</code></td><td class="def">unset</td><td><code>1</code> is the same as starting the server with <code>--http</code> (office-network mode).</td></tr>
           <tr data-group="network"><td><code>LACERTE_HTTP_PORT</code></td><td class="def">8767</td><td>Port for <code>/mcp</code> and the control page.</td></tr>
-          <tr data-group="network"><td><code>LACERTE_HTTP_DATA_DIR</code></td><td class="def">%APPDATA%\lacerte-mcp</td><td>Where the device access list and activity history are kept.</td></tr>
+          <tr data-group="network"><td><code>LACERTE_HTTP_DATA_DIR</code></td><td class="def">%APPDATA%\lacerte-mcp</td><td>Where the device access list, activity history and proposals are kept.</td></tr>
           <tr data-group="network"><td><code>LACERTE_TAILSCALE_EXE</code></td><td class="def">Program Files\Tailscale</td><td>Path to <code>tailscale.exe</code>, if it is installed somewhere unusual.</td></tr>
           <tr data-group="limits"><td><code>LACERTE_LIVE_DETAIL_WRITES</code></td><td class="def">off</td><td><code>1</code> lets Claude write detail rows (amounts) to real returns. Turn on only after the checks in <code>REGRESSION_CHECKLIST.md</code> pass.</td></tr>
+          <tr data-group="limits"><td><code>LACERTE_REQUIRE_APPROVAL</code></td><td class="def">off</td><td><code>1</code> refuses Claude's direct writes to returns (9023); changes go only through proposals a person approved. Set by <code>install-http.ps1 -RequireApproval</code>.</td></tr>
           <tr data-group="data"><td><code>LACERTE_DETAIL_SNAPSHOT_DIR</code></td><td class="def">%APPDATA%\lacerte-mcp\detail-snapshots</td><td>Where each client's detail rows are saved before the first write. Contains taxpayer data.</td></tr>
           <tr data-group="limits"><td><code>LACERTE_BULK_WRITE_MAX</code></td><td class="def">500</td><td>Most rows one bulk field or detail write may carry (more → 9020).</td></tr>
           <tr data-group="limits"><td><code>LACERTE_BULK_CREATE_MAX</code></td><td class="def">100</td><td>Most clients one bulk create may carry.</td></tr>
@@ -689,6 +701,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
           <tr><td>Read clients, tables, detail rows, e-file status</td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td><td><span class="dot y" title="yes"></span></td></tr>
           <tr><td>Dry-run a write to preview it</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td></tr>
           <tr><td>Write fields and detail rows, create clients</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Prepare and submit a proposal</td><td><span class="dot n" title="no"></span></td><td><span class="dot n" title="no"></span></td><td><span class="dot y" title="yes"></span></td></tr>
+          <tr><td>Approve a proposal</td><td colspan="3">Never through Claude. Only a person, on the control page from the Lacerte PC or the owner's device, or with <code>lacerte-mcp proposal approve</code> on the Lacerte PC.</td></tr>
         </tbody>
       </table>
     </div>
@@ -701,6 +715,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
       <div class="panel card"><span class="tag">No doubles</span><h3>Idempotency keys</h3><p>A retried write with the same key returns the first result. Bulk writes use a key per row, so a half-finished batch can be safely resent.</p></div>
       <div class="panel card"><span class="tag">Privacy</span><h3>Secrets masked</h3><p>SSN, EIN, TIN, bank and routing numbers, dates of birth, emails and phone numbers are masked in replies. The activity timeline records which client and field changed, never the value.</p></div>
       <div class="panel card"><span class="tag">Takes effect now</span><h3>Access changes are immediate</h3><p>Lowering a device to Read only applies to its open connections straight away, even partway through a bulk write. Setting it to No access disconnects it.</p></div>
+      <div class="panel card"><span class="tag">Approval</span><h3>A person approves</h3><p>Claude prepares returns as proposals. Approval happens only on the control page (from the Lacerte PC or the owner's device) or the Lacerte PC's command line, and is tied to the proposal's exact content. One gap remains: an AI agent with command-line access on one of those two computers could use the same routes, so don't give agents shell access there.</p></div>
       <div class="panel card"><span class="tag">Limits</span><h3>No device can crowd out others</h3><p>Each device can hold up to 8 connections (32 in all), request bodies are size-capped, and repeated refused requests are summarized instead of flooding the activity log.</p></div>
     </div>
   </section>
@@ -708,7 +723,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
   <!-- ============================================================ PART VII -->
   <section class="part" id="tools">
     <div class="part-head"><div class="no">Part VII</div><h2>Tools Claude can use</h2></div>
-    <p class="intro">Claude chooses these automatically from what you ask. You never call them yourself, but knowing them helps you phrase requests. There are also five guided workflows (MCP prompts): client intake, e-file review, bulk field update, CSV intake, and entering an 1120 / 1120-S / 1065 / 1041 return.</p>
+    <p class="intro">Claude chooses these automatically from what you ask. You never call them yourself, but knowing them helps you phrase requests. There are also five guided workflows (MCP prompts): client intake, e-file review, bulk field update, CSV intake, and preparing an 1120 / 1120-S / 1065 / 1041 return as a proposal for your approval.</p>
 
     <div class="toolbar">
       <input id="toolSearch" class="search" type="search" placeholder="Search tools, e.g. state, bulk, e-file…" aria-label="Search tools">
@@ -739,6 +754,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
       <details class="faq"><summary>9012 UnknownFieldAccess on every write</summary><div class="body"><p>The field isn't enabled for writing. Confirm in Lacerte that it's an input field, map it with <code>lacerte-mcp map-diff</code> (Part IV, step 4) or enable it with <code>lacerte-mcp field-access set</code> (step 6), then ask Claude to call <code>lacerte_reload_schema</code> or sign out and back in. The Overview tab's <em>Writable fields</em> check warns while only the built-in fields are enabled.</p></div></details>
       <details class="faq"><summary>Claude says it has to set its context again</summary><div class="body"><p>The connection was closed, for example after an hour idle, a server restart or an update, so its tax year and folder were forgotten. Ask Claude to set the context again. Writes can never land in the wrong file because of this; they're refused until the context is set.</p></div></details>
       <details class="faq"><summary>9022 WriteNotVerified</summary><div class="body"><p>Lacerte accepted the write, but reading it back returned a different value. A common cause is the return being open in Lacerte. For a <b>field</b>, close the return and retry; the retry really rewrites it, even with the same idempotency key. For a <b>detail row</b> (an amount), don't retry: the row may already be in the return, so the same key is locked against a second copy. Check the rows (Claude can read them) and fix it in Lacerte.</p></div></details>
+      <details class="faq"><summary>9023 ApprovalRequired</summary><div class="body"><p>The server requires approval (<code>-RequireApproval</code>), so Claude's direct writes are refused. Ask Claude to prepare a proposal instead, then approve it on the control page's <b>Proposals</b> tab. <b>9024 ProposalConflict</b> means the proposal is in the wrong state for that step, for example it changed after you approved it; Claude can read what's blocking it.</p></div></details>
+      <details class="faq"><summary>Review and approve a proposal without the control page</summary><div class="body"><p>On the Lacerte PC, list the proposals, show one, then approve it. Add <code>--reject L3</code> for each line you don't want. Without <code>--confirm</code> nothing changes.</p><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" proposal list</pre><button class="copy" type="button">Copy</button></div><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" proposal show &lt;id&gt;</pre><button class="copy" type="button">Copy</button></div><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" proposal approve &lt;id&gt; --confirm</pre><button class="copy" type="button">Copy</button></div></div></details>
       <details class="faq"><summary>9001 FieldIsReadOnly</summary><div class="body"><p>The context was set read-only, the field or table is read-only (for example DATA6 and DATA7), or this device has <em>Read only</em> access on the control page.</p></div></details>
       <details class="faq"><summary>9009 ContextNotSet</summary><div class="body"><p>Tell Claude which year, module and data folder to work in, for example: <em>"Use 2024 Individual."</em></p></div></details>
       <details class="faq"><summary>A workstation can't see any Lacerte tools</summary><div class="body"><p>Check that Tailscale is connected on both machines, that the device isn't set to <em>No access</em> on the Access tab, and that Claude Desktop was restarted after setup. Opening <code>http://&lt;PC&gt;:8767/access-check</code> from the workstation shows what the server thinks of it.</p></div></details>
@@ -783,6 +800,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
           <tr><td><code>doctor</code></td><td>13 install checks; exit 0 all green, 2 warnings, 1 a failure.</td></tr>
           <tr><td><code>update</code></td><td>Installs the latest GitHub release (<code>--check</code>, <code>--tag</code>, <code>--schedule daily|off</code>, <code>--reset-field-map</code>).</td></tr>
           <tr><td><code>map-diff snapshot|compare|record</code></td><td>Builds the field dictionary on the Lacerte PC (Part IV, step 4).</td></tr>
+          <tr><td><code>proposal list|show|approve|reject|return|resolve</code></td><td>Review and approve Claude's proposals on the Lacerte PC (changes need <code>--confirm</code>; <code>reject</code> and <code>return</code> need <code>--note</code>).</td></tr>
           <tr><td><code>detail-restore list|plan|apply</code></td><td>Removes amounts Claude added to a client, using its write journal (<code>apply</code> needs <code>--confirm</code>).</td></tr>
           <tr><td><code>tools</code></td><td>Lists every tool the server offers (<code>--names-only</code>, <code>--filter</code>).</td></tr>
           <tr><td><code>field-access list|set</code></td><td>Shows or edits single entries in the writable-field map.</td></tr>
@@ -794,8 +812,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
 
   <footer>
     <div class="status-row">
-      <span>Version <b>0.2.2</b></span>
-      <span>Automated tests <b>2,189 passing</b></span>
+      <span>Version <b>0.2.5+</b></span>
+      <span>Automated tests <b>2,263 passing</b></span>
       <span>Simulation <b>fully tested</b></span>
       <span>Live mode <b>wired, awaiting first run on the Lacerte PC</b></span>
     </div>
@@ -909,7 +927,17 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
     ["Meta", "lacerte_return_codes", "info", "Every status code with its meaning and fix."],
     ["Meta", "lacerte_reload_schema", "info", "Pick up a new field-access map without restarting."],
     ["Meta", "lacerte_help", "info", "Built-in help: modes, tools, settings, limits."],
-    ["Meta", "lacerte_prompts", "info", "The five guided workflows, in full."]
+    ["Meta", "lacerte_prompts", "info", "The five guided workflows, in full."],
+    ["Proposals", "lacerte_proposal_create", "write", "Start a proposal for one client: the place Claude puts every entry it intends to make, for you to approve."],
+    ["Proposals", "lacerte_proposal_add_lines", "write", "Add entries, each with its source document, page and box, reasoning and confidence. Each is dry-run checked on the spot."],
+    ["Proposals", "lacerte_proposal_update_line", "write", "Fix one entry; it is checked again and needs review again."],
+    ["Proposals", "lacerte_proposal_remove_line", "write", "Drop one entry."],
+    ["Proposals", "lacerte_proposal_add_manual_items", "write", "Source lines you'll enter by hand (not mapped or not writable)."],
+    ["Proposals", "lacerte_proposal_add_questions", "write", "Questions for you to decide."],
+    ["Proposals", "lacerte_proposal_submit", "write", "Hand it to you for review; Claude can't change it while you review."],
+    ["Proposals", "lacerte_proposal_get", "read", "One proposal in full, with what still blocks it."],
+    ["Proposals", "lacerte_proposal_list", "read", "Proposals by client or status."],
+    ["Proposals", "lacerte_proposal_commit", "write", "Write an approved, unchanged proposal: only the lines you approved, each read back."]
   ];
   var kind = "all";
   var toolSearch = document.getElementById("toolSearch");
