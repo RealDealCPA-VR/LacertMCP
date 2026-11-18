@@ -152,3 +152,11 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] Live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files via ODBC only — Todo R7-L2/R7-SRC8) until the ODBC write path is wired.
 - [ ] `lacerte_client_create` live returns Success with `clientNumber: null` + `clientNumberHint` (the SDK returns no number — Todo R7-L3), and `lacerte_client_find` then resolves it by ClientID.
 - [ ] `lacerte-mcp register` returns exit 0 on Grant (raw TPSDKStatus 1 → 201 AccessGranted — Todo R7-SRC2) and activates `LacerteSDK_Access.LacerteAccess` → `CreateTPRegister()` (R7-SRC1).
+
+### Round-8 live items
+- [ ] TY24 `lacerte_subclient_read` / `lacerte_state_subclient_read` rows carry `subClientId` (mapped from `C2_1` / `C4_1`), and a live write to a client with 2+ dependents reports `verified: true` (not "can't identify the row"). DATA4's `C4_1` is from the SDK PDF; confirm DATA2 uses `C2_1` too.
+- [ ] A live field write's read-back really is fresh: change a field in Lacerte's UI, write it back over MCP, confirm `verified` reflects the value on disk (driver-manager pooling could hand the "fresh" read a pooled connection — if so, add `Pooling=false` for the verification connection).
+- [ ] Writing a checkbox field with JSON `true` / `false` returns `verified: true` and note the stored form (X / Y / 1).
+- [ ] `lacerte_client_query` on table 2 for a TY24 datapath returns rows across clients (the per-client tables are walked through the roster); check how long it takes on the real firm size.
+- [ ] A TY24 client with no dependents: `lacerte_subclient_read` returns an empty list, not a DBNotSupported error (if the per-client table doesn't exist, map 42S02 to empty for single-client reads too).
+- [ ] The server starts and answers `/healthz` immediately even when the 24h Intuit ticket is cold (sign-in now runs in the background); note whether the SDK shows its sign-in window at startup.
