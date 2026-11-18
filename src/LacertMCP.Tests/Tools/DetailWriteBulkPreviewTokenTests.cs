@@ -201,7 +201,7 @@ namespace LacertMCP.Tests.Tools
                 Parse(json).GetProperty("context").GetProperty("changedSincePreview")[0].GetString());
 
             // Reordered.
-            var reordered = Batch().Reverse().ToArray();
+            var reordered = Enumerable.Reverse(Batch()).ToArray(); // explicit LINQ: C# 14 binds array.Reverse() to the void span overload
             AssertRefused(await tool.LacerteDetailWriteBulk(reordered, previewToken: token), "mismatched");
 
             // A row dropped.
