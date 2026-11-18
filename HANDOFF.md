@@ -1,5 +1,10 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, late) — v0.2.5 + AI-preparation roadmap
+
+- Released v0.2.5 (bulk preview token, detail-restore). The v0.2.4 tag points at a commit whose CI build failed (C# 14 bound array.Reverse() to the span overload; fixed in e6ddf37); it has no release and can be deleted.
+- Wrote docs/plans/ai-preparation-roadmap.md: what's missing for "AI prepares, preparer reviews and approves" (live verification, field coverage, calculated-results visibility, a proposal/approval queue, document intake with citations, outside-DBF inputs, 1040 workflow, staff coexistence, security/§7216, accuracy measurement), phased plan and the decisions needed.
+
 ## Last Session Summary (2026-11-18, evening) — bulk preview token + detail-row restore
 
 - `lacerte_detail_write_bulk`: a real call needs the `previewToken` from a passing dry run of the same entries/context (30 min, reusable; per-connection in HTTP mode); both modes. Prompts updated.

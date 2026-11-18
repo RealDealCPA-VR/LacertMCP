@@ -1616,3 +1616,10 @@ Starting point (2026-11-18 morning): reads every return type and creates clients
 - [ ] FP-4 Code-dependent rules once mapped: 1120-S / 1065 ownership totals, 1041 trust type, 1120 balance sheet.
 - [x] FP-5 Sim fixtures: SData (ORCH, HOLW), FData (MAPL, BIRC).
 - [ ] FP-6 Live acceptance per return type on the Lacerte PC.
+
+### AI preparation with human review (roadmap 2026-11-18: docs/plans/ai-preparation-roadmap.md)
+- [ ] Phase A: live verification on the Lacerte PC (checklists) + investigate reading calculated results (DATA6, Lacerte exports, ask Intuit).
+- [ ] Decide: approval model (proposal-then-approve recommended), first return type, who maps fields, §7216 / data-handling review.
+- [ ] Phase B: map the first return type; proposal + control-page review/approval; source-document intake with citations.
+- [ ] Phase C: parallel run on last year's returns; error threshold.
+- [ ] Phase D/E: other return types incl. a 1040 workflow; encryption/retention of backups and journals; compliance sign-off.
