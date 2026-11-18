@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
 namespace LacertMCP.Cli.Update
 {
@@ -39,10 +40,10 @@ namespace LacertMCP.Cli.Update
     /// <summary>Outcome of <see cref="ReleaseInstaller.Apply"/>.</summary>
     public sealed class ApplyResult
     {
-        public ApplyResult(string backupDir, IReadOnlyList<string> keptFieldMapShards, int filesWritten, int filesRetired)
+        public ApplyResult(string backupDir, FieldMapMergeResult fieldMap, int filesWritten, int filesRetired)
         {
             BackupDir = backupDir;
-            KeptFieldMapShards = keptFieldMapShards;
+            FieldMap = fieldMap;
             FilesWritten = filesWritten;
             FilesRetired = filesRetired;
         }
@@ -50,10 +51,10 @@ namespace LacertMCP.Cli.Update
         public string BackupDir { get; }
 
         /// <summary>
-        /// Installed <c>server\Schema\FieldAccessMap\base\*.json</c> shards kept in
-        /// place of the release's copy (file names), because they differ from it.
+        /// How this PC's <c>server\Schema\FieldAccessMap\base\*.json</c> entries were
+        /// merged into the release's (see <see cref="FieldMapMerge"/>).
         /// </summary>
-        public IReadOnlyList<string> KeptFieldMapShards { get; }
+        public FieldMapMergeResult FieldMap { get; }
 
         public int FilesWritten { get; }
         public int FilesRetired { get; }
@@ -72,11 +73,17 @@ namespace LacertMCP.Cli.Update
     /// back from that copy.
     /// </para>
     /// <para>
-    /// The writable-field map in <c>server\Schema\FieldAccessMap\base</c> is
-    /// operator data (built on the Lacerte PC by the dumper), so — exactly like
-    /// <c>install-http.ps1</c> — any non-empty installed base shard is kept over
-    /// the release's copy unless <c>resetFieldMap</c> is set. Overlays and the
-    /// manifest always come from the release.
+    /// The writable-field map in <c>server\Schema\FieldAccessMap\base</c> mixes
+    /// curated release rows with operator data (built on the Lacerte PC by the
+    /// dumper or <c>field-access set</c>), so the installed shards are merged into
+    /// the release's per entry by <see cref="FieldMapMerge"/> — the same rule
+    /// <c>install-http.ps1</c> applies — unless <c>resetFieldMap</c> is set.
+    /// Overlays and the manifest always come from the release.
+    /// </para>
+    /// <para>
+    /// While files are being swapped, <see cref="PendingFileName"/> in the install
+    /// root names the backup; if the swap is interrupted (console closed, reboot,
+    /// power loss) the next <c>lacerte-mcp update</c> restores from it first.
     /// </para>
     /// </summary>
     public static class ReleaseInstaller
@@ -84,11 +91,19 @@ namespace LacertMCP.Cli.Update
         public const string ServerExe = "LacertMCP.Server.exe";
         public const string CliExe = "lacerte-mcp.exe";
         public const string RetiredSuffix = ".old-update";
+        public const string PendingFileName = ".update-pending";
         public const int BackupsToKeep = 3;
 
         // dumper\ ships from v0.2.1 on; a dir the release doesn't carry is left alone.
         private static readonly string[] ManagedDirs = { "server", "cli", "dumper" };
-        private static readonly string[] RootDocs = { "README.md", "LICENSE", "CHANGELOG.md", "install-http.ps1" };
+        private static readonly string[] RootDocs = { "README.md", "LICENSE", "CHANGELOG.md" };
+
+        // Earlier updates copied install-http.ps1 into the install root. Run from
+        // there, it resolved its source to the install itself and deleted server\
+        // before copying it; remove that copy (the installer belongs in the zip).
+        private static readonly string[] RetiredRootFiles = { "install-http.ps1" };
+
+        private const string BackupStampFormat = "yyyyMMdd-HHmmss";
 
         // Top-level file types the release owns inside server\ and cli\. Anything
         // else at top level (e.g. a logs\ folder when the host's cwd is server\)
@@ -136,14 +151,18 @@ namespace LacertMCP.Cli.Update
             => File.Exists(Path.Combine(dir, "LacertMCP.sln"))
                && (Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git")));
 
-        /// <summary>Picks the release zip among a release's assets.</summary>
+        /// <summary>The release zip's exact name for <paramref name="version"/>.</summary>
+        public static string ZipAssetName(ReleaseVersion version) => "LacertMCP-v" + version + ".zip";
+
+        /// <summary>
+        /// Picks the release zip among a release's assets: exactly
+        /// <c>LacertMCP-v&lt;version&gt;.zip</c>, nothing looser (another zip on the
+        /// release could be a different build).
+        /// </summary>
         public static ReleaseAsset? SelectZipAsset(ReleaseInfo release, ReleaseVersion version)
         {
-            var exact = "LacertMCP-v" + version + ".zip";
-            return release.Assets.FirstOrDefault(a => string.Equals(a.Name, exact, StringComparison.OrdinalIgnoreCase))
-                   ?? release.Assets.FirstOrDefault(a =>
-                       a.Name.StartsWith("LacertMCP-", StringComparison.OrdinalIgnoreCase)
-                       && a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+            var exact = ZipAssetName(version);
+            return release.Assets.FirstOrDefault(a => string.Equals(a.Name, exact, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>Checks the downloaded file's size and (when published) SHA-256.</summary>
@@ -229,13 +248,13 @@ namespace LacertMCP.Cli.Update
         /// swaps in <paramref name="stagedRoot"/>'s. Rolls back on failure.
         /// </summary>
         public static ApplyResult Apply(string stagedRoot, string installRoot, string currentVersionLabel, TextWriter log,
-            bool resetFieldMap = false)
+            bool resetFieldMap = false, string? targetVersionLabel = null)
         {
             SweepRetired(installRoot);
 
             var backupsRoot = Path.Combine(installRoot, "backups");
             var backupDir = Path.Combine(backupsRoot,
-                "v" + Sanitize(currentVersionLabel) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
+                "v" + Sanitize(currentVersionLabel) + "-" + DateTime.Now.ToString(BackupStampFormat, CultureInfo.InvariantCulture));
             if (Directory.Exists(backupDir)) backupDir += "-" + Guid.NewGuid().ToString("N").Substring(0, 6);
 
             log.WriteLine($"  Backing up current install -> {backupDir}");
@@ -245,16 +264,17 @@ namespace LacertMCP.Cli.Update
                 if (Directory.Exists(src)) CopyTree(src, Path.Combine(backupDir, d), skipRetired: true);
             }
 
+            // Merge this PC's map into the staged tree, so the swap (and its
+            // stale-file sweep) treats the merged shards as part of the release.
             var installedBase = Path.Combine(installRoot, "server", "Schema", "FieldAccessMap", "base");
             var stagedBase = Path.Combine(stagedRoot, "server", "Schema", "FieldAccessMap", "base");
-            var keep = resetFieldMap ? new List<string>() : ShardsToKeep(installedBase, stagedBase);
-            if (keep.Count > 0)
-            {
-                // Overlay the operator's shards onto the staged tree, so the swap
-                // (and its stale-file sweep) treats them as part of the release.
-                Directory.CreateDirectory(stagedBase);
-                foreach (var name in keep) File.Copy(Path.Combine(installedBase, name), Path.Combine(stagedBase, name), overwrite: true);
-            }
+            var fieldMap = resetFieldMap
+                ? new FieldMapMergeResult(Array.Empty<ShardMergeStats>())
+                : FieldMapMerge.Merge(installedBase, stagedBase);
+
+            // From here until the swap completes (or is undone) the install may be
+            // a mix of versions; the marker lets the next run put it back.
+            WritePending(installRoot, new PendingUpdate(backupDir, currentVersionLabel, targetVersionLabel ?? "unknown"));
 
             var written = 0;
             var retired = 0;
@@ -277,29 +297,117 @@ namespace LacertMCP.Cli.Update
                         written++;
                     }
                 }
+                foreach (var stale in RetiredRootFiles)
+                {
+                    var path = Path.Combine(installRoot, stale);
+                    if (File.Exists(path)) RetireFile(path);
+                }
             }
             catch (Exception ex)
             {
                 log.WriteLine($"  Swap failed ({ex.Message}) — restoring from {backupDir}");
-                try
-                {
-                    foreach (var d in ManagedDirs)
-                    {
-                        var b = Path.Combine(backupDir, d);
-                        if (Directory.Exists(b)) ReplaceTree(b, Path.Combine(installRoot, d));
-                    }
-                    log.WriteLine("  Restore complete; the previous version is back in place.");
-                }
-                catch (Exception rex)
-                {
-                    log.WriteLine($"  RESTORE FAILED ({rex.Message}). Copy server\\ and cli\\ back from {backupDir} by hand.");
-                }
-                throw new UpdateException($"Update failed while swapping files: {ex.Message}", ex);
+                var restored = Restore(backupDir, installRoot, log, out var restoreError);
+                // A marker that survives here points at the backup just restored, so a
+                // repeat restore next run is a no-op.
+                if (restored) { try { ClearPending(installRoot); } catch { /* see above */ } }
+                throw new UpdateException(
+                    $"Update failed while swapping files: {ex.Message} " +
+                    (restored
+                        ? "(the previous version was restored)"
+                        : $"(RESTORE FAILED: {restoreError}; the next `lacerte-mcp update` retries it from {backupDir})"), ex);
             }
 
-            PruneBackups(backupsRoot, BackupsToKeep);
-            return new ApplyResult(backupDir, keep, written, retired);
+            PruneBackups(backupsRoot, BackupsToKeep, backupDir);
+            return new ApplyResult(backupDir, fieldMap, written, retired);
         }
+
+        /// <summary>
+        /// Puts <paramref name="backupDir"/>'s <c>server\</c>, <c>cli\</c> and
+        /// <c>dumper\</c> back in place under <paramref name="installRoot"/> (the
+        /// server must not be running). Returns false, with the reason, if it failed.
+        /// The pending marker is left for the caller to clear.
+        /// </summary>
+        public static bool Restore(string backupDir, string installRoot, TextWriter log, out string? error)
+        {
+            error = null;
+            try
+            {
+                if (!Directory.Exists(Path.Combine(backupDir, "server")))
+                {
+                    throw new DirectoryNotFoundException($"the backup {backupDir} has no server\\ folder");
+                }
+                foreach (var d in ManagedDirs)
+                {
+                    var b = Path.Combine(backupDir, d);
+                    if (Directory.Exists(b)) ReplaceTree(b, Path.Combine(installRoot, d));
+                }
+                log.WriteLine("  Restore complete; the previous version is back in place.");
+                return true;
+            }
+            catch (Exception rex)
+            {
+                error = rex.Message;
+                log.WriteLine($"  RESTORE FAILED ({rex.Message}). Copy server\\ and cli\\ back from {backupDir} by hand.");
+                return false;
+            }
+        }
+
+        // ---------------------------------------------------------------- pending marker
+
+        /// <summary>Contents of <see cref="PendingFileName"/>: an update that started swapping files.</summary>
+        public sealed class PendingUpdate
+        {
+            public PendingUpdate(string backupDir, string fromVersion, string targetVersion)
+            {
+                BackupDir = backupDir;
+                FromVersion = fromVersion;
+                TargetVersion = targetVersion;
+            }
+
+            public string BackupDir { get; }
+            public string FromVersion { get; }
+            public string TargetVersion { get; }
+        }
+
+        public static void WritePending(string installRoot, PendingUpdate pending)
+        {
+            var text = "backup=" + pending.BackupDir + "\r\n" +
+                       "from=" + pending.FromVersion + "\r\n" +
+                       "target=" + pending.TargetVersion + "\r\n";
+            var path = Path.Combine(installRoot, PendingFileName);
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, text);
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
+        }
+
+        /// <summary>The interrupted update recorded in the install, or null. A marker without a backup path reads as null.</summary>
+        public static PendingUpdate? ReadPending(string installRoot)
+        {
+            var path = Path.Combine(installRoot, PendingFileName);
+            if (!File.Exists(path)) return null;
+            string? backup = null, from = null, target = null;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                var key = line.Substring(0, eq).Trim();
+                var value = line.Substring(eq + 1).Trim();
+                if (key == "backup") backup = value;
+                else if (key == "from") from = value;
+                else if (key == "target") target = value;
+            }
+            return string.IsNullOrEmpty(backup) ? null : new PendingUpdate(backup!, from ?? "unknown", target ?? "unknown");
+        }
+
+        public static bool HasPendingMarker(string installRoot) => File.Exists(Path.Combine(installRoot, PendingFileName));
+
+        /// <summary>
+        /// Deletes the marker. Throws if it can't: a marker left behind after a
+        /// SUCCESSFUL update would make the next run roll it back.
+        /// </summary>
+        public static void ClearPending(string installRoot)
+            => File.Delete(Path.Combine(installRoot, PendingFileName));
 
         /// <summary>
         /// Makes <paramref name="dest"/> match <paramref name="src"/>: every source
@@ -389,34 +497,41 @@ namespace LacertMCP.Cli.Update
             }
         }
 
+        private static readonly Regex BackupStamp = new Regex(@"-(\d{8}-\d{6})(-[0-9a-f]{6})?\z", RegexOptions.CultureInvariant);
+
         /// <summary>
-        /// Installed base shards to keep: non-empty (more than "{}") and different
-        /// from the release's copy (or absent from the release).
+        /// When a backup was taken: the <c>yyyyMMdd-HHmmss</c> stamp in its folder
+        /// name (creation time is reset when a folder is copied or restored), falling
+        /// back to the folder's creation time for names that carry no stamp.
         /// </summary>
-        private static List<string> ShardsToKeep(string installedBase, string stagedBase)
+        public static DateTime BackupTimestamp(DirectoryInfo dir)
         {
-            var keep = new List<string>();
-            if (!Directory.Exists(installedBase)) return keep;
-            foreach (var file in Directory.EnumerateFiles(installedBase, "*.json"))
+            var m = BackupStamp.Match(dir.Name);
+            if (m.Success && DateTime.TryParseExact(m.Groups[1].Value, BackupStampFormat, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal, out var stamp))
             {
-                if (new FileInfo(file).Length <= 2) continue;
-                var name = Path.GetFileName(file);
-                var incoming = Path.Combine(stagedBase, name);
-                if (File.Exists(incoming) && string.Equals(Sha256Hex(file), Sha256Hex(incoming), StringComparison.Ordinal)) continue;
-                keep.Add(name);
+                return stamp;
             }
-            keep.Sort(StringComparer.OrdinalIgnoreCase);
-            return keep;
+            return dir.CreationTime;
         }
 
-        private static void PruneBackups(string backupsRoot, int keep)
+        /// <summary>
+        /// Keeps the newest <paramref name="keep"/> backups (by <see cref="BackupTimestamp"/>),
+        /// counting — and never deleting — <paramref name="current"/>, the one just made.
+        /// </summary>
+        public static void PruneBackups(string backupsRoot, int keep, string? current = null)
         {
             try
             {
-                var dirs = new DirectoryInfo(backupsRoot).GetDirectories()
-                    .OrderByDescending(d => d.CreationTimeUtc)
-                    .Skip(keep);
-                foreach (var d in dirs)
+                var currentFull = current == null ? null : Path.GetFullPath(current).TrimEnd(Path.DirectorySeparatorChar);
+                var others = new DirectoryInfo(backupsRoot).GetDirectories()
+                    .Where(d => currentFull == null
+                                || !string.Equals(d.FullName.TrimEnd(Path.DirectorySeparatorChar), currentFull, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(BackupTimestamp)
+                    .ThenByDescending(d => d.Name, StringComparer.Ordinal)
+                    .Skip(currentFull == null ? keep : Math.Max(0, keep - 1))
+                    .ToList();
+                foreach (var d in others)
                 {
                     try { d.Delete(recursive: true); } catch { /* best-effort */ }
                 }
