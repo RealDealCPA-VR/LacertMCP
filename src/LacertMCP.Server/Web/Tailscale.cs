@@ -11,8 +11,34 @@ using System.Threading.Tasks;
 
 namespace LacertMCP.Server.Web
 {
-    /// <summary>A tailnet device as seen by <c>tailscale whois</c> / <c>tailscale status</c>.</summary>
-    public sealed record TailnetDevice(string StableId, string Name, string OwnerId, string OwnerLogin, string[] Addresses, bool Online, string Os);
+    /// <summary>
+    /// A tailnet device as seen by <c>tailscale whois</c> / <c>tailscale status</c>.
+    /// <c>IsTagged</c>: the node carries ACL tags. Every tagged node in a tailnet
+    /// shares the one "tagged-devices" user, so a tagged node's OwnerId says
+    /// nothing about who owns it.
+    /// </summary>
+    public sealed record TailnetDevice(string StableId, string Name, string OwnerId, string OwnerLogin, string[] Addresses, bool Online, string Os, bool IsTagged = false)
+    {
+        /// <summary>The login Tailscale reports for every tagged node.</summary>
+        public const string TaggedDevicesLogin = "tagged-devices";
+
+        /// <summary>
+        /// True when <paramref name="other"/> belongs to the same Tailscale login as
+        /// <paramref name="self"/>. Never true when either is tagged: tagged nodes
+        /// all share one user, so "same owner" would mean "any tagged node".
+        /// </summary>
+        public static bool SameOwner(TailnetDevice? self, TailnetDevice? other)
+            => self != null && other != null
+               && !self.IsTagged && !other.IsTagged
+               && !string.IsNullOrEmpty(self.OwnerId)
+               && other.OwnerId == self.OwnerId;
+    }
+
+    /// <summary>The Tailscale CLI itself could not be started (not installed, wrong path).</summary>
+    public sealed class TailscaleCliUnavailableException : InvalidOperationException
+    {
+        public TailscaleCliUnavailableException(string message) : base(message) { }
+    }
 
     /// <summary>
     /// Outcome of identifying a remote caller. Kept distinct on purpose: a
@@ -72,9 +98,12 @@ namespace LacertMCP.Server.Web
             }
             catch (Exception ex)
             {
-                // "no such peer" is an answer, not a failure.
-                if (ex.Message.IndexOf("no match", StringComparison.OrdinalIgnoreCase) >= 0
-                    || ex.Message.IndexOf("not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                // "no such peer" is an answer, not a failure. Match only Tailscale's own
+                // wording ("no match for IP:port ...", "peer not found"), never our
+                // CLI-not-runnable error, which must surface as a 503 naming the cause.
+                if (!(ex is TailscaleCliUnavailableException)
+                    && (ex.Message.IndexOf("no match", StringComparison.OrdinalIgnoreCase) >= 0
+                        || ex.Message.IndexOf("peer not found", StringComparison.OrdinalIgnoreCase) >= 0))
                 {
                     MarkOk();
                     return new WhoisResult(null, null);
@@ -88,14 +117,16 @@ namespace LacertMCP.Server.Web
                 var root = doc.RootElement;
                 var node = root.GetProperty("Node");
                 var profile = root.TryGetProperty("UserProfile", out var p) ? p : default;
+                var login = profile.ValueKind == JsonValueKind.Object ? Str(profile, "LoginName") : string.Empty;
                 var dev = new TailnetDevice(
                     Str(node, "StableID"),
                     ShortName(node),
                     profile.ValueKind == JsonValueKind.Object ? profile.GetProperty("ID").ToString() : string.Empty,
-                    profile.ValueKind == JsonValueKind.Object ? Str(profile, "LoginName") : string.Empty,
+                    login,
                     StrArray(node, "Addresses").Select(a => a.Split('/')[0]).ToArray(),
                     true,
-                    string.Empty);
+                    string.Empty,
+                    IsTagged(node, login));
                 MarkOk();
                 _whoisCache[key] = (dev, DateTime.UtcNow);
                 return new WhoisResult(dev, null);
@@ -135,14 +166,16 @@ namespace LacertMCP.Server.Web
                 TailnetDevice Parse(JsonElement e, bool self)
                 {
                     var owner = e.TryGetProperty("UserID", out var uid) ? uid.ToString() : string.Empty;
+                    var login = logins.TryGetValue(owner, out var l) ? l : string.Empty;
                     return new TailnetDevice(
                         Str(e, "ID"),
                         ShortName(e),
                         owner,
-                        logins.TryGetValue(owner, out var l) ? l : string.Empty,
+                        login,
                         StrArray(e, "TailscaleIPs"),
                         self || (e.TryGetProperty("Online", out var on) && on.ValueKind == JsonValueKind.True),
-                        Str(e, "OS"));
+                        Str(e, "OS"),
+                        IsTagged(e, login));
                 }
                 TailnetDevice? me = root.TryGetProperty("Self", out var s) && s.ValueKind == JsonValueKind.Object ? Parse(s, true) : null;
                 var peers = new List<TailnetDevice>();
@@ -187,6 +220,11 @@ namespace LacertMCP.Server.Web
                 ? v.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString() ?? string.Empty).ToArray()
                 : Array.Empty<string>();
 
+        /// <summary>A node is tagged when it carries any ACL tag, or reports the shared "tagged-devices" login.</summary>
+        private static bool IsTagged(JsonElement node, string login)
+            => StrArray(node, "Tags").Any(t => t.Length > 0)
+               || string.Equals(login, TailnetDevice.TaggedDevicesLogin, StringComparison.OrdinalIgnoreCase);
+
         private static string ShortName(JsonElement e)
         {
             var computed = Str(e, "ComputedName");
@@ -224,7 +262,7 @@ namespace LacertMCP.Server.Web
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException("tailscale CLI not found or not runnable (" + ex.Message + "). Is Tailscale installed?");
+                throw new TailscaleCliUnavailableException("tailscale CLI not found or not runnable (" + ex.Message + "). Is Tailscale installed?");
             }
             var stdout = proc.StandardOutput.ReadToEndAsync();
             var stderr = proc.StandardError.ReadToEndAsync();

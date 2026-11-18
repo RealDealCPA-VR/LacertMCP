@@ -135,21 +135,29 @@ namespace LacertMCP.Server.Web
   }
 
   # Claude Code speaks HTTP itself, so it gets the address directly.
+  # Resolved to the real program (claude.exe / claude.cmd), never an alias, function
+  # or .ps1, so $LASTEXITCODE below is that program's own exit code.
   function Set-ClaudeCode {
-    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { return }
+    $claude = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $claude) { return }
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-      & claude mcp remove $Name -s user 2>&1 | Out-Null
+      & $claude.Source mcp remove $Name -s user 2>&1 | Out-Null
       if ($Uninstall) { $Done.Add('Claude Code'); return }
-      $out = & claude mcp add --transport http --scope user $Name $Url 2>&1
+      $global:LASTEXITCODE = 1
+      $out = & $claude.Source mcp add --transport http --scope user $Name $Url 2>&1
       if ($LASTEXITCODE -eq 0) { $Done.Add('Claude Code') }
       else { Write-Warning ("  Claude Code: " + (($out | Out-String).Trim())) }
     } finally { $ErrorActionPreference = $old }
   }
 
+  # Claude Desktop: only where it is installed (classic: its settings folder or its
+  # install folder exists; Microsoft Store: its package exists).
   $desktop = New-Object System.Collections.Generic.List[string]
-  $desktop.Add((Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'))
+  if ((Test-Path (Join-Path $env:APPDATA 'Claude')) -or (Test-Path (Join-Path $env:LOCALAPPDATA 'AnthropicClaude'))) {
+    $desktop.Add((Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'))
+  }
   $pkgs = Join-Path $env:LOCALAPPDATA 'Packages'
   if (Test-Path $pkgs) {
     Get-ChildItem $pkgs -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue |
@@ -164,6 +172,12 @@ namespace LacertMCP.Server.Web
     if ($wantCodex) { Set-CodexConfig (Join-Path $codexDir 'config.toml') }
     Set-ClaudeCode
     Remove-Item $Root -Recurse -Force -ErrorAction SilentlyContinue
+    # Tell the Lacerte PC, so it stops showing this device as waiting for access (best effort).
+    try {
+      $q = [System.Net.HttpWebRequest]::Create("$Base/access-check?uninstall=1")
+      $q.Proxy = $null; $q.Timeout = 5000
+      $q.GetResponse().Close()
+    } catch { }
     foreach ($d in $Done) { Write-Host "  removed from $d" }
     Write-Host 'Done. Restart Claude Desktop if it is open. Access granted on the Lacerte PC stays until you remove it there.'
     return
@@ -188,6 +202,7 @@ namespace LacertMCP.Server.Web
 
   Write-Host ''
   foreach ($d in $Done) { Write-Host "  Added to $d" -ForegroundColor Green }
+  if ($Done.Count -eq 0) { Write-Warning '  No Claude Desktop, Claude Code or Codex was found on this PC. Install one, then run this line again.' }
   Write-Host "  Server address: $Url"
   Write-Host ''
   switch ($access.level) {
@@ -298,7 +313,7 @@ while ($null -ne ($line = $In.ReadLine())) {
     $r = Invoke-Post $line $true
     if ($r.Status -eq 404 -and $script:Session -and $method -ne 'initialize' -and $script:InitLine) {
       # The Lacerte MCP restarted and forgot this connection: reconnect quietly and retry.
-      Write-Log 'Connection expired; reconnecting.'
+      Write-Log 'Connection expired (the Lacerte MCP restarted or closed it); reconnecting. The agent must call lacerte_set_context again before reading or writing returns.'
       $script:Session = $null
       $ri = Invoke-Post $script:InitLine $false
       if ($ri.Status -lt 300) {

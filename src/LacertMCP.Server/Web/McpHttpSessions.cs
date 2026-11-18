@@ -73,16 +73,19 @@ namespace LacertMCP.Server.Web
     }
 
     /// <summary>
-    /// Registry of live MCP HTTP sessions with idle reaping and a hard cap. When
-    /// the cap is reached the oldest IDLE session is evicted rather than refusing
+    /// Registry of live MCP HTTP sessions with idle reaping, a per-device cap and
+    /// a global cap. When a cap is reached an IDLE session is evicted (the
+    /// device's own first, see <see cref="TryAddAsync"/>) rather than refusing
     /// everyone (clients that restart without DELETE otherwise pile up until the
     /// server is restarted — a failure found in the sibling QuickBooks hub).
     /// </summary>
     public sealed class McpHttpSessions
     {
         public const int MaxSessions = 32;
+        public const int MaxSessionsPerDevice = 8;
         public static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(60);
 
+        private readonly object _gate = new object();
         private readonly ConcurrentDictionary<string, McpHttpSession> _sessions =
             new ConcurrentDictionary<string, McpHttpSession>(StringComparer.Ordinal);
         private readonly ActivityLog _activity;
@@ -104,31 +107,61 @@ namespace LacertMCP.Server.Web
             return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         }
 
-        /// <summary>Makes room for one more session; false when every session is busy.</summary>
-        public async Task<bool> EnsureCapacityAsync()
+        /// <summary>
+        /// Adds <paramref name="session"/>, making room first: a device at its own
+        /// cap (<see cref="MaxSessionsPerDevice"/>) loses its own oldest idle
+        /// session; at the global cap the caller's own oldest idle session goes
+        /// first, then the globally oldest idle one. One device can therefore
+        /// never push other devices' agents out. The capacity check and the add
+        /// happen under one lock. False (nothing added) when there's no idle
+        /// session to evict; the caller then disposes <paramref name="session"/>.
+        /// </summary>
+        public async Task<bool> TryAddAsync(McpHttpSession session)
         {
-            if (_sessions.Count < MaxSessions) return true;
-            var victim = _sessions.Values
-                .Where(s => s.ActiveRequests == 0)
-                .OrderBy(s => s.LastSeenAt)
-                .FirstOrDefault();
-            if (victim == null) return false;
-            await RemoveAsync(victim.Id, "closed to make room (connection limit " + MaxSessions + ")").ConfigureAwait(false);
+            McpHttpSession? victim = null;
+            string reason = string.Empty;
+            lock (_gate)
+            {
+                var device = session.Caller.StableId;
+                var mine = _sessions.Values.Where(s => s.Caller.StableId == device).ToList();
+                if (mine.Count >= MaxSessionsPerDevice)
+                {
+                    victim = OldestIdle(mine);
+                    if (victim == null) return false;
+                    reason = "closed to make room (limit " + MaxSessionsPerDevice + " connections per device)";
+                }
+                else if (_sessions.Count >= MaxSessions)
+                {
+                    victim = OldestIdle(mine) ?? OldestIdle(_sessions.Values);
+                    if (victim == null) return false;
+                    reason = "closed to make room (connection limit " + MaxSessions + ")";
+                }
+                if (victim != null) _sessions.TryRemove(victim.Id, out _);
+                _sessions[session.Id] = session;
+            }
+            if (victim != null) await CloseAsync(victim, reason).ConfigureAwait(false);
             return true;
         }
 
-        public void Add(McpHttpSession session)
-        {
-            _sessions[session.Id] = session;
-        }
+        private static McpHttpSession? OldestIdle(IEnumerable<McpHttpSession> candidates)
+            => candidates.Where(s => s.ActiveRequests == 0).OrderBy(s => s.LastSeenAt).FirstOrDefault();
+
+        /// <summary>Every live session of one device.</summary>
+        public IReadOnlyList<McpHttpSession> ForDevice(string stableId)
+            => _sessions.Values.Where(s => s.Caller.StableId == stableId).ToList();
 
         public async Task RemoveAsync(string id, string reason)
         {
             if (_sessions.TryRemove(id, out var s))
             {
-                _activity.Record("info", "connection", "Agent connection closed: " + reason, s.Caller.Name, s.ClientName);
-                await s.DisposeAsync().ConfigureAwait(false);
+                await CloseAsync(s, reason).ConfigureAwait(false);
             }
+        }
+
+        private async Task CloseAsync(McpHttpSession s, string reason)
+        {
+            _activity.Record("info", "connection", "Agent connection closed: " + reason, s.Caller.Name, s.ClientName);
+            await s.DisposeAsync().ConfigureAwait(false);
         }
 
         public async Task ReapIdleAsync()
