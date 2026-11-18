@@ -47,6 +47,8 @@ namespace LacertMCP.Server.Startup
             // REMOVED from this list — it's a file path, not a boolean
             // (validated separately in CheckParityRecording below).
             "LACERTE_DEBUG_LOG_FULL_RESULTS",
+            // FP-2 — live detail-row writes over ODBC; off unless exactly "1".
+            "LACERTE_LIVE_DETAIL_WRITES",
         };
 
         // R6-30(b): default-ON flags — the feature is enabled unless the value
@@ -120,6 +122,7 @@ namespace LacertMCP.Server.Startup
             CheckDataRoot(stderr, resolved);
             CheckDebugLogPath(stderr, resolved);
             CheckParityRecording(stderr, resolved);
+            CheckDetailSnapshotDir(stderr, resolved);
 
             return WriteBanner(stderr, resolved);
         }
@@ -286,6 +289,26 @@ namespace LacertMCP.Server.Startup
             }
         }
 
+        /// <summary>
+        /// FP-2 — <c>LACERTE_DETAIL_SNAPSHOT_DIR</c> (where the pre-write backups
+        /// of a client's detail rows go) must be an absolute path; anything
+        /// else is ignored by the session in favor of
+        /// <c>%APPDATA%\lacerte-mcp\detail-snapshots</c>.
+        /// </summary>
+        private static void CheckDetailSnapshotDir(TextWriter stderr, IDictionary<string, string?> env)
+        {
+            var raw = Get(env, "LACERTE_DETAIL_SNAPSHOT_DIR");
+            if (string.IsNullOrEmpty(raw)) return;
+            bool rooted;
+            try { rooted = Path.IsPathRooted(raw!.Trim()); }
+            catch (ArgumentException) { rooted = false; }
+            if (!rooted)
+            {
+                stderr.WriteLine(
+                    $"[startup] LACERTE_DETAIL_SNAPSHOT_DIR='{raw}' is not an absolute path — ignored (detail-row backups go to %APPDATA%\\lacerte-mcp\\detail-snapshots).");
+            }
+        }
+
         private static SessionMode WriteBanner(TextWriter stderr, IDictionary<string, string?> env)
         {
             var sim = Get(env, "LACERTE_SIMULATION") == "1";
@@ -309,8 +332,10 @@ namespace LacertMCP.Server.Startup
             var logPath = Get(env, "LACERTE_DEBUG_LOG_PATH");
             var asmVersion = SafeAssemblyVersion();
 
+            var liveDetailWrites = Get(env, "LACERTE_LIVE_DETAIL_WRITES") == "1";
+
             stderr.WriteLine(
-                $"[startup] LacertMCP {asmVersion} mode={mode.ToString().ToLowerInvariant()} dataRoot={Nz(dataRoot)} defaultTaxYear={Nz(defaultTaxYear)} debugWire={(debugWire ? "on" : "off")} debugLogPath={Nz(logPath)}");
+                $"[startup] LacertMCP {asmVersion} mode={mode.ToString().ToLowerInvariant()} dataRoot={Nz(dataRoot)} defaultTaxYear={Nz(defaultTaxYear)} debugWire={(debugWire ? "on" : "off")} debugLogPath={Nz(logPath)} liveDetailWrites={(liveDetailWrites ? "on" : "off")}");
             return mode;
         }
 

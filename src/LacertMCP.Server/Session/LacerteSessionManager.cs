@@ -383,6 +383,8 @@ namespace LacertMCP.Server.Session
             }
 
             _appName = TryGet(resolved, "LACERTE_APP_NAME");
+            // FP-2 — LACERTE_LIVE_DETAIL_WRITES + backup directory.
+            InitLiveDetailWriteSettings(resolved);
 
             // P15-004 — parse LACERTE_DEFAULT_TAX_YEAR once at startup.
             // Fail-loud on bad input (per Boundary Invariant: config errors
@@ -492,6 +494,7 @@ namespace LacertMCP.Server.Session
             var resolved = env ?? new Dictionary<string, string?>();
             Mode = SessionMode.Live;
             _appName = TryGet(resolved, "LACERTE_APP_NAME");
+            InitLiveDetailWriteSettings(resolved);
             _bridge = bridge;
             _sim = null;
 
@@ -1870,10 +1873,34 @@ namespace LacertMCP.Server.Session
         }
 
         /// <summary>
-        /// Detail-row write. No validation here — that lives in the tool layer
-        /// (per agent 06: SDK doesn't validate detail-row shape either).
+        /// Detail-row write; returns the TAPIStatus only. See
+        /// <see cref="WriteDetailWithOutcome"/> for the backup path and the
+        /// read-back result.
         /// </summary>
         public async Task<int> WriteDetail(
+            string clientNumber, DetailRow row, int? replaceIndex = null,
+            bool dryRun = false, string? idempotencyKey = null,
+            CancellationToken cancellationToken = default,
+            SessionContext? expectedContext = null)
+        {
+            var outcome = await WriteDetailWithOutcome(clientNumber, row, replaceIndex, dryRun,
+                idempotencyKey, cancellationToken, expectedContext).ConfigureAwait(false);
+            return outcome.Status;
+        }
+
+        /// <summary>
+        /// Detail-row write. Row content is validated here in both modes
+        /// (BridgeInputValidation.ValidateDetailRowContent) on top of the tool
+        /// layer's shape checks — the SDK does not validate detail rows.
+        /// <para>
+        /// FP-2 — live mode writes over ODBC when LACERTE_LIVE_DETAIL_WRITES=1
+        /// (9202 otherwise): backup of the client's detail rows before the
+        /// first write, INSERT in a separate worker process, fresh read-back
+        /// (LacerteSessionManager.Live.cs). The outcome carries the backup path
+        /// and whether the read-back confirmed the row.
+        /// </para>
+        /// </summary>
+        public async Task<DetailWriteOutcome> WriteDetailWithOutcome(
             string clientNumber, DetailRow row, int? replaceIndex = null,
             bool dryRun = false, string? idempotencyKey = null,
             CancellationToken cancellationToken = default,
@@ -1908,7 +1935,9 @@ namespace LacertMCP.Server.Session
             };
             BridgeInputValidation.ValidateDetailRowContent(row, "WriteDetail");
 
-            return await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
+            // FP-2 — set by whichever branch runs (replay / live / sim).
+            DetailWriteOutcome? outcome = null;
+            int status = await ExecuteWithIdempotencyLock<int>(idempotencyKey, async () =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 // P14-042 — only compute payload when an idempotency key exists.
@@ -1922,6 +1951,9 @@ namespace LacertMCP.Server.Session
 
                 if (TryReplayIdempotent(idempotencyKey, payload, out int cached))
                 {
+                    outcome = new DetailWriteOutcome(cached,
+                        Mode == SessionMode.Live ? KnownDetailSnapshot(ctx, clientNumber) : null, null,
+                        "Replayed from the idempotency cache: no new write was made; this is the original write's result.");
                     return cached;
                 }
 
@@ -1964,36 +1996,49 @@ namespace LacertMCP.Server.Session
                                     ["replaceIndex"] = replaceIndex.Value,
                                 });
                         }
-                        if (dryRun)
+                        // FP-2 — off unless LACERTE_LIVE_DETAIL_WRITES=1. The
+                        // dry run refuses exactly where the commit would
+                        // (R7-13): same client-number check, same 9202.
+                        if (!LiveDetailWritesEnabled)
                         {
-                            // Detail-file writes have no SDK-level snapshot path;
-                            // honor dryRun by short-circuiting before the wire call.
-                            // R7-13 / R7-SRC — the preview must fail exactly
-                            // where the commit would. The commit always fails
-                            // closed (the SDK writes detail files only via its
-                            // ODBC driver, which is not wired live), so the
-                            // preview refuses with the same 9202.
                             BridgeInputValidation.ValidateClientNumber(clientNumber, "WriteDetail");
                             throw Bridge.Writer.LiveDetailWriteRefusal(clientNumber);
                         }
+                        if (dryRun)
+                        {
+                            // Validate + build the INSERT; no read, no backup,
+                            // no worker process.
+                            var preview = LivePreviewDetailRow(ctx, clientNumber, row);
+                            outcome = preview;
+                            inner = preview.Status;
+                        }
                         else
                         {
-                            var appId = Bridge.Registration.GetStoredAppId()?.ToString("D") ?? string.Empty;
-                            // F12 — wrap in AutoReconnect. replaceIndex is
-                            // threaded through to the bridge interface (P17-001)
-                            // so a future SDK update-by-index path doesn't need
-                            // a second signature change.
-                            // P18 — opName="WriteDetail" surfaces in the retry
-                            // log so an operator can grep for append-only
-                            // writes that retried (DECISIONS.md flags those
-                            // as REQUIRING post-call verification because the
-                            // SDK's detail-file write path is append-only and a
-                            // post-commit transient retry produces duplicate
-                            // rows).
-                            inner = await AutoReconnect.WithRetry<int>(() =>
-                                Task.FromResult(_bridge.WriteDetail(appId, ctx.DataPath, ctx.Year, ctx.Module, clientNumber, row, replaceIndex)),
-                                opName: "WriteDetail")
-                                .ConfigureAwait(false);
+                            // FP-2 — the SDK's COM library has no detail-write
+                            // method; the row goes in over ODBC, out of process.
+                            // NOT wrapped in AutoReconnect: the detail file is
+                            // append-only, so a retry after a committed INSERT
+                            // would duplicate the row.
+                            DetailWriteOutcome committed;
+                            try
+                            {
+                                // Off the caller's thread: the commit blocks on
+                                // the per-client lock and the worker process
+                                // (up to DetailWriteTimeout).
+                                committed = await Task.Run(
+                                    () => LiveCommitDetailRow(ctx, clientNumber, row, cancellationToken))
+                                    .ConfigureAwait(false);
+                            }
+                            catch (LacerteSDKError ex) when (ex.StatusCode == SyntheticStatusCodes.WriteNotVerified)
+                            {
+                                // Same rule as the field-write path: a write
+                                // that failed its read-back must never replay
+                                // as a cached Success.
+                                ForgetIdempotencyKey(idempotencyKey);
+                                throw;
+                            }
+                            outcome = committed;
+                            inner = committed.Status;
                         }
                     }
                     else if (dryRun)
@@ -2060,6 +2105,15 @@ namespace LacertMCP.Server.Session
                 });
                 return result;
             }).ConfigureAwait(false);
+
+            if (outcome != null)
+            {
+                return outcome.Status == status ? outcome : outcome with { Status = status };
+            }
+            return new DetailWriteOutcome(status, null, null,
+                dryRun
+                    ? "Dry run: validated and rolled back; nothing was written."
+                    : "Simulation mode: the row was written to the in-memory store; there is no Lacerte read-back or backup.");
         }
 
         /// <summary>

@@ -37,6 +37,17 @@ namespace LacertMCP.Server
     {
         public static async Task Main(string[] args)
         {
+            // FP-2 — detail-row write worker. The server spawns its own exe
+            // with this switch to run ONE ODBC INSERT out of process (a driver
+            // crash then can't take the server down). It must not start the
+            // host, log, or write anything to stdout but its one result line,
+            // so it branches off before anything else runs.
+            if (Odbc.DetailWriteWorker.IsWorkerInvocation(args))
+            {
+                Environment.ExitCode = Odbc.DetailWriteWorker.RunMain();
+                return;
+            }
+
             // P15-033 — env-var sanity check + startup banner on stderr.
             // Runs before the host so warnings appear in operator terminal
             // history (the agent will absorb everything past this point into

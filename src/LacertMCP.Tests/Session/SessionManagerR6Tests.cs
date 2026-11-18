@@ -258,32 +258,49 @@ namespace LacertMCP.Tests.Session
         [Fact]
         public async Task WriteDetail_Live_FailureStatusNotCached_RetryReachesWire()
         {
-            var fake = new ScriptedBridge();
-            fake.WriteDetailStatuses.Enqueue(StatusCodes.DBFNotAccessable);
-            fake.WriteDetailStatuses.Enqueue(StatusCodes.Success);
-            using var mgr = NewLiveManagerWithFake(fake);
-            mgr.SetRegisteredForTest(true);
-            mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
+            // FP-2 — live detail rows go through the ODBC worker (not the COM
+            // bridge); the fake DB + fake worker runner stand in for both.
+            var dir = LiveDetailWriteHarness.NewTempDir();
+            try
+            {
+                var db = new FakeDetailDb();
+                db.For("JOHNS");
+                var runner = new FakeDetailWriteRunner
+                {
+                    // The return is open in the Lacerte UI: connection refused.
+                    Behavior = _ => new LacertMCP.Server.Odbc.DetailWriteRunResult
+                    {
+                        Status = LacertMCP.Server.Odbc.DetailWriteRunStatus.Failed,
+                        SqlState = "08001",
+                        Error = "file in use",
+                        ExitCode = 1,
+                    },
+                };
+                using var mgr = LiveDetailWriteHarness.NewEnabled(db, runner, dir);
 
-            var row = NewRow(50.0, "r6-04-wd");
-            // Attempt 1: the live bridge RETURNS the failure int (return is
-            // open in the Lacerte UI). R7-01 — the session now raises it as a
-            // structured LacerteSDKError (sim/live parity: the sim throws on
-            // failure). It must NOT be cached under the key.
-            var ex1 = await Assert.ThrowsAsync<LacerteSDKError>(
-                () => mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
-            Assert.Equal(StatusCodes.DBFNotAccessable, ex1.StatusCode);
-            Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
-                "R6-04: a non-Success result must not be cached — pre-fix the failure was sticky for 24h");
+                var row = NewRow(50.0, "r6-04-wd");
+                // Attempt 1: the failure surfaces as a structured
+                // LacerteSDKError and must NOT be cached under the key.
+                var ex1 = await Assert.ThrowsAsync<LacerteSDKError>(
+                    () => mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd"));
+                Assert.Equal(StatusCodes.DBFNotAccessable, ex1.StatusCode);
+                Assert.False(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
+                    "R6-04: a non-Success result must not be cached — pre-fix the failure was sticky for 24h");
 
-            // Attempt 2 (operator closed the file): same key + same payload
-            // must reach the wire again and succeed — pre-fix it replayed
-            // the cached FAILURE without touching the bridge.
-            var r2 = await mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd");
-            Assert.Equal(StatusCodes.Success, r2);
-            Assert.Equal(2, fake.WriteDetailCalls);
-            Assert.True(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
-                "Success must be cached so a third byte-identical retry replays");
+                // Attempt 2 (operator closed the file): same key + same payload
+                // must reach the wire again and succeed — pre-fix it replayed
+                // the cached FAILURE without touching the wire.
+                runner.Behavior = LiveDetailWriteHarness.AppendOnRun(db, "JOHNS", row);
+                var r2 = await mgr.WriteDetail("JOHNS", row, idempotencyKey: "r6-04-wd");
+                Assert.Equal(StatusCodes.Success, r2);
+                Assert.Equal(2, runner.Calls.Count);
+                Assert.True(mgr.TryGetIdempotencyEntryForTest("r6-04-wd", out _),
+                    "Success must be cached so a third byte-identical retry replays");
+            }
+            finally
+            {
+                LiveDetailWriteHarness.TryDelete(dir);
+            }
         }
 
         [Fact]

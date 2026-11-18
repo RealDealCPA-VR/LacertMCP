@@ -91,18 +91,22 @@ namespace LacertMCP.Tests.Session
         }
 
         [Fact]
-        public async Task WriteDetail_Live_WithoutReplaceIndex_ReachesBridge_WithNullReplaceIndex()
+        public async Task WriteDetail_Live_WithoutReplaceIndex_NeverReachesComBridge()
         {
+            // FP-2 — the SDK's COM library has no detail-write method, so the
+            // live path never calls ILacerteBridge.WriteDetail: the row goes
+            // in over ODBC (out of process) when LACERTE_LIVE_DETAIL_WRITES=1,
+            // and is refused with 9202 while that flag is off (the default).
+            // Coverage of the enabled path: Session/LiveDetailWriteTests.cs.
             var fake = new CountingBridge();
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
             var row = new DetailRow("11", "", "1", "", "", "", "Source", "T", "", 5000.0, "test");
-            var status = await mgr.WriteDetail("JOHNS", row);
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("JOHNS", row));
 
-            Assert.Equal(StatusCodes.Success, status);
-            Assert.Equal(1, fake.WriteDetailCalls);
-            Assert.Null(fake.LastReplaceIndex);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
+            Assert.Equal(0, fake.WriteDetailCalls);
         }
 
         [Fact]

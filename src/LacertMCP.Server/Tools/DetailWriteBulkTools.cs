@@ -122,12 +122,12 @@ namespace LacertMCP.Server.Tools
             [Description("Read Only per the SDK detail-file schema — leave blank (any non-empty value is rejected with 9008).")]
             public string ImportSrc { get; set; } = string.Empty;
 
-            [Description("Optional zero-based index to overwrite an existing row instead of appending. Sim-mode only — live mode rejects replaceIndex with 9019 LiveReplaceIndexUnsupported (the SDK documents no update-by-index path; live detail writes are not wired at all — they return 9202 — because the SDK writes detail files only through its ODBC driver).")]
+            [Description("Optional zero-based index to overwrite an existing row instead of appending. Sim-mode only — live mode rejects replaceIndex with 9019 LiveReplaceIndexUnsupported (the SDK documents no update-by-index path; live detail writes are append-only INSERTs through the ODBC driver).")]
             public int? ReplaceIndex { get; set; }
         }
 
         [McpServerTool]
-        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call — the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Simulation mode only for now: in live mode a row fails with 9202 SimulationOnly (with the default continueOnError=false the first such row stops the batch and the rest are marked skipped) (the Lacerte SDK writes detail files only through its ODBC driver, which is not wired yet). Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
+        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call — the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Live mode: each row is written through the Lacerte ODBC driver in a separate worker process only when the server runs with LACERTE_LIVE_DETAIL_WRITES=1; otherwise each row fails with 9202 SimulationOnly (with the default continueOnError=false the first such row stops the batch and the rest are marked skipped). Live rows get the same backup-before-first-write and read-back as lacerte_detail_write: each succeeded row carries verified (true = read back and confirmed; null = no read-back, see verificationNote) and snapshot (the client's backup file); a read-back mismatch fails that row with 9022. Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
         public Task<string> LacerteDetailWriteBulk(
             [Description("Array of per-row detail writes. Each entry: {clientNumber, series, code, amount, description, prefix?, suffix?, stateAbbrev?, cityAbbr?, source?, tsj?, importSrc?, replaceIndex?}. Empty array returns a no-op envelope with requestedCount=0. Capped at 500 entries by default (shared LACERTE_BULK_WRITE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkDetailEntry[] entries,
             [Description("If true, validate + simulate every row write then roll back without persisting. Each row returns its would-be TAPIStatus.")] bool dryRun = false,
@@ -264,11 +264,12 @@ namespace LacertMCP.Server.Tools
                             Amount: entry.Amount,
                             Description: entry.Description ?? "");
 
-                        int status = await _session.WriteDetail(
+                        var outcome = await _session.WriteDetailWithOutcome(
                             entry.ClientNumber, row, entry.ReplaceIndex,
                             dryRun, rowKey, cancellationToken,
                             // R7-25 — pin every row to the context validated above.
                             expectedContext: ctx).ConfigureAwait(false);
+                        int status = outcome.Status;
 
                         var info = StatusCodes.GetStatusInfo(status);
                         if (status == StatusCodes.Success)
@@ -284,6 +285,10 @@ namespace LacertMCP.Server.Tools
                                 succeeded = true,
                                 statusCode = status,
                                 statusName = info.Name,
+                                // FP-2 — same meaning as lacerte_detail_write.
+                                verified = outcome.Verified,
+                                verificationNote = outcome.VerificationNote,
+                                snapshot = outcome.Snapshot,
                             });
                         }
                         else
