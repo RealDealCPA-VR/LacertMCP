@@ -114,11 +114,32 @@ $saved = $null
 if (Test-Path $settingsPath) {
     try { $saved = Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json } catch { $saved = $null }
 }
+# No install.json yet (installed by an older installer): take the settings from
+# the existing launcher's env lines instead, so a re-run doesn't silently switch
+# a D:\ or \\server data root back to C:\Lacerte.
+if (-not $saved -and (Test-Path $launcher)) {
+    try {
+        $vbsText = Get-Content -Raw -LiteralPath $launcher
+        $fromVbs = @{}
+        foreach ($m in [regex]::Matches($vbsText, 'env\("(LACERTE_[A-Z_]+)"\)\s*=\s*"([^"]*)"')) {
+            $fromVbs[$m.Groups[1].Value] = $m.Groups[2].Value
+        }
+        $saved = [pscustomobject]@{
+            dataRoot   = $fromVbs['LACERTE_DATA_ROOT']
+            port       = if ($fromVbs['LACERTE_HTTP_PORT']) { [int]$fromVbs['LACERTE_HTTP_PORT'] } else { $null }
+            simulation = ($fromVbs['LACERTE_SIMULATION'] -eq '1')
+        }
+    } catch { $saved = $null }
+}
 $oldPort = if ($saved -and $saved.port) { [int]$saved.port } else { $null }
 if (-not $PSBoundParameters.ContainsKey('Port') -and $oldPort) { $Port = $oldPort }
 if (-not $PSBoundParameters.ContainsKey('DataRoot') -and $saved -and $saved.dataRoot) { $DataRoot = [string]$saved.dataRoot }
 $useSimulation = if ($PSBoundParameters.ContainsKey('Simulation')) { [bool]$Simulation } elseif ($saved) { [bool]$saved.simulation } else { $false }
 if (-not $DataRoot) { $DataRoot = 'C:\Lacerte' }
+if (-not $Uninstall -and -not (Test-Path -LiteralPath $DataRoot)) {
+    Write-Host "WARNING: the data root $DataRoot doesn't exist on this PC, so agents won't be able to open any returns." -ForegroundColor Yellow
+    Write-Host "         Re-run with -DataRoot <the folder that holds the {YY}Tax folders>, e.g. -DataRoot \\fileserver\Lacerte" -ForegroundColor Yellow
+}
 
 if ($Uninstall) {
     Write-Host '==> Stopping the Lacerte MCP'
@@ -178,6 +199,10 @@ foreach ($part in 'server', 'cli', 'dumper') {
     Remove-WithRetry $dest
     Copy-Item -Path (Join-Path $here $part) -Destination $dest -Recurse -Force
 }
+# A fresh copy supersedes any update that was interrupted mid-swap; leaving its
+# marker would make the next `lacerte-mcp update` restore that old backup over it.
+$pendingMarker = Join-Path $installDir '.update-pending'
+if (Test-Path -LiteralPath $pendingMarker) { Remove-WithRetry $pendingMarker }
 
 $cliExe = Join-Path $installDir 'cli\lacerte-mcp.exe'
 if ($mapKeep) {

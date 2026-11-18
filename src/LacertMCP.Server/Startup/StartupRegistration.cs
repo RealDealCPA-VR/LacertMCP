@@ -44,18 +44,26 @@ namespace LacertMCP.Server.Startup
         private Task? _attempt;
 
         /// <summary>
-        /// Starts the sign-in attempt in the background and returns at once.
-        /// Hosted services start one after another, so awaiting Register here
-        /// held back the HTTP listener and the stdio transport until the
-        /// Lacerte COM call returned — and that call can wait on an Intuit
-        /// sign-in window when the 24h ticket is cold, or on AutoReconnect
-        /// back-off. Tools answer NotSignedIn / LoginExpired until it lands,
-        /// and the control page's Reconnect stays reachable meanwhile.
+        /// Set by Program.cs in HTTP mode. There the sign-in runs in the
+        /// background: hosted services start one after another, and awaiting
+        /// the Lacerte COM call (which can wait on an Intuit sign-in window
+        /// with a cold ticket, or on AutoReconnect back-off) held back the
+        /// listener, so the control page's Reconnect was unreachable. Under
+        /// stdio it is awaited as before: nothing else needs to answer first,
+        /// and the client's first tool calls must not race it into 203
+        /// NotSignedIn (Boundary Invariant 8: sign in at startup, not mid-tool).
         /// </summary>
-        public Task StartAsync(CancellationToken cancellationToken)
+        public static bool RunInBackground { get; set; }
+
+        public async Task StartAsync(CancellationToken cancellationToken)
         {
-            _attempt = Task.Run(() => TryRegisterAsync(_session, _log, _stop.Token));
-            return Task.CompletedTask;
+            if (RunInBackground)
+            {
+                _attempt = Task.Run(() => TryRegisterAsync(_session, _log, _stop.Token));
+                return;
+            }
+            _attempt = TryRegisterAsync(_session, _log, cancellationToken);
+            await _attempt.ConfigureAwait(false);
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
@@ -67,9 +75,29 @@ namespace LacertMCP.Server.Startup
         /// <summary>The in-flight startup attempt (tests await it).</summary>
         internal Task? Attempt => _attempt;
 
-        /// <summary>Attempts registration; never throws. Returns true on AccessGranted.</summary>
-        public static async Task<bool> TryRegisterAsync(LacerteSessionManager session, ILogger? log, CancellationToken ct)
+        private static readonly object s_inflightGate = new object();
+        private static Task<bool>? s_inflight;
+
+        /// <summary>
+        /// Attempts registration; never throws. Returns true on AccessGranted.
+        /// Single-flight: a caller arriving while an attempt is running (the
+        /// background startup sign-in, the control page's Reconnect, the
+        /// post-login re-attach) shares it instead of starting a second COM
+        /// Register — which could open a second Intuit sign-in window.
+        /// </summary>
+        public static Task<bool> TryRegisterAsync(LacerteSessionManager session, ILogger? log, CancellationToken ct)
         {
+            lock (s_inflightGate)
+            {
+                if (s_inflight != null && !s_inflight.IsCompleted) return s_inflight;
+                s_inflight = TryRegisterCoreAsync(session, log, ct);
+                return s_inflight;
+            }
+        }
+
+        private static async Task<bool> TryRegisterCoreAsync(LacerteSessionManager session, ILogger? log, CancellationToken ct)
+        {
+            await Task.Yield(); // leave the lock before the COM call starts
             LastAttemptAt = DateTime.UtcNow;
             try
             {

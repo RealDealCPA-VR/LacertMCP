@@ -78,12 +78,32 @@ namespace LacertMCP.Tests.Session
             Assert.True(v.Verified);
         }
 
+    }
+
+    /// <summary>
+    /// Flips the process-wide <see cref="SessionScope.Required"/>, so it runs
+    /// in a non-parallel collection: while it is on, every scope-less manager
+    /// in a concurrently running test would see no context.
+    /// </summary>
+    [Collection(LacertMCP.Tests.ProcessStateCollection.Name)]
+    public class SessionScopeRequiredTests
+    {
+        private const string Field = "C1_15";
+
+        public SessionScopeRequiredTests()
+        {
+            AccessMapInMemorySeed.EnsureWritableFieldSeeded(module: 'I', table: 1, field: Field);
+        }
+
         // HTTP mode: a tool call that arrives without its connection scope
         // gets no shared context and can't write.
         [Fact]
         public async Task ScopeRequired_WithoutScope_FailsClosed()
         {
-            using var mgr = await NewSimAsync(); // global context set before HTTP mode
+            var mgr = new LacerteSessionManager(new Dictionary<string, string?>());
+            await mgr.Register();
+            mgr.SetContext(SeedData.DataPathIData2024, 2024, 'I'); // global context set before HTTP mode
+            using var _ = mgr;
             SessionScope.Required = true;
             try
             {

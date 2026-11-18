@@ -209,7 +209,17 @@ namespace LacertMCP.Cli.Update
 
             // The wscript loop first, or it respawns the server 15 s later.
             foreach (var pid in plan.Launchers) KillAndWait(pid);
-            foreach (var pid in plan.Servers) KillAndWait(pid);
+            try
+            {
+                foreach (var pid in plan.Servers) KillAndWait(pid);
+            }
+            catch (ServiceStopException) when (plan.Launchers.Count > 0)
+            {
+                // The loop is already gone but its server survived: put the loop
+                // back so the still-running server is restarted when it next exits.
+                Start(service);
+                throw;
+            }
         }
 
         public void Start(ServiceInfo service)
@@ -225,6 +235,10 @@ namespace LacertMCP.Cli.Update
             {
                 return;
             }
+            // Explorer may just be slow (busy shell, logon storm): look once more
+            // before starting directly, so two loops never fight over the port.
+            var now = ProcessInspector.LauncherPids(service.LauncherPath, ProcessInspector.CurrentSessionId);
+            if (now != null && now.Any(pid => !before.Contains(pid))) return;
             StartDirect(service.LauncherPath);
         }
 

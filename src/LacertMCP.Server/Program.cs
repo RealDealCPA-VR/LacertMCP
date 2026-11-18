@@ -115,6 +115,9 @@ namespace LacertMCP.Server
                 // Every tool call must carry its connection's SessionScope;
                 // one that doesn't fails closed (SessionScope.Required).
                 SessionScope.Required = true;
+                // The listener (and the control page's Reconnect) must come up
+                // even while the Lacerte sign-in call is still waiting.
+                StartupRegistration.RunInBackground = true;
                 builder.Services.AddSingleton<Tailscale>();
                 builder.Services.AddSingleton<DeviceAccess>(_ => new DeviceAccess());
                 builder.Services.AddSingleton<ActivityLog>(_ => new ActivityLog());

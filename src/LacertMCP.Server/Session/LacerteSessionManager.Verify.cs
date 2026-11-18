@@ -126,8 +126,11 @@ namespace LacertMCP.Server.Session
             if (w.Length == 0 && s.Length == 0) return true;
             if (string.Equals(w, s, StringComparison.Ordinal)) return true;
 
-            // Clearing a numeric field: DBF numerics often read back blank as 0.
-            if (w.Length == 0 && TryNumber(s, out var cleared) && cleared == 0m)
+            // Clearing a NUMERIC column: DBF numerics read back blank as 0. Only
+            // when the stored value is a number type (the driver's numeric
+            // column), never a text "0", so a text field still holding "0"
+            // after a failed clear is not reported as verified.
+            if (w.Length == 0 && IsNumericType(stored) && TryNumber(s, out var cleared) && cleared == 0m)
             {
                 note = "Cleared; Lacerte stores an empty number as " + s + ".";
                 return true;
@@ -179,6 +182,9 @@ namespace LacertMCP.Server.Session
                 default: return (v.ToString() ?? string.Empty).Trim();
             }
         }
+
+        private static bool IsNumericType(object? v)
+            => v is decimal || v is double || v is float || v is int || v is long || v is short || v is byte;
 
         private static bool HasSignificantLeadingZero(string s)
             => s.Length > 1 && s[0] == '0' && s[1] != '.';

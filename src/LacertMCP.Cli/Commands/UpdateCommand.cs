@@ -383,7 +383,7 @@ namespace LacertMCP.Cli.Commands
                     stdout.WriteLine("Restart Claude Desktop / your MCP host to load the new server.");
                 }
 
-                ReleaseInstaller.ClearPending(install.Root);
+                TryClearPending(install.Root);
                 AppendLog(install.Root, $"updated {installedText} -> v{target}" +
                     (mapLines.Count > 0 ? " [field map: " + string.Join(" ", mapLines) + "]" : string.Empty));
                 return 0;
@@ -410,7 +410,7 @@ namespace LacertMCP.Cli.Commands
             {
                 stdout.WriteLine("An earlier update was interrupted mid-swap and its backup is gone; reinstalling the release over it.");
                 AppendLog(install.Root, $"found an interrupted update whose backup ({pending?.BackupDir ?? "unrecorded"}) is gone; reinstalling");
-                ReleaseInstaller.ClearPending(install.Root);
+                TryClearPending(install.Root);
                 return Recovery.Reinstall;
             }
 
@@ -430,8 +430,8 @@ namespace LacertMCP.Cli.Commands
             }
 
             var ok = ReleaseInstaller.Restore(pending.BackupDir, install.Root, stdout, out var error);
-            if (ok) ReleaseInstaller.ClearPending(install.Root);
             if (service != null) StartService(service, env, stdout);
+            if (ok) TryClearPending(install.Root);
             if (!ok)
             {
                 throw new UpdateException($"restoring the interrupted update from {pending.BackupDir} failed ({error}). Copy server\\, cli\\ and dumper\\ back from it by hand.");
@@ -457,7 +457,7 @@ namespace LacertMCP.Cli.Commands
             }
 
             var ok = ReleaseInstaller.Restore(backupDir, install.Root, stdout, out var error);
-            if (ok) ReleaseInstaller.ClearPending(install.Root);
+            if (ok) TryClearPending(install.Root);
 
             var healthy = true;
             if (service != null)
@@ -502,6 +502,20 @@ namespace LacertMCP.Cli.Commands
                 stderr.WriteLine("No files were changed. " + SignOutAdvice);
                 AppendLog(install.Root, logPrefix + ": couldn't stop the always-on server (" + ex.Message + ")");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Clears the in-progress marker without ever letting a failure (locked by
+        /// antivirus, ACL) skip the server restart that follows or abort a
+        /// finished update. The next run then sees the marker and re-restores.
+        /// </summary>
+        private static void TryClearPending(string root)
+        {
+            try { ReleaseInstaller.ClearPending(root); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                AppendLog(root, "warning: couldn't remove .update-pending (" + ex.Message + ")");
             }
         }
 

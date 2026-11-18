@@ -351,14 +351,23 @@ namespace LacertMCP.Tests.Session
         }
 
         [Theory]
-        [InlineData("", "0", true)]          // clearing a numeric field that reads back as 0
-        [InlineData("", "0.00", true)]
-        [InlineData("", "5", false)]
         [InlineData("12152024", "20241215", true)]   // numeric-looking dates in two formats
         [InlineData("100", "200", false)]
-        public void ValuesMatch_ClearedNumbers_AndNumericLookingDates(string written, string stored, bool expected)
+        public void ValuesMatch_NumericLookingDates(string written, string stored, bool expected)
         {
             Assert.Equal(expected, LacerteSessionManager.ValuesMatch(written, stored, out _));
+        }
+
+        // Clearing a NUMERIC column that reads back as 0 is a match; a text
+        // field still holding "0" after a failed clear is not.
+        [Fact]
+        public void ValuesMatch_ClearedNumericColumn_OnlyForNumberTypes()
+        {
+            Assert.True(LacerteSessionManager.ValuesMatch("", 0m, out _));
+            Assert.True(LacerteSessionManager.ValuesMatch(null, 0.0, out _));
+            Assert.False(LacerteSessionManager.ValuesMatch("", 5m, out _));
+            Assert.False(LacerteSessionManager.ValuesMatch("", "0", out _));
+            Assert.False(LacerteSessionManager.ValuesMatch("", "0.00", out _));
         }
 
         [Fact]

@@ -1,3 +1,4 @@
+using System;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,13 +41,14 @@ namespace LacertMCP.Server.Tools.Internal
                 v = await session.VerifyFieldWrite(table, clientNumber, field, value,
                     subClientId, stateAbbrev, cancellationToken, writeContext).ConfigureAwait(false);
             }
-            catch (LacerteSDKError ex)
+            catch (Exception ex) when (!(ex is OperationCanceledException))
             {
                 // The SDK already accepted the write; a failed READ-BACK
                 // (driver timeout, table not exposed over ODBC, ...) is not
                 // evidence the write failed, so don't report it as one.
+                var why = ex is LacerteSDKError sdk ? sdk.StatusName : ex.GetType().Name;
                 return new FieldWriteVerification(null, null,
-                    "Not verified: the write was accepted but reading it back failed (" + ex.StatusName + ").");
+                    "Not verified: the write was accepted but reading it back failed (" + why + ").");
             }
             if (v.Verified == false)
             {

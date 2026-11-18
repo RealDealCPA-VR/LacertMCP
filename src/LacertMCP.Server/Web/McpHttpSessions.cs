@@ -136,7 +136,9 @@ namespace LacertMCP.Server.Web
                     if (victim == null) return false;
                     reason = "closed to make room (connection limit " + MaxSessions + ")";
                 }
-                if (victim != null) _sessions.TryRemove(victim.Id, out _);
+                // A concurrent DELETE / reap may already have removed (and
+                // closed) the victim: then room exists and nothing is closed twice.
+                if (victim != null && !_sessions.TryRemove(victim.Id, out _)) victim = null;
                 _sessions[session.Id] = session;
             }
             if (victim != null) await CloseAsync(victim, reason).ConfigureAwait(false);

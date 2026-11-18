@@ -41,6 +41,15 @@ namespace LacertMCP.Server.Web
                         if (inner.TryGetProperty("dryRun", out var d) && d.ValueKind == JsonValueKind.True) dryRun = true;
                         if (inner.TryGetProperty("verified", out var v))
                             verified = v.ValueKind == JsonValueKind.True ? true : v.ValueKind == JsonValueKind.False ? false : (bool?)null;
+                        else if (inner.TryGetProperty("perItem", out var items) && items.ValueKind == JsonValueKind.Array)
+                        {
+                            // Bulk field write: verified only when every row was
+                            // written and read back (dry runs carry no verification).
+                            var rows = items.EnumerateArray().ToList();
+                            if (rows.Count > 0 && rows.All(i => i.ValueKind == JsonValueKind.Object
+                                    && i.TryGetProperty("verified", out var iv) && iv.ValueKind == JsonValueKind.True))
+                                verified = true;
+                        }
                         if (inner.TryGetProperty("statusName", out var n2) && n2.ValueKind == JsonValueKind.String && statusName == null) statusName = n2.GetString();
                     }
                 }
