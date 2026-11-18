@@ -79,7 +79,12 @@ namespace LacertMCP.Tests.Tools
                 new DetailWriteBulkTools.BulkDetailEntry { ClientNumber = "SMIT", Series = "11", Code = "1", Suffix = "1000", Amount = 200, Description = "row2", Source = "Source", Tsj = "T" },
             };
 
-            var root = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk"));
+            // Preview gate: dry run first (no worker run, no backup), then the
+            // commit with its token.
+            var token = await DetailWriteBulkToolsTests.PreviewToken(tool, entries);
+            Assert.Empty(runner.Calls);
+            Assert.Empty(Directory.GetFiles(_dir));
+            var root = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk", previewToken: token));
             Assert.True(root.GetProperty("success").GetBoolean(), root.ToString());
             var result = root.GetProperty("result");
             Assert.Equal(2, result.GetProperty("succeededCount").GetInt32());
@@ -95,7 +100,14 @@ namespace LacertMCP.Tests.Tools
             Assert.Single(Directory.GetFiles(_dir));
 
             mgr.LiveDetailWritesEnabled = false;
-            var off = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk-off"));
+            // Disabled: the dry run refuses where the commit would (9202) and
+            // issues no token...
+            var offDry = Parse(await tool.LacerteDetailWriteBulk(entries, dryRun: true));
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly,
+                offDry.GetProperty("result").GetProperty("rows")[0].GetProperty("statusCode").GetInt32());
+            Assert.Equal(JsonValueKind.Null, offDry.GetProperty("result").GetProperty("previewToken").ValueKind);
+            // ...and a commit with the earlier (still valid) token fails each row 9202.
+            var off = Parse(await tool.LacerteDetailWriteBulk(entries, idempotencyKey: "fp2-bulk-off", previewToken: token));
             var offRows = off.GetProperty("result").GetProperty("rows");
             Assert.Equal(SyntheticStatusCodes.SimulationOnly, offRows[0].GetProperty("statusCode").GetInt32());
             Assert.Equal(2, runner.Calls.Count);

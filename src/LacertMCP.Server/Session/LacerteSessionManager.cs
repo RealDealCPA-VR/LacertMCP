@@ -1928,11 +1928,8 @@ namespace LacertMCP.Server.Session
             // content check, the fingerprint and the dispatch (both modes):
             // TSJ T/S/J → Taxpayer/Spouse/Joint; Source case → Source/Nonsource.
             // Invalid values pass through unchanged so the validator rejects them.
-            row = row with
-            {
-                TSJ = BridgeInputValidation.NormalizeTsj(row.TSJ) ?? row.TSJ,
-                Source = BridgeInputValidation.NormalizeDetailSource(row.Source) ?? row.Source,
-            };
+            // Shared with lacerte_detail_write_bulk's preview-token fingerprint.
+            row = NormalizeDetailVocabulary(row);
             BridgeInputValidation.ValidateDetailRowContent(row, "WriteDetail");
 
             // FP-2 — set by whichever branch runs (replay / live / sim).

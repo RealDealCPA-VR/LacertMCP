@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -51,6 +55,21 @@ namespace LacertMCP.Server.Tools
     /// same order (R6-20a convention). This matters doubly for detail rows:
     /// an unkeyed transport retry APPENDS duplicates (detail files have no
     /// primary key), silently doubling W-2/1099 amounts.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Preview required</b> (filing-preparation decision 2): a real call
+    /// (dryRun=false) commits only a batch that a dry run previewed. A dry run
+    /// whose rows ALL pass returns a <c>previewToken</c> bound to the mode, the
+    /// active context (dataPath, taxYear, module — the same context every row
+    /// is pinned to, R7-25), a SHA-256 hash of the canonical entries exactly
+    /// as they will be written (trimmed client numbers, TSJ/Source vocabulary
+    /// normalized like the session does) and continueOnError. The commit must
+    /// pass that token; a missing, unknown, expired, other-connection or
+    /// mismatched token refuses the whole batch with 9017 before any row runs.
+    /// Both modes (two-mode discipline). Tokens last 30 minutes and are
+    /// reusable inside that window, so a half-failed commit can be resubmitted
+    /// with the same idempotencyKey. See <see cref="BulkPreviewTokenStore"/>.
     /// </para>
     /// </summary>
     [McpServerToolType]
@@ -127,12 +146,13 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call — the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Live mode: each row is written through the Lacerte ODBC driver in a separate worker process only when the server runs with LACERTE_LIVE_DETAIL_WRITES=1; otherwise each row fails with 9202 SimulationOnly (with the default continueOnError=false the first such row stops the batch and the rest are marked skipped). Live rows get the same backup-before-first-write and read-back as lacerte_detail_write: each succeeded row carries verified (true = read back and confirmed; null = no read-back, see verificationNote) and snapshot (the client's backup file); a read-back mismatch fails that row with 9022. Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
+        [Description("Bulk-append (or replace, per-entry via replaceIndex) detail rows across one or many clients in one MCP call. PREVIEW REQUIRED: first call with dryRun=true; if every row passes it returns previewToken (+ previewExpiresUtc, 30 minutes); show the operator the preview, get approval, then call again with the SAME entries (same order and values), same context and same continueOnError, dryRun=false and that previewToken. A real call without a valid token for exactly that batch (missing / unknown / expired / from another connection / entries, context or continueOnError changed) is refused with 9017 InvalidArgument before any row is written; a dry run with any failed row returns no token (fix or drop the row and preview again). The token stays valid for its 30 minutes, so a half-failed commit can be resubmitted with the same idempotencyKey and token. This is the canonical tool for intake workflows that seed many W-2/1099/dependent rows instead of looping lacerte_detail_write per row. Each entry mirrors the single detail-write params ({clientNumber, series, code, amount, description} required + the 7 optional row-key segments {prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc} defaulting to empty + optional replaceIndex). Live mode: each row is written through the Lacerte ODBC driver in a separate worker process only when the server runs with LACERTE_LIVE_DETAIL_WRITES=1; otherwise each row fails with 9202 SimulationOnly (with the default continueOnError=false the first such row stops the batch and the rest are marked skipped). Live rows get the same backup-before-first-write and read-back as lacerte_detail_write: each succeeded row carries verified (true = read back and confirmed; null = no read-back, see verificationNote) and snapshot (the client's backup file); a read-back mismatch fails that row with 9022. Runs the MANDATORY client-side row validation per entry BEFORE the session call (the SDK does not validate detail-row shape; bad rows fail with 9008 DetailWriteInvalid) and iterates the existing detail-write chokepoint (read-only rejection, dry-run undo, per-key idempotency lock, and the live 9019 replaceIndex rejection all still apply per row). Aggregates per-row outcomes into {requestedCount, processedCount, succeededCount, failedCount, skippedCount, stoppedEarly, rows[]}. Default continueOnError=false stops at the first failure and marks the remainder skipped; pass continueOnError=true to collect every row's status. When idempotencyKey is supplied it acts as a prefix — each row uses '{prefix}-{index}-{clientNumber}-{series}-{code}' (POSITIONAL: a retry must resubmit the same entries[] in the same order) so resubmitting the same batch replays already-appended rows from cache instead of doubling them (detail files have no primary key — duplicates are silent data corruption). entries.Length is capped at 500 by default (shared with lacerte_field_write_bulk; override via LACERTE_BULK_WRITE_MAX env var); larger batches throw 9020 BulkBatchTooLarge before any row runs. Honors MCP cancellation between rows: a cancelled call stops early and returns a partial envelope with stoppedEarly=true and processedCount.")]
         public Task<string> LacerteDetailWriteBulk(
             [Description("Array of per-row detail writes. Each entry: {clientNumber, series, code, amount, description, prefix?, suffix?, stateAbbrev?, cityAbbr?, source?, tsj?, importSrc?, replaceIndex?}. Empty array returns a no-op envelope with requestedCount=0. Capped at 500 entries by default (shared LACERTE_BULK_WRITE_MAX env var); exceeding the cap throws 9020 BulkBatchTooLarge before any row runs.")] BulkDetailEntry[] entries,
-            [Description("If true, validate + simulate every row write then roll back without persisting. Each row returns its would-be TAPIStatus.")] bool dryRun = false,
+            [Description("If true, validate + simulate every row write then roll back without persisting. Each row returns its would-be TAPIStatus. When every row passes, the response carries previewToken + previewExpiresUtc — REQUIRED for the real (dryRun=false) call of the same batch.")] bool dryRun = false,
             [Description("If true, a failed row records its error and the loop continues to the next entry. If false (default), the loop stops at the first failure and remaining entries are marked skipped.")] bool continueOnError = false,
-            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+batch intent; the server uses it as a per-row prefix ('{prefix}-{index}-{clientNumber}-{series}-{code}' — per-row keys are POSITIONAL, so a retry must resubmit the same entries[] in the same order) so a retry of the whole batch replays succeeded rows from cache and re-executes failed/skipped rows. Without a prefix, an MCP transport retry will re-APPEND every row — detail files have no primary key, so duplicates silently double W-2/1099/dependent amounts. Same prefix + same per-row payload: cached replay (idempotent for 24h). Same prefix + different payload: 9102 IdempotencyConflict for that row only. NOTE: dry-run results are also cached (dryRun is part of the fingerprint) — use a DIFFERENT prefix for the preview pass ('detail-<batchId>-preview') than the commit pass ('detail-<batchId>') or the commit fails with 9102.")] string? idempotencyKey = null,
+            [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+batch intent; the server uses it as a per-row prefix ('{prefix}-{index}-{clientNumber}-{series}-{code}' — per-row keys are POSITIONAL, so a retry must resubmit the same entries[] in the same order) so a retry of the whole batch replays succeeded rows from cache and re-executes failed/skipped rows. Without a prefix, an MCP transport retry will re-APPEND every row — detail files have no primary key, so duplicates silently double W-2/1099/dependent amounts. Same prefix + same per-row payload: cached replay (idempotent for 24h). Same prefix + different payload: 9102 IdempotencyConflict for that row only. NOTE: dry-run results are also cached (dryRun is part of the fingerprint) — use a DIFFERENT prefix for the preview pass ('detail-<batchId>-preview') than the commit pass ('detail-<batchId>') or the commit fails with 9102. The idempotencyKey is NOT part of the preview token's binding.")] string? idempotencyKey = null,
+            [Description("REQUIRED when dryRun is false (and entries is non-empty): the previewToken returned by a dry run (dryRun=true) of exactly this batch — same entries in the same order with the same values, same active context (dataPath, taxYear, module), same continueOnError, same connection. Valid for 30 minutes from the dry run and reusable within that window (e.g. to resubmit a half-failed batch with the same idempotencyKey). Missing / unknown / expired / mismatched tokens refuse the whole batch with 9017 before anything is written. Ignored on a dry run.")] string? previewToken = null,
             CancellationToken cancellationToken = default)
         {
             return WrapToolHandler.Run(async () =>
@@ -176,6 +196,27 @@ namespace LacertMCP.Server.Tools
                             ["maxAllowed"] = maxAllowed,
                             ["envOverride"] = FieldWriteBulkTools.BulkWriteMaxEnvName,
                         });
+                }
+
+                // -----------------------------------------------------------
+                // Preview gate (filing-preparation decision 2). The binding
+                // uses the SAME context every row is pinned to below (R7-25)
+                // and the entries exactly as they will be written. A commit
+                // is refused whole, before any row runs, unless it presents
+                // the token a passing dry run of this exact batch issued.
+                // -----------------------------------------------------------
+                BulkPreviewBinding? binding = entries.Length == 0
+                    ? null
+                    : BuildPreviewBinding(_session.Mode, ctx, entries, continueOnError);
+                DateTimeOffset? acceptedTokenExpiry = null;
+                if (!dryRun && binding != null)
+                {
+                    var check = _session.DetailBulkPreviews.Check(previewToken, binding, SessionScope.Current);
+                    if (!check.Accepted)
+                    {
+                        throw PreviewRefusal(check, entries.Length);
+                    }
+                    acceptedTokenExpiry = check.ExpiresUtc;
                 }
 
                 var rows = new List<object>(entries.Length);
@@ -251,18 +292,7 @@ namespace LacertMCP.Server.Tools
                         // session call — identical gates to DetailsTools.
                         ValidateDetailEntry(entry);
 
-                        var row = new DetailRow(
-                            Series: entry.Series,
-                            Prefix: entry.Prefix ?? "",
-                            Code: entry.Code,
-                            Suffix: entry.Suffix ?? "",
-                            StateAbbr: entry.StateAbbrev ?? "",
-                            CityAbbr: entry.CityAbbr ?? "",
-                            Source: entry.Source ?? "",
-                            TSJ: entry.Tsj ?? "",
-                            ImportSrc: entry.ImportSrc ?? "",
-                            Amount: entry.Amount,
-                            Description: entry.Description ?? "");
+                        var row = ToDetailRow(entry);
 
                         var outcome = await _session.WriteDetailWithOutcome(
                             entry.ClientNumber, row, entry.ReplaceIndex,
@@ -382,19 +412,55 @@ namespace LacertMCP.Server.Tools
                         idempotencyKeyPrefix = string.IsNullOrEmpty(idempotencyKey) ? null : idempotencyKey,
                         perRowKeyShape = "{prefix}-{index}-{clientNumber}-{series}-{code}",
                         note = canResume
-                            ? "Resubmit the same entries[] (same order — per-row keys are positional) with the same idempotencyKey: succeeded rows replay from cache (no duplicate appends), failed/skipped rows re-execute. Do NOT slice or reorder entries[] — that breaks the positional key alignment and re-appends rows that already landed (detail files have no primary key, so duplicates silently double amounts)."
+                            ? "Resubmit the same entries[] (same order — per-row keys are positional) with the same idempotencyKey and the same previewToken (still valid until previewExpiresUtc; after that, dry-run the same batch again for a new token): succeeded rows replay from cache (no duplicate appends), failed/skipped rows re-execute. Do NOT slice or reorder entries[] — that breaks the positional key alignment and re-appends rows that already landed (detail files have no primary key, so duplicates silently double amounts)."
                             : (dryRun
-                                ? "Dry-run results ARE stored in the idempotency cache (dryRun is part of the payload fingerprint), so the commit pass MUST use a DIFFERENT idempotencyKey prefix than this preview pass — reusing the preview prefix fails every previewed row with 9102 IdempotencyConflict. Convention: preview with 'detail-<batchId>-preview', then commit with dryRun=false and prefix 'detail-<batchId>'."
+                                ? "Dry-run results ARE stored in the idempotency cache (dryRun is part of the payload fingerprint), so the commit pass MUST use a DIFFERENT idempotencyKey prefix than this preview pass — reusing the preview prefix fails every previewed row with 9102 IdempotencyConflict. Convention: preview with 'detail-<batchId>-preview', then commit with dryRun=false and prefix 'detail-<batchId>'. No previewToken was issued because a row failed: fix or drop the failed rows and dry-run again."
                                 : "No idempotencyKey was supplied, so a resubmit would re-APPEND every row including the ones that already landed — silently doubling detail amounts. Re-run the batch with an idempotencyKey prefix to enable safe retries on future failures."),
                         replayedRowsCount = succeededCount,
                         retryRowsCount = failedCount + skippedCount,
                     };
                 }
 
+                // A dry run issues a token only when EVERY row passed (no
+                // failures, nothing skipped, not cancelled).
+                string? issuedToken = null;
+                DateTimeOffset? issuedExpiry = null;
+                string previewNote;
+                if (binding == null)
+                {
+                    previewNote = "Empty batch: nothing to preview or commit, so no previewToken is needed.";
+                }
+                else if (dryRun)
+                {
+                    if (!stoppedEarly && succeededCount == entries.Length)
+                    {
+                        var issued = _session.DetailBulkPreviews.Issue(binding, SessionScope.Current);
+                        issuedToken = issued.Token;
+                        issuedExpiry = issued.ExpiresUtc;
+                        previewNote = "Every row passed. Show this preview to the operator; once approved, call again with the SAME entries (same order and values), same context and continueOnError, dryRun=false, and this previewToken (valid until previewExpiresUtc, reusable until then for a resubmission with the same idempotencyKey). Any change needs a new dry run.";
+                    }
+                    else
+                    {
+                        previewNote = stoppedEarly
+                            ? "No previewToken: the dry run was cancelled before every row was checked. Run the dry run again."
+                            : $"No previewToken: {failedCount} row(s) failed and {skippedCount} were skipped in this dry run. Fix or remove the failed rows, then dry-run the corrected batch to get a token; only a fully passing preview can be committed.";
+                    }
+                }
+                else
+                {
+                    previewNote = "Committed against the dry-run preview this previewToken was issued for.";
+                }
+
                 return (object)new
                 {
                     dryRun,
                     continueOnError,
+                    // Preview gate fields: on a dry run, the token the commit
+                    // must present (null when a row failed); on a commit, the
+                    // token that was accepted and when it stops being usable.
+                    previewToken = dryRun ? issuedToken : (binding == null ? null : previewToken?.Trim()),
+                    previewExpiresUtc = (dryRun ? issuedExpiry : acceptedTokenExpiry)?.UtcDateTime.ToString("o", CultureInfo.InvariantCulture),
+                    previewNote,
                     requestedCount = entries.Length,
                     // processedCount = rows with a recorded outcome
                     // (succeeded / failed / skipped); rows after a cancel
@@ -410,6 +476,150 @@ namespace LacertMCP.Server.Tools
                     rows,
                 };
             });
+        }
+
+        /// <summary>The detail row an entry writes (tool-level defaults applied; the session normalizes vocabulary).</summary>
+        private static DetailRow ToDetailRow(BulkDetailEntry entry) => new DetailRow(
+            Series: entry.Series,
+            Prefix: entry.Prefix ?? "",
+            Code: entry.Code,
+            Suffix: entry.Suffix ?? "",
+            StateAbbr: entry.StateAbbrev ?? "",
+            CityAbbr: entry.CityAbbr ?? "",
+            Source: entry.Source ?? "",
+            TSJ: entry.Tsj ?? "",
+            ImportSrc: entry.ImportSrc ?? "",
+            Amount: entry.Amount,
+            Description: entry.Description ?? "");
+
+        /// <summary>
+        /// The preview binding for this batch: mode, the pinned context triple,
+        /// continueOnError and a SHA-256 over the canonical entries — each row
+        /// as the session will write it (client number trimmed like
+        /// RequireClientNumber, TSJ/Source normalized by
+        /// <see cref="LacerteSessionManager.NormalizeDetailVocabulary"/>),
+        /// serialized with a fixed property order and invariant-culture
+        /// round-trip amounts.
+        /// </summary>
+        internal static BulkPreviewBinding BuildPreviewBinding(
+            SessionMode mode, SessionContext ctx, IReadOnlyList<BulkDetailEntry?> entries, bool continueOnError)
+        {
+            byte[] canonical;
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new Utf8JsonWriter(ms))
+                {
+                    w.WriteStartArray();
+                    foreach (var entry in entries)
+                    {
+                        if (entry == null)
+                        {
+                            w.WriteNullValue();
+                            continue;
+                        }
+                        var row = LacerteSessionManager.NormalizeDetailVocabulary(ToDetailRow(entry));
+                        w.WriteStartObject();
+                        w.WriteString("clientNumber", entry.ClientNumber?.Trim() ?? "");
+                        w.WriteString("series", row.Series ?? "");
+                        w.WriteString("prefix", row.Prefix ?? "");
+                        w.WriteString("code", row.Code ?? "");
+                        w.WriteString("suffix", row.Suffix ?? "");
+                        w.WriteString("stateAbbr", row.StateAbbr ?? "");
+                        w.WriteString("cityAbbr", row.CityAbbr ?? "");
+                        w.WriteString("source", row.Source ?? "");
+                        w.WriteString("tsj", row.TSJ ?? "");
+                        w.WriteString("importSrc", row.ImportSrc ?? "");
+                        if (row.Amount.HasValue)
+                        {
+                            w.WriteString("amount", row.Amount.Value.ToString("R", CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            w.WriteNull("amount");
+                        }
+                        w.WriteString("description", row.Description ?? "");
+                        if (entry.ReplaceIndex.HasValue)
+                        {
+                            w.WriteNumber("replaceIndex", entry.ReplaceIndex.Value);
+                        }
+                        else
+                        {
+                            w.WriteNull("replaceIndex");
+                        }
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                }
+                canonical = ms.ToArray();
+            }
+
+            string hash;
+            using (var sha = SHA256.Create())
+            {
+                var bytes = sha.ComputeHash(canonical);
+                var sb = new System.Text.StringBuilder(bytes.Length * 2);
+                foreach (var b in bytes) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                hash = sb.ToString();
+            }
+
+            return new BulkPreviewBinding(
+                Mode: mode.ToString(),
+                DataPath: ctx.DataPath,
+                Year: ctx.Year,
+                Module: ctx.Module,
+                EntriesHash: hash,
+                EntryCount: entries.Count,
+                ContinueOnError: continueOnError);
+        }
+
+        private static LacerteSDKError PreviewRefusal(BulkPreviewTokenCheck check, int entryCount)
+        {
+            const string howTo = "Run the same entries with dryRun:true first (same order and values, same context, same continueOnError), show the preview to the operator, then call again with dryRun:false and pass the previewToken that dry run returned. Nothing was written.";
+            string problem;
+            string reason;
+            switch (check.Problem)
+            {
+                case BulkPreviewTokenProblem.Missing:
+                    problem = "missing";
+                    reason = "lacerte_detail_write_bulk only commits rows that were previewed, and no previewToken was passed. " + howTo;
+                    break;
+                case BulkPreviewTokenProblem.Expired:
+                    problem = "expired";
+                    reason = "The previewToken expired (tokens last 30 minutes after the dry run). " + howTo;
+                    break;
+                case BulkPreviewTokenProblem.WrongConnection:
+                    problem = "wrongConnection";
+                    reason = "The previewToken was issued to a different MCP connection; a token only works on the connection whose dry run created it. " + howTo;
+                    break;
+                case BulkPreviewTokenProblem.Mismatched:
+                    problem = "mismatched";
+                    reason = "This batch is not the one the previewToken was issued for (changed since the preview: "
+                        + string.Join(", ", check.Mismatches) + "). " + howTo;
+                    break;
+                default:
+                    problem = "unknown";
+                    reason = "The previewToken is not one this server issued (mistyped, or the server restarted since the dry run). " + howTo;
+                    break;
+            }
+
+            var context = new Dictionary<string, object?>
+            {
+                ["op"] = "DetailWriteBulk",
+                ["argument"] = "previewToken",
+                ["previewTokenProblem"] = problem,
+                ["entryCount"] = entryCount,
+                ["rowsWritten"] = 0,
+                ["reason"] = reason,
+            };
+            if (check.Problem == BulkPreviewTokenProblem.Mismatched)
+            {
+                context["changedSincePreview"] = check.Mismatches;
+            }
+            if (check.ExpiresUtc.HasValue)
+            {
+                context["previewExpiresUtc"] = check.ExpiresUtc.Value.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+            }
+            return new LacerteSDKError(SyntheticStatusCodes.InvalidArgument, context);
         }
 
         /// <summary>
