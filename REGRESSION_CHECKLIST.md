@@ -111,7 +111,7 @@ Mark each box `[x]` only after the operator personally observed the tool succeed
 - [ ] `lacerte_field_write` against a ReadOnly field returns `9001 FieldIsReadOnly` WITHOUT touching the wire. Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] `lacerte_field_write` with `dryRun: true` returns Success without persisting (verified by re-reading the unchanged value). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
 - [ ] `lacerte_update_return` against a TY24 client routes through `IDBFWriter.UpdateTaxReturn` (verified via `LACERTE_DEBUG_WIRE=1` log). Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
-- [ ] `lacerte_detail_write` with a valid Series/Code/Amount appends a new detail row. Exercised end-to-end on `JOHNS` client / TY24 Individual / `C:\Lacerte\24data` datapath.
+- [ ] `lacerte_detail_write` with a valid Series/Code/Amount (server started with `LACERTE_LIVE_DETAIL_WRITES=1`) appends a new detail row — see "FP-2 live items" below. Exercised end-to-end on a TEST client / TY24 Individual / `C:\Lacerte\24data` datapath.
 
 ### Create tools (Phase 7)
 
@@ -149,7 +149,7 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] A live `lacerte_field_write` while the return is open in Lacerte returns `success:false` + `statusCode 2 DBFNotAccessable` (not `success:true`).
 - [ ] `lacerte-mcp register` succeeds from the CLI exe (its own `lacerte-mcp.exe.config` carries the legacy-runtime shim); `doctor` App.config probe is green for both exe configs.
 - [ ] `lacerte_state_read` on a TY24 client returns rows and the state is in `C3_G1` (Todo R7-L1 — resolved from source; this is the live sanity check).
-- [ ] Live `lacerte_detail_write` returns 9202 SimulationOnly (the SDK writes detail files via ODBC only — Todo R7-L2/R7-SRC8) until the ODBC write path is wired.
+- [ ] Live `lacerte_detail_write` with `LACERTE_LIVE_DETAIL_WRITES` unset returns 9202 SimulationOnly whose reason says the path is built but off until verified, and how to enable it (FP-2; the SDK writes detail files via ODBC only — Todo R7-L2/R7-SRC8).
 - [ ] `lacerte_client_create` live returns Success with `clientNumber: null` + `clientNumberHint` (the SDK returns no number — Todo R7-L3), and `lacerte_client_find` then resolves it by ClientID.
 - [ ] `lacerte-mcp register` returns exit 0 on Grant (raw TPSDKStatus 1 → 201 AccessGranted — Todo R7-SRC2) and activates `LacerteSDK_Access.LacerteAccess` → `CreateTPRegister()` (R7-SRC1).
 
@@ -162,3 +162,18 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] The server starts and answers `/healthz` immediately even when the 24h Intuit ticket is cold (sign-in now runs in the background); note whether the SDK shows its sign-in window at startup.
 - [ ] Performance on the real firm: `lacerte_client_list` now reads and sorts the whole DATA1 roster per call (sim parity); time it on the real data root (especially over a file share). If slow, try a driver-side `order by C1_0` with `top N`.
 - [ ] Installer re-run on an install made by the v0.2.x installer (no install.json): the data root, port and mode carry over from the old LacertMCP.vbs.
+
+### FP-2 live items (detail-row writes over ODBC)
+Live detail writes stay OFF (9202) until every item below passes. Use a TEST client created for this (never a real taxpayer), with the return closed in Lacerte unless an item says otherwise.
+- [ ] Turn it on: add `LACERTE_LIVE_DETAIL_WRITES=1` to the server's environment and restart; the startup banner shows `liveDetailWrites=on`. With the variable unset the banner shows `off` and `lacerte_detail_write` returns 9202 with the "built but off" reason.
+- [ ] Dry run first: `lacerte_detail_write(clientNumber, series:"11", code:"1", amount:1234.56, description:"FP2 TEST W-2", source:"Source", tsj:"T", dryRun:true)` returns Success, `verified: null`, `snapshot: null`; no file appears in `%APPDATA%\lacerte-mcp\detail-snapshots` and `lacerte_detail_read` is unchanged.
+- [ ] Write one W-2-type row (same call, `dryRun:false`, with an `idempotencyKey`): Success, `verified: true`, and `snapshot` names a new `<yyyyMMdd-HHmmss>-I24-<client>.json` holding the client's rows from BEFORE the write. A second write to the same client returns the same `snapshot` path (no second file).
+- [ ] Open the client in Lacerte's UI and confirm the row is on the W-2 screen with the right amount, Taxpayer/Spouse assignment and description, and that Lacerte recalculates without errors. Note what Lacerte shows for Prefix/Suffix (the INSERT omits them when blank — confirm the driver's default is what Lacerte expects for a first W-2, or require explicit values; the SDK says standard fields' Suffix starts at 1000).
+- [ ] Confirm `lacerte_detail_read` shows the new row and the read-back compared the driver's real column shapes (Series/Code numeric, TSJ stored as `Taxpayer`, Source as `Source`); if `verified` came back 9022 on a row that is correct in Lacerte, record the stored shape and fix `DetailRowWriter.RowMatches`.
+- [ ] Re-sending the identical call with the same `idempotencyKey` replays (no second row in Lacerte).
+- [ ] Description length: write rows whose descriptions are 20, 30, 40 and 60 characters to a couple of Series (W-2, interest, dependents). A description longer than the field allows must come back as 9022 (read-back mismatch from truncation), not `verified: true`; record each field's limit for the field dictionary (FP-3).
+- [ ] Worker on its own: in PowerShell, `'{}' | & "<install>\server\LacertMCP.Server.exe" --detail-write-worker; $LASTEXITCODE` prints exactly one JSON line with `"ok":false` and exit code 2, and starts no server (no port, no sign-in window).
+- [ ] Worker failure path: during a live write make the driver fail (e.g. the data share disconnected after the backup, or a datapath the driver can't open) and confirm the tool returns a clean error (9201 or a mapped ODBC code) with `rowWritten` set, and that the server keeps answering other tools afterwards (`lacerte_session_status`, `lacerte_client_list`) without a restart or a new Intuit sign-in. If the 64-bit driver ever crashes on INSERT, the error must say the driver "failed or crashed" and the server must stay up.
+- [ ] With the client open in Lacerte's UI, a write returns a clean error (locked file) and no partial row appears after closing it.
+- [ ] Worker visibility: no console window flashes on the desktop during a write; Task Manager shows a short-lived second `LacertMCP.Server.exe` per write and none left behind.
+- [ ] Restore drill: from a `snapshot` file, re-enter (or delete) rows in Lacerte so the client matches the backup; note anything the file lacks for a scripted restore (the restore command is a follow-up).

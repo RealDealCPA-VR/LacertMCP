@@ -146,10 +146,10 @@ namespace LacertMCP.Server.Bridge
         }
 
         /// <summary>
-        /// Detail-file write. Wraps the detail-row write on the writer COM
-        /// type. Live verification deferred — the exact COM method shape is
-        /// inferred from spec §2 (no validation, row-ordered append).
-        /// Returns the TAPIStatus integer (1 = Success).
+        /// Detail-file write through the COM bridge: always refused (9202),
+        /// because the SDK's COM library has no detail-write method. Live
+        /// detail rows are written over ODBC by
+        /// <c>LacerteSessionManager.WriteDetail</c> (FP-2).
         /// <para>
         /// P17-001 — overload that accepts an optional <paramref name="replaceIndex"/>
         /// so the bridge boundary mirrors the sim path's replace-vs-append
@@ -193,22 +193,28 @@ namespace LacertMCP.Server.Bridge
             BridgeInputValidation.ValidateWriteDetailArgs(
                 appId, dataPath, clientNumber, row);
 
-            // R7-SRC — fail CLOSED. The SDK Developer Instructions document
-            // detail-file reads/writes only through the ODBC driver ("Working
-            // with Detail Files": each client's detail file is its own ODBC
-            // table; the ODBC driver provides CRUD on "the tables and detail
-            // files"). The .NET/COM library exposes no detail-write method —
-            // the previous late-bound WriteToDetailFile(...) call was a guess
-            // that matches no SDK member and would always fail at runtime.
-            // The live ODBC write path is not wired yet (same as live ODBC
-            // reads, ThrowIfLiveUnwired), so surface that precisely.
-            throw LiveDetailWriteRefusal(clientNumber);
+            // R7-SRC / FP-2 — fail CLOSED. The SDK Developer Instructions
+            // document detail-file reads/writes only through the ODBC driver
+            // ("Working with Detail Files"); the .NET/COM library exposes no
+            // detail-write method, so this COM writer never writes a detail
+            // row. The live write lives in LacerteSessionManager (Live.cs:
+            // backup -> out-of-process ODBC INSERT via Odbc/DetailRowWriter +
+            // Odbc/DetailWriteWorker -> read-back), gated by
+            // LACERTE_LIVE_DETAIL_WRITES=1.
+            throw ComDetailWriteRefusal(clientNumber);
         }
 
         /// <summary>
-        /// R7-SRC — the single 9202 refusal for live detail-row writes, shared
-        /// by the commit (here) and the session's live dry-run preview so the
-        /// two can never diverge.
+        /// FP-2 — the env flag that turns on live detail-row writes over ODBC.
+        /// Off unless exactly <c>"1"</c>.
+        /// </summary>
+        public const string LiveDetailWritesEnvVar = "LACERTE_LIVE_DETAIL_WRITES";
+
+        /// <summary>
+        /// R7-SRC / FP-2 — the single 9202 refusal for live detail-row writes
+        /// while <see cref="LiveDetailWritesEnvVar"/> is off, shared by the
+        /// session's commit and live dry-run preview so the two can never
+        /// diverge.
         /// </summary>
         internal static LacerteSDKError LiveDetailWriteRefusal(string clientNumber)
             => new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
@@ -216,7 +222,23 @@ namespace LacertMCP.Server.Bridge
                 {
                     ["op"] = "WriteDetail",
                     ["clientNumber"] = clientNumber,
-                    ["reason"] = "Live detail-row writes go through the Lacerte ODBC driver (the SDK's COM library has no detail-write method); the ODBC write path is not wired yet. Run in simulation mode, or enter the row in Lacerte.",
+                    ["reason"] = "Live detail-row writes are built (an ODBC INSERT run in a separate worker process, a backup of the client's detail rows before the first write, and a read-back after every write) but are turned off until they have been verified on the Lacerte PC (REGRESSION_CHECKLIST.md, \"FP-2 live items\"). To turn them on, set LACERTE_LIVE_DETAIL_WRITES=1 in the server's environment and restart the server. Until then, enter the row in Lacerte or run in simulation mode.",
+                    ["enableWith"] = LiveDetailWritesEnvVar + "=1",
+                });
+
+        /// <summary>
+        /// FP-2 — refusal for a direct call to the COM writer's
+        /// <see cref="WriteDetail"/>: the SDK's COM library has no
+        /// detail-write method; live detail rows are written by the session
+        /// over ODBC.
+        /// </summary>
+        internal static LacerteSDKError ComDetailWriteRefusal(string clientNumber)
+            => new LacerteSDKError(SyntheticStatusCodes.SimulationOnly,
+                new Dictionary<string, object?>
+                {
+                    ["op"] = "WriteDetail",
+                    ["clientNumber"] = clientNumber,
+                    ["reason"] = "The Lacerte SDK's COM library has no detail-write method. Detail rows are written through the ODBC driver by lacerte_detail_write in live mode (LACERTE_LIVE_DETAIL_WRITES=1), not through the COM bridge.",
                 });
     }
 }

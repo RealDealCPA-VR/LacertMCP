@@ -163,17 +163,20 @@ namespace LacertMCP.Tests.Bridge
         // -----------------------------------------------------------------
 
         [Fact]
-        public async Task Live_WriteDetail_RoutesToBridge()
+        public async Task Live_WriteDetail_DisabledByDefault_DoesNotCallBridge()
         {
+            // FP-2 — live detail rows are written over ODBC (never through the
+            // COM bridge, which has no detail-write method) and only when
+            // LACERTE_LIVE_DETAIL_WRITES=1; by default the write is refused.
             var fake = new RecordingBridge();
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
             var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "test");
-            var result = await mgr.WriteDetail("JOHNS", row);
+            var ex = await Assert.ThrowsAsync<LacerteSDKError>(() => mgr.WriteDetail("JOHNS", row));
 
-            Assert.Equal(StatusCodes.Success, result);
-            Assert.Equal(1, fake.WriteDetailCalls);
+            Assert.Equal(SyntheticStatusCodes.SimulationOnly, ex.StatusCode);
+            Assert.Equal(0, fake.WriteDetailCalls);
         }
 
         [Fact]
@@ -183,9 +186,9 @@ namespace LacertMCP.Tests.Bridge
             using var mgr = NewLiveManagerWithFake(fake);
             mgr.SetContext(@"C:\Lacerte\24data", 2024, 'I');
 
-            // R7-SRC / R7-13 — the live commit always fails closed (the SDK
-            // writes detail files only via its ODBC driver), so the preview
-            // refuses with the same 9202 instead of previewing Success.
+            // R7-SRC / R7-13 / FP-2 — with LACERTE_LIVE_DETAIL_WRITES off (the
+            // default) the live commit fails closed, so the preview refuses
+            // with the same 9202 instead of previewing Success.
             var row = new DetailRow("1", "", "1", "", "", "", "", "", "", 100.0, "test");
             var ex = await Assert.ThrowsAsync<LacerteSDKError>(
                 () => mgr.WriteDetail("JOHNS", row, dryRun: true));

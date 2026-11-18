@@ -257,6 +257,41 @@ namespace LacertMCP.Tests.Startup
             Assert.DoesNotContain("LACERTE_DEBUG_LOG_FULL_RESULTS", sw.ToString());
         }
 
+        // ----- FP-2: LACERTE_LIVE_DETAIL_WRITES + LACERTE_DETAIL_SNAPSHOT_DIR -----
+
+        [Fact]
+        public void LiveDetailWrites_True_EmitsTypoWarning_BannerSaysOff()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_LIVE_DETAIL_WRITES", "true")));
+            var output = sw.ToString();
+            Assert.Contains("LACERTE_LIVE_DETAIL_WRITES='true'", output);
+            Assert.Contains("treated as disabled", output);
+            Assert.Contains("liveDetailWrites=off", output);
+        }
+
+        [Fact]
+        public void LiveDetailWrites_One_NoWarning_BannerSaysOn()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_LIVE_DETAIL_WRITES", "1")));
+            var output = sw.ToString();
+            Assert.DoesNotContain("LACERTE_LIVE_DETAIL_WRITES", output);
+            Assert.Contains("liveDetailWrites=on", output);
+        }
+
+        [Fact]
+        public void DetailSnapshotDir_Relative_Warns_Absolute_DoesNot()
+        {
+            var sw = new StringWriter();
+            EnvValidator.Validate(sw, Env(("LACERTE_DETAIL_SNAPSHOT_DIR", "backups")));
+            Assert.Contains("LACERTE_DETAIL_SNAPSHOT_DIR='backups' is not an absolute path", sw.ToString());
+
+            var sw2 = new StringWriter();
+            EnvValidator.Validate(sw2, Env(("LACERTE_DETAIL_SNAPSHOT_DIR", @"C:\backups")));
+            Assert.DoesNotContain("LACERTE_DETAIL_SNAPSHOT_DIR", sw2.ToString());
+        }
+
         // ----- R6-30(c): numeric env vars warn when not a non-negative integer -----
 
         [Theory]

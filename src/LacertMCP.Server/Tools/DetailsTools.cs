@@ -103,7 +103,7 @@ namespace LacertMCP.Server.Tools
         }
 
         [McpServerTool]
-        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied. Simulation mode only for now: in live mode this returns 9202 SimulationOnly (the Lacerte SDK writes detail files only through its ODBC driver, which is not wired yet) — enter live detail rows in Lacerte. Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape). Returns the TAPIStatus integer (1=Success). Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
+        [Description("Append a detail row to a client's detail file, or replace the row at replaceIndex if supplied (simulation only; live rejects replaceIndex with 9019). Live mode: the row is written through the Lacerte ODBC driver in a separate worker process, but only when the server runs with LACERTE_LIVE_DETAIL_WRITES=1 — otherwise it returns 9202 SimulationOnly (off until verified on the Lacerte PC). Before the first live write to a client the server saves a backup of that client's detail rows (path in `snapshot`); after every live write it reads the rows back and returns verified=true only when exactly one new matching row is there (a mismatch is 9022 WriteNotVerified; verified=null + verificationNote when no read-back ran). Runs MANDATORY client-side validation before the session call (the SDK does not validate detail-row shape; live rows also reject tab/line-break characters). Returns {statusCode, statusName, clientNumber, replaceIndex, dryRun, verified, verificationNote, snapshot}. Only clientNumber, series, code, amount, description are required — the row-key segments (prefix, suffix, stateAbbrev, cityAbbr, source, tsj, importSrc) default to empty string and can be omitted for the common W-2 / 1099 happy path.")]
         public Task<string> LacerteDetailWrite(
             [Description("Lacerte ClientNumber.")] string clientNumber,
             [Description("Numeric Series identifier per Lacerte spec §2 — must match ^\\d+$ (e.g. '11'=W-2, '12'=Interest, '13'=Dividends, '14'=Dependents, '20'=Income, '30'=State, '40'=Partners). Required.")] string series,
@@ -126,7 +126,7 @@ namespace LacertMCP.Server.Tools
             [Description("Taxpayer/Spouse/Joint indicator: Taxpayer, Spouse, Joint (or the aliases T, S, J), or empty (= Joint per the SDK). Stored as the SDK value Taxpayer/Spouse/Joint. Defaults to empty.")] string tsj = "",
             [Description("Read Only per the SDK detail-file schema — leave blank (any non-empty value is rejected with 9008).")] string importSrc = "",
             [Description("Optional zero-based index to overwrite an existing row instead of appending.")] int? replaceIndex = null,
-            [Description("If true, validate + simulate the write but roll back without persisting.")] bool dryRun = false,
+            [Description("If true, validate + simulate the write but roll back without persisting. Live: validates the row and builds the INSERT; nothing is read, backed up or written.")] bool dryRun = false,
             [Description("STRONGLY RECOMMENDED for any write that could be retried. Pass a stable string keyed on op+target+intent (e.g. 'detail_write-{clientNumber}-{series}-{code}') so the server replays the prior result for matching key+payload and rejects with 9102 IdempotencyConflict on conflict. Without this key, an MCP transport timeout + LLM auto-retry will APPEND a duplicate detail row (detail writes default to append when replaceIndex is null — silently doubling a W-2/1099/dependent row). Same key + same payload: cached replay (idempotent for 24h). Same key + different payload: 9102 IdempotencyConflict.")] string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
@@ -160,9 +160,10 @@ namespace LacertMCP.Server.Tools
                     Amount: amount,
                     Description: description ?? "");
 
-                var status = await _session.WriteDetail(
+                var outcome = await _session.WriteDetailWithOutcome(
                     clientNumber, row, replaceIndex, dryRun, idempotencyKey,
                     cancellationToken);
+                var status = outcome.Status;
 
                 var info = StatusCodes.GetStatusInfo(status);
                 return (object)new
@@ -172,6 +173,15 @@ namespace LacertMCP.Server.Tools
                     clientNumber,
                     replaceIndex,
                     dryRun,
+                    // FP-2 — true = read back from Lacerte and exactly one new
+                    // matching row is there; null = no read-back (dry run,
+                    // simulation, idempotent replay, or the read-back couldn't
+                    // run — see verificationNote). A mismatch is 9022.
+                    verified = outcome.Verified,
+                    verificationNote = outcome.VerificationNote,
+                    // FP-2 — live: backup of the client's detail rows taken
+                    // before the first write to it by this server process.
+                    snapshot = outcome.Snapshot,
                 };
             });
         }

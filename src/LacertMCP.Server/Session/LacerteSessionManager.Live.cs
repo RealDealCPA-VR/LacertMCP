@@ -10,6 +10,19 @@ using LacertMCP.Server.Schema;
 namespace LacertMCP.Server.Session
 {
     /// <summary>
+    /// FP-2 — result of a detail-row write.
+    /// <see cref="Snapshot"/>: path of the backup of the client's detail rows
+    /// taken before the first live write to that client in this process (null
+    /// in simulation, or before any live write).
+    /// <see cref="Verified"/>: true = read back from Lacerte after the write and
+    /// exactly one new matching row is there; null = no read-back (dry run,
+    /// simulation, idempotent replay, or the read-back couldn't run — see
+    /// <see cref="VerificationNote"/>). A mismatch is never returned: it throws
+    /// 9022 WriteNotVerified.
+    /// </summary>
+    public sealed record DetailWriteOutcome(int Status, string? Snapshot, bool? Verified, string? VerificationNote);
+
+    /// <summary>
     /// Live-mode read path: every read the simulation store answers is answered
     /// here from the Lacerte ODBC driver (<c>LacerteDSIIDriver</c>) when
     /// <see cref="Mode"/> is <see cref="SessionMode.Live"/>.
@@ -448,13 +461,377 @@ namespace LacertMCP.Server.Session
             return key;
         }
 
-        private IReadOnlyList<DetailRow> LiveReadDetail(SessionContext ctx, string clientNumber, int? seriesFilter)
+        private IReadOnlyList<DetailRow> LiveReadDetail(SessionContext ctx, string clientNumber, int? seriesFilter, bool fresh = false)
         {
             var key = LiveClientKey(clientNumber);
             var sql = seriesFilter.HasValue
                 ? SqlTemplates.DetailBySeries(key, seriesFilter.Value)
                 : SqlTemplates.DetailAll(key);
-            return LiveQuery(ctx, sql, table: 0).Select(r => ToDetailRow(r)).ToList();
+            return LiveQuery(ctx, sql, table: 0, fresh: fresh).Select(r => ToDetailRow(r)).ToList();
+        }
+
+        // -------------------------------------------------------------------
+        // FP-2 — live detail-row writes over ODBC
+        //
+        //   gate (LACERTE_LIVE_DETAIL_WRITES=1)
+        //   -> build + validate the INSERT (nothing touched yet)
+        //   -> per-client lock
+        //   -> fresh read of the client's detail rows (baseline)
+        //   -> first write to this client in this process: save that baseline
+        //      as a JSON backup; can't save -> refuse
+        //   -> INSERT in a separate worker process (a driver crash can't take
+        //      the server down); never retried (append-only: a retry after a
+        //      commit would duplicate the row)
+        //   -> fresh read-back: rows equal to the written row must have grown
+        //      by exactly one, else 9022
+        // -------------------------------------------------------------------
+
+        /// <summary>Default worker timeout; the worker is killed after it.</summary>
+        internal static readonly TimeSpan DefaultDetailWriteTimeout = TimeSpan.FromSeconds(60);
+
+        /// <summary>Env override for the detail-backup directory.</summary>
+        internal const string DetailSnapshotDirEnvVar = "LACERTE_DETAIL_SNAPSHOT_DIR";
+
+        /// <summary>FP-2 — live detail writes are refused (9202) unless this is true.</summary>
+        internal bool LiveDetailWritesEnabled { get; set; }
+
+        /// <summary>Directory the pre-write backups go to; null = none available (writes are refused).</summary>
+        internal string? DetailSnapshotDirectory { get; set; }
+
+        /// <summary>Test seam: runs the INSERT out of process. Production spawns this exe.</summary>
+        internal IDetailWriteRunner DetailWriteRunner { get; set; } = new ProcessDetailWriteRunner();
+
+        /// <summary>Worker timeout (test seam).</summary>
+        internal TimeSpan DetailWriteTimeout { get; set; } = DefaultDetailWriteTimeout;
+
+        // dataPath|year|module|client -> backup file written before the first write.
+        private readonly ConcurrentDictionary<string, string> _detailSnapshots =
+            new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private void InitLiveDetailWriteSettings(IDictionary<string, string?> env)
+        {
+            LiveDetailWritesEnabled = string.Equals(
+                TryGet(env, Bridge.Writer.LiveDetailWritesEnvVar), "1", StringComparison.Ordinal);
+            DetailSnapshotDirectory = ResolveDetailSnapshotDirectory(env);
+        }
+
+        /// <summary>
+        /// <c>LACERTE_DETAIL_SNAPSHOT_DIR</c> when it is an absolute path, else
+        /// <c>%APPDATA%\lacerte-mcp\detail-snapshots</c>; null when neither is
+        /// available (live detail writes are then refused).
+        /// </summary>
+        internal static string? ResolveDetailSnapshotDirectory(IDictionary<string, string?> env)
+        {
+            var explicitDir = TryGet(env, DetailSnapshotDirEnvVar);
+            if (!string.IsNullOrWhiteSpace(explicitDir))
+            {
+                try
+                {
+                    if (System.IO.Path.IsPathRooted(explicitDir!.Trim()))
+                    {
+                        return explicitDir.Trim();
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // malformed — fall through to the default
+                }
+            }
+            var appData = TryGet(env, "APPDATA");
+            if (string.IsNullOrWhiteSpace(appData)) return null;
+            return System.IO.Path.Combine(appData!, "lacerte-mcp", "detail-snapshots");
+        }
+
+        private static string DetailSnapshotKey(SessionContext ctx, string clientKey)
+            => ctx.DataPath + "|" + ctx.Year.ToString(CultureInfo.InvariantCulture) + "|" + ctx.Module + "|" + clientKey;
+
+        /// <summary>The backup taken for this client in this process, if any.</summary>
+        internal string? KnownDetailSnapshot(SessionContext ctx, string clientNumber)
+        {
+            string key;
+            try { key = LiveClientKey(clientNumber); }
+            catch (LacerteSDKError) { return null; }
+            return _detailSnapshots.TryGetValue(DetailSnapshotKey(ctx, key), out var p) ? p : null;
+        }
+
+        /// <summary>
+        /// Live dry run: validates the row and builds the INSERT exactly as the
+        /// commit would — no read, no backup, no worker.
+        /// </summary>
+        private DetailWriteOutcome LivePreviewDetailRow(SessionContext ctx, string clientNumber, DetailRow row)
+        {
+            var key = LiveClientKey(clientNumber);
+            DetailRowWriter.BuildInsertSql(key, row);
+            return new DetailWriteOutcome(StatusCodes.Success, KnownDetailSnapshot(ctx, key), null,
+                "Dry run: the row passed validation and the INSERT was built; nothing was written and no backup was taken.");
+        }
+
+        /// <summary>
+        /// Live commit of one detail row (see the section comment above).
+        /// Synchronous on purpose: it runs under the per-client write lock.
+        /// </summary>
+        private DetailWriteOutcome LiveCommitDetailRow(
+            SessionContext ctx, string clientNumber, DetailRow row, System.Threading.CancellationToken cancellationToken)
+        {
+            var key = LiveClientKey(clientNumber);
+            // Validate + build before touching anything.
+            var sql = DetailRowWriter.BuildInsertSql(key, row);
+
+            lock (GetClientWriteLock(key))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 1. Baseline over a fresh connection.
+                IReadOnlyList<DetailRow> before;
+                try
+                {
+                    before = LiveReadDetail(ctx, key, seriesFilter: null, fresh: true);
+                }
+                catch (LacerteSDKError ex)
+                {
+                    var c = CopyContext(ex.Context);
+                    c["op"] = "WriteDetail";
+                    c["clientNumber"] = key;
+                    c["reason"] = "Refused before writing: the client's detail rows could not be read, so no backup or read-back baseline could be taken. Nothing was written. (" + ex.StatusName + ")";
+                    throw new LacerteSDKError(ex.StatusCode, c, ex);
+                }
+
+                // 2. Backup before the first write to this client in this process.
+                var snapshot = EnsureDetailSnapshot(ctx, key, before);
+
+                cancellationToken.ThrowIfCancellationRequested();
+                int matchingBefore = DetailRowWriter.CountMatching(before, row);
+
+                // 3. INSERT out of process. Never retried.
+                DetailWriteRunResult run;
+                try
+                {
+                    run = DetailWriteRunner.Run(LiveConnectionString(ctx), sql, DetailWriteTimeout);
+                }
+                catch (Exception ex) when (!(ex is LacerteSDKError))
+                {
+                    run = new DetailWriteRunResult { Status = DetailWriteRunStatus.NotStarted, Error = ex.GetType().Name + ": " + ex.Message };
+                }
+                if (run == null)
+                {
+                    run = new DetailWriteRunResult { Status = DetailWriteRunStatus.NotStarted, Error = "The worker runner returned no result." };
+                }
+                if (run.Status != DetailWriteRunStatus.Ok)
+                {
+                    throw DetailWorkerFailure(ctx, key, row, run, snapshot, matchingBefore);
+                }
+
+                // 4. Read-back over a fresh connection.
+                IReadOnlyList<DetailRow> after;
+                try
+                {
+                    after = LiveReadDetail(ctx, key, seriesFilter: null, fresh: true);
+                }
+                catch (Exception ex) when (!(ex is OperationCanceledException))
+                {
+                    var why = ex is LacerteSDKError sdk ? sdk.StatusName : ex.GetType().Name;
+                    return new DetailWriteOutcome(StatusCodes.Success, snapshot, null,
+                        "Not verified: the INSERT reported success but reading the detail rows back failed (" + why
+                        + "). Check with lacerte_detail_read before writing this row again.");
+                }
+
+                int matchingAfter = DetailRowWriter.CountMatching(after, row);
+                if (matchingAfter - matchingBefore == 1)
+                {
+                    return new DetailWriteOutcome(StatusCodes.Success, snapshot, true, null);
+                }
+
+                throw new LacerteSDKError(SyntheticStatusCodes.WriteNotVerified,
+                    new Dictionary<string, object?>
+                    {
+                        ["op"] = "WriteDetail",
+                        ["clientNumber"] = key,
+                        ["series"] = row.Series,
+                        ["code"] = row.Code,
+                        ["matchingRowsBefore"] = matchingBefore,
+                        ["matchingRowsAfter"] = matchingAfter,
+                        ["totalRowsBefore"] = before.Count,
+                        ["totalRowsAfter"] = after.Count,
+                        ["rowsAffected"] = run.RowsAffected,
+                        ["snapshot"] = snapshot,
+                        ["reason"] = matchingAfter - matchingBefore == 0
+                            ? "The INSERT reported success, but no new row equal to the written row was read back (the driver may have changed or truncated a value, e.g. a Description longer than the field allows). The detail file may now hold a row that differs from what was requested."
+                            : "The number of rows equal to the written row changed by " + (matchingAfter - matchingBefore).ToString(CultureInfo.InvariantCulture)
+                              + " instead of 1 (another writer — Lacerte's UI or a second server — may have changed this client's detail rows at the same time).",
+                    });
+            }
+        }
+
+        /// <summary>
+        /// Maps a failed worker run to a <see cref="LacerteSDKError"/>. For an
+        /// outcome where the INSERT may or may not have committed (crash,
+        /// timeout, driver error) the detail rows are re-read once to tell the
+        /// operator whether the row is there, so nobody retries blindly.
+        /// </summary>
+        private LacerteSDKError DetailWorkerFailure(
+            SessionContext ctx, string key, DetailRow row, DetailWriteRunResult run, string snapshot, int matchingBefore)
+        {
+            string rowWritten;
+            if (run.Status == DetailWriteRunStatus.NotStarted)
+            {
+                rowWritten = "no";
+            }
+            else
+            {
+                try
+                {
+                    var probe = LiveReadDetail(ctx, key, seriesFilter: null, fresh: true);
+                    int delta = DetailRowWriter.CountMatching(probe, row) - matchingBefore;
+                    rowWritten = delta == 0 ? "no" : delta == 1 ? "yes" : "unknown";
+                }
+                catch (Exception)
+                {
+                    rowWritten = "unknown";
+                }
+            }
+            string landed = rowWritten == "yes"
+                ? " A re-read shows the row IS in the detail file — do not write it again."
+                : rowWritten == "no"
+                    ? " A re-read shows the row is NOT in the detail file."
+                    : " Whether the row reached the detail file is unknown — check with lacerte_detail_read before writing it again.";
+
+            var c = new Dictionary<string, object?>
+            {
+                ["op"] = "WriteDetail",
+                ["clientNumber"] = key,
+                ["series"] = row.Series,
+                ["code"] = row.Code,
+                ["worker"] = run.Status.ToString(),
+                ["rowWritten"] = rowWritten,
+                ["snapshot"] = snapshot,
+            };
+            if (run.ExitCode.HasValue) c["workerExitCode"] = run.ExitCode.Value;
+
+            switch (run.Status)
+            {
+                case DetailWriteRunStatus.Failed when !string.IsNullOrEmpty(run.SqlState):
+                {
+                    var mapped = OdbcErrorMapper.MapSqlState(run.SqlState!, run.Error ?? string.Empty);
+                    c["sqlState"] = run.SqlState;
+                    c["odbcMessage"] = run.Error;
+                    var hint = OdbcErrorMapper.GuidanceFor(run.SqlState);
+                    if (hint != null) c["hint"] = hint;
+                    c["reason"] = "The Lacerte ODBC driver rejected the INSERT (SQLSTATE " + run.SqlState + "). The MCP server is unaffected." + landed;
+                    return new LacerteSDKError(mapped.StatusCode, c);
+                }
+                case DetailWriteRunStatus.Failed:
+                    c["errorType"] = run.ErrorType;
+                    c["odbcMessage"] = run.Error;
+                    c["reason"] = "The detail-write worker could not run the INSERT (" + (run.ErrorType ?? "error") + "). The MCP server is unaffected." + landed;
+                    return new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable, c);
+                case DetailWriteRunStatus.TimedOut:
+                    c["reason"] = "The Lacerte ODBC driver did not finish the INSERT within "
+                        + DetailWriteTimeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)
+                        + " s; the worker process was stopped. The MCP server is unaffected." + landed;
+                    return new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable, c);
+                case DetailWriteRunStatus.NotStarted:
+                    c["reason"] = "The detail-write worker process could not be started (" + run.Error + "). Nothing was written; the MCP server is unaffected.";
+                    return new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable, c);
+                default:
+                    c["reason"] = "The Lacerte ODBC driver failed or crashed during the INSERT (the worker process exited"
+                        + (run.ExitCode.HasValue ? " with code " + run.ExitCode.Value.ToString(CultureInfo.InvariantCulture) : string.Empty)
+                        + " without a result). It ran in a separate process, so the MCP server is unaffected." + landed;
+                    return new LacerteSDKError(SyntheticStatusCodes.BridgeUnavailable, c);
+            }
+        }
+
+        /// <summary>
+        /// Saves <paramref name="rows"/> (the client's detail rows before any MCP
+        /// write in this process) as a JSON backup the first time; returns the
+        /// existing path afterwards. Throws when the backup can't be written, so
+        /// the write is refused.
+        /// </summary>
+        private string EnsureDetailSnapshot(SessionContext ctx, string key, IReadOnlyList<DetailRow> rows)
+        {
+            var snapKey = DetailSnapshotKey(ctx, key);
+            if (_detailSnapshots.TryGetValue(snapKey, out var existing)) return existing;
+
+            var dir = DetailSnapshotDirectory;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                throw SnapshotRefusal(key, null,
+                    "no backup directory is available (set " + DetailSnapshotDirEnvVar + " to an absolute path, or make sure APPDATA is set)");
+            }
+
+            var now = DateTimeOffset.Now;
+            var baseName = now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + ctx.Module
+                + (ctx.Year % 100).ToString("00", CultureInfo.InvariantCulture) + "-" + key;
+            var payload = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                kind = "lacerte-mcp detail-row backup",
+                version = 1,
+                takenAt = now.ToString("o", CultureInfo.InvariantCulture),
+                dataPath = ctx.DataPath,
+                taxYear = ctx.Year,
+                module = ctx.Module.ToString(),
+                clientNumber = key,
+                table = "[" + key + "-Detail]",
+                rowCount = rows.Count,
+                note = "The client's detail rows as read just before the first lacerte_detail_write to this client by this server process. Rows written afterwards are not in this file.",
+                rows,
+            }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+            string path;
+            try
+            {
+                System.IO.Directory.CreateDirectory(dir!);
+                path = WriteNewFile(dir!, baseName, payload);
+            }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException
+                                       || ex is ArgumentException || ex is NotSupportedException
+                                       || ex is System.Security.SecurityException)
+            {
+                throw SnapshotRefusal(key, dir, ex.GetType().Name + ": " + ex.Message);
+            }
+            _detailSnapshots[snapKey] = path;
+            return path;
+        }
+
+        private static string WriteNewFile(string dir, string baseName, byte[] payload)
+        {
+            for (int n = 1; ; n++)
+            {
+                var name = n == 1 ? baseName + ".json" : baseName + "-" + n.ToString(CultureInfo.InvariantCulture) + ".json";
+                var path = System.IO.Path.Combine(dir, name);
+                try
+                {
+                    using (var fs = new System.IO.FileStream(path, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None))
+                    {
+                        fs.Write(payload, 0, payload.Length);
+                        fs.Flush(true);
+                    }
+                    return path;
+                }
+                catch (System.IO.IOException) when (n < 20 && System.IO.File.Exists(path))
+                {
+                    // name taken (same second) — try the next suffix
+                }
+            }
+        }
+
+        private static LacerteSDKError SnapshotRefusal(string key, string? dir, string why)
+            => new LacerteSDKError(SyntheticStatusCodes.InternalServerError,
+                new Dictionary<string, object?>
+                {
+                    ["op"] = "WriteDetail",
+                    ["clientNumber"] = key,
+                    ["snapshotDirectory"] = dir,
+                    ["reason"] = "Refused before writing: the backup of this client's detail rows could not be saved (" + why + "). Nothing was written. Fix the backup directory and retry.",
+                });
+
+        private static Dictionary<string, object?> CopyContext(IReadOnlyDictionary<string, object?>? source)
+        {
+            var d = new Dictionary<string, object?>();
+            if (source != null)
+            {
+                foreach (var kv in source) d[kv.Key] = kv.Value;
+            }
+            return d;
         }
 
         private IReadOnlyList<IReadOnlyDictionary<string, object?>> LiveReadEFStatus(SessionContext ctx, DateTime? sinceUtc)
