@@ -5,7 +5,7 @@
 - Reviewed everything that landed after the R7 review (4c36372..5f615ed, ~6.3k lines never reviewed) in four independent lanes, then fixed every confirmed finding (Todo "Round-8 review"; DECISIONS 2026-11-17). HTTP and updater fixes were made in isolated worktrees and merged; an independent confirmation review of the combined fixes followed.
 - Notable bugs fixed: 202 replies carried `Content-Length: -1` (Node/Claude Code HTTP clients reject it); tagged Tailscale nodes counted as "owner"; GET /mcp pinned sessions forever; chunked bodies bypassed size caps; a 9022 stayed stuck behind its idempotency key; JSON booleans falsely failed verification; startup blocked on the Lacerte sign-in call; the field-map keep rule froze curated shards on every install; re-running the installer copy in the install root deleted server\.
 - New: `docs/lacerte-mcp-guide.html`, an operator guide (published as a private claude.ai artifact).
-- Tests: 1833 passed, 11 skipped, 0 failed; build 0 warnings.
+- Tests: 1831 passed, 11 skipped, 0 failed (two consecutive runs); build 0 warnings. A confirmation review of the combined fixes found 11 follow-ups, all fixed (commit "R8 confirmation review fixes").
 - Not verifiable here: REGRESSION_CHECKLIST "Round-8 live items" and the installer/updater live checks in Todo.
 
 ## Last Session Summary (2026-11-16, later) — `lacerte-mcp update` (self-update from GitHub releases)
