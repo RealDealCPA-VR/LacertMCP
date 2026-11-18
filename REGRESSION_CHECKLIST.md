@@ -160,3 +160,5 @@ Sim-mode behavior for all three tools is pinned by the test suite (`Tools/Client
 - [ ] `lacerte_client_query` on table 2 for a TY24 datapath returns rows across clients (the per-client tables are walked through the roster); check how long it takes on the real firm size.
 - [ ] A TY24 client with no dependents: `lacerte_subclient_read` returns an empty list, not a DBNotSupported error (if the per-client table doesn't exist, map 42S02 to empty for single-client reads too).
 - [ ] The server starts and answers `/healthz` immediately even when the 24h Intuit ticket is cold (sign-in now runs in the background); note whether the SDK shows its sign-in window at startup.
+- [ ] Performance on the real firm: `lacerte_client_list` now reads and sorts the whole DATA1 roster per call (sim parity); time it on the real data root (especially over a file share). If slow, try a driver-side `order by C1_0` with `top N`.
+- [ ] Installer re-run on an install made by the v0.2.x installer (no install.json): the data root, port and mode carry over from the old LacertMCP.vbs.
