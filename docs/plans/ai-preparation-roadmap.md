@@ -135,7 +135,7 @@ Claude can read PDFs and images today, so this is mostly workflow and storage, n
 
 ## Decisions for you
 
-1. **Approval model.** Proposal-then-approve (recommended: approval comes before anything touches the return), or direct writes with review afterwards.
+1. **Approval model.** DECIDED 2026-11-18: proposal-then-approve (see DECISIONS).
 2. **First return type** for Phase B.
 3. **Who maps fields** on the PC, and how much time per week. This is the pacing item.
 4. **Compliance review** of §7216 and data handling before live client data flows through the AI.
