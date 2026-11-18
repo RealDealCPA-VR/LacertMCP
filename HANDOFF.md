@@ -1,5 +1,12 @@
 # Handoff State
 
+## Last Session Summary (2026-11-18, evening) — bulk preview token + detail-row restore
+
+- `lacerte_detail_write_bulk`: a real call needs the `previewToken` from a passing dry run of the same entries/context (30 min, reusable; per-connection in HTTP mode); both modes. Prompts updated.
+- Every live detail row the MCP adds is journaled (`<backup>.journal.jsonl`); `lacerte-mcp detail-restore list|plan|apply` removes exactly those rows (one copy each, DELETE + re-insert n-1, verified, refuses over-broad matches). The DELETE is a separate strictly validated worker request.
+- DECISIONS 2026-11-18 entry; REGRESSION_CHECKLIST "FP-2 restore live items" (ODBC DELETE unverified).
+- Tests 2189 passed, 11 skipped, 0 failed. Not pushed yet.
+
 ## Last Session Summary (2026-11-18, review) — independent review of the filing-prep code
 
 - Three independent reviewers (detail writes; dictionary + map-diff; prompt/fixtures/docs). All confirmed findings fixed; tests 2095 passed, 11 skipped, 0 failed (two runs); build 0 warnings.

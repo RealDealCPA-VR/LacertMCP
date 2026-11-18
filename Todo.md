@@ -1606,7 +1606,10 @@ Starting point (2026-11-18 morning): reads every return type and creates clients
 - [ ] FP-1b Implement the dumper's `--live` probe (Lacerte PC).
 - [x] FP-2 Live detail-row writes over ODBC: out-of-process worker, per-client snapshot, read-back, 9022 drops the idempotency key; OFF until `LACERTE_LIVE_DETAIL_WRITES=1`.
 - [ ] FP-2 live verification (REGRESSION_CHECKLIST "FP-2 live items"), then enable.
-- [ ] FP-2 follow-ups: mandatory dry run before bulk detail writes; snapshot restore/diff command; snapshot retention (they hold taxpayer data).
+- [x] FP-2 follow-up: bulk detail writes require a passing dry run's previewToken (both modes).
+- [x] FP-2 follow-up: write journal + `lacerte-mcp detail-restore list|plan|apply` (removes only the MCP's own rows; one copy each).
+- [ ] FP-2 restore live verification (REGRESSION_CHECKLIST "FP-2 restore live items": does the driver DELETE, and does its `=` match like the read-back).
+- [ ] FP-2 follow-up: snapshot/journal retention (they hold taxpayer data).
 - [x] FP-3 tooling: Schema/FieldDictionary (ships empty), `lacerte_field_dictionary`, `lacerte-mcp map-diff snapshot|compare|record`; entries kept across update/installer.
 - [ ] FP-3 Record the mappings on the Lacerte PC per return type; confirm or correct the sim Series IDs.
 - [x] FP-4 `lacerte_entity_return_entry` prompt; pre-filing: 1041 supported (beneficiaries-present), 1120-S shareholders-present.

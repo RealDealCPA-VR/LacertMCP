@@ -697,7 +697,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
       <div class="panel card"><span class="tag">Network</span><h3>Tailnet only</h3><p>The server listens on the Lacerte PC's Tailscale address and <code>localhost</code> only, and the firewall admits Tailscale addresses only. Each caller is identified by <code>tailscale whois</code>, never by a header. Requests relayed through a proxy on the PC are refused, and tagged devices are never treated as the owner.</p></div>
       <div class="panel card"><span class="tag">Fail closed</span><h3>Unknown fields are refused</h3><p>A field is writable only if the field-access map says so for that module and year. A fresh install allows just 3 built-in fields; you enable others one at a time.</p></div>
       <div class="panel card"><span class="tag">Proof</span><h3>Writes are read back</h3><p>Every field write is re-read over a fresh connection. A mismatch returns 9022 instead of a false success.</p></div>
-      <div class="panel card"><span class="tag">Preview</span><h3>Dry runs and read-only contexts</h3><p><code>dryRun: true</code> shows what would change without writing. A context set with <code>readOnly: true</code> blocks every write with 9001.</p></div>
+      <div class="panel card"><span class="tag">Preview</span><h3>Dry runs and read-only contexts</h3><p><code>dryRun: true</code> shows what would change without writing, and a bulk entry of amounts can't be committed without one. A context set with <code>readOnly: true</code> blocks every write with 9001.</p></div>
       <div class="panel card"><span class="tag">No doubles</span><h3>Idempotency keys</h3><p>A retried write with the same key returns the first result. Bulk writes use a key per row, so a half-finished batch can be safely resent.</p></div>
       <div class="panel card"><span class="tag">Privacy</span><h3>Secrets masked</h3><p>SSN, EIN, TIN, bank and routing numbers, dates of birth, emails and phone numbers are masked in replies. The activity timeline records which client and field changed, never the value.</p></div>
       <div class="panel card"><span class="tag">Takes effect now</span><h3>Access changes are immediate</h3><p>Lowering a device to Read only applies to its open connections straight away, even partway through a bulk write. Setting it to No access disconnects it.</p></div>
@@ -743,6 +743,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
       <details class="faq"><summary>9009 ContextNotSet</summary><div class="body"><p>Tell Claude which year, module and data folder to work in, for example: <em>"Use 2024 Individual."</em></p></div></details>
       <details class="faq"><summary>A workstation can't see any Lacerte tools</summary><div class="body"><p>Check that Tailscale is connected on both machines, that the device isn't set to <em>No access</em> on the Access tab, and that Claude Desktop was restarted after setup. Opening <code>http://&lt;PC&gt;:8767/access-check</code> from the workstation shows what the server thinks of it.</p></div></details>
       <details class="faq"><summary>My change doesn't show in Lacerte</summary><div class="body"><p>Lacerte's editor only rereads a client when it is closed and reopened. The write is on disk; reopen the client, or ask Claude to read the field back.</p></div></details>
+      <details class="faq"><summary>Undo amounts Claude entered for a client</summary><div class="body"><p>Every detail row the server adds is recorded in a journal next to that client's backup. On the Lacerte PC, list them, check the plan, then apply it. Only rows Claude added are removed; anything you typed in Lacerte stays. Try it on a test client first: removing rows through Lacerte's database driver hasn't been verified yet.</p><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" detail-restore list</pre><button class="copy" type="button">Copy</button></div><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" detail-restore plan --journal &lt;journal file from the list&gt;</pre><button class="copy" type="button">Copy</button></div><div class="cmd"><pre>&amp; "$env:LOCALAPPDATA\LacertMCP\cli\lacerte-mcp.exe" detail-restore apply --journal &lt;journal file&gt; --confirm</pre><button class="copy" type="button">Copy</button></div></div></details>
       <details class="faq"><summary>The control page doesn't load</summary><div class="body"><p>On the Lacerte PC, run <code>"%LOCALAPPDATA%\LacertMCP\server\LacertMCP.Server.exe" --http</code> in a console to see the error. After an update, <code>update.log</code> in the same folder records what happened.</p></div></details>
       <details class="faq"><summary>Check the whole install</summary><div class="body"><p><code>lacerte-mcp doctor</code> runs 13 checks (Windows, 64-bit, .NET 4.8, ODBC driver, SDK, COM registration, mode, data folders, field map, AppID). Exit 0 means all green, 2 means warnings, 1 means something failed.</p></div></details>
     </div>
@@ -781,6 +782,8 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
           <tr><td><code>status</code></td><td>Registration, mode and storage at a glance (<code>--json</code> for scripts).</td></tr>
           <tr><td><code>doctor</code></td><td>13 install checks; exit 0 all green, 2 warnings, 1 a failure.</td></tr>
           <tr><td><code>update</code></td><td>Installs the latest GitHub release (<code>--check</code>, <code>--tag</code>, <code>--schedule daily|off</code>, <code>--reset-field-map</code>).</td></tr>
+          <tr><td><code>map-diff snapshot|compare|record</code></td><td>Builds the field dictionary on the Lacerte PC (Part IV, step 4).</td></tr>
+          <tr><td><code>detail-restore list|plan|apply</code></td><td>Removes amounts Claude added to a client, using its write journal (<code>apply</code> needs <code>--confirm</code>).</td></tr>
           <tr><td><code>tools</code></td><td>Lists every tool the server offers (<code>--names-only</code>, <code>--filter</code>).</td></tr>
           <tr><td><code>field-access list|set</code></td><td>Shows or edits single entries in the writable-field map.</td></tr>
           <tr><td><code>unregister --confirm</code></td><td>Removes the stored AppID, for a clean uninstall.</td></tr>
@@ -792,7 +795,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
   <footer>
     <div class="status-row">
       <span>Version <b>0.2.2</b></span>
-      <span>Automated tests <b>2,095 passing</b></span>
+      <span>Automated tests <b>2,189 passing</b></span>
       <span>Simulation <b>fully tested</b></span>
       <span>Live mode <b>wired, awaiting first run on the Lacerte PC</b></span>
     </div>
@@ -889,7 +892,7 @@ footer { margin-top: 48px; border-top: 2px solid var(--ink); padding-block: 22px
     ["Writes", "lacerte_update_return", "write", "Same as field write, named after the 2021+ SDK call."],
     ["Writes", "lacerte_field_write_bulk", "write", "Many field writes in one call (up to 500), with per-row replay keys."],
     ["Writes", "lacerte_detail_write", "write", "Add a detail row (series, code, amount, description). Live use needs detail writes switched on."],
-    ["Writes", "lacerte_detail_write_bulk", "write", "Add many detail rows, e.g. seeding W-2s from intake. Live use needs detail writes switched on."],
+    ["Writes", "lacerte_detail_write_bulk", "write", "Add many detail rows, e.g. seeding W-2s from intake. Must be previewed first: the real call needs the dry run's token."],
     ["E-file", "lacerte_ef_status", "read", "E-file status for the active year and module (2019+), with \"since\" polling."],
     ["Dashboards", "lacerte_firm_dashboard", "read", "Firm-wide counts across every year and module, without changing your context."],
     ["Accelerators", "lacerte_diff_clients", "read", "Field-by-field comparison of two clients."],

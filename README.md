@@ -280,7 +280,7 @@ The server registers **43 MCP tools**, grouped below by the same categories `lac
 | `lacerte_update_return` | same as `lacerte_field_write` | TY21+ `UpdateTaxReturn`-named alias; behavior identical. Prefer `lacerte_field_write`. |
 | `lacerte_field_write_bulk` | `table`, `entries[]`, `taxYear?`, `readOnly?`, `dryRun?`, `continueOnError?`, `idempotencyKey?`, `expectedCount?` | N field writes through one MCP call. Capped at 500 (`LACERTE_BULK_WRITE_MAX`). Per-row idempotency key is positional `{prefix}-{index}-{clientNumber}-{field}`. |
 | `lacerte_detail_write` | `clientNumber`, `series`, `code`, `amount`, `description`, 7 optional row-key segments, `replaceIndex?`, `dryRun?`, `idempotencyKey?` | Append (or sim-only replace) a detail-file row with mandatory client-side validation. |
-| `lacerte_detail_write_bulk` | `entries[]`, `dryRun?`, `continueOnError?`, `idempotencyKey?` | Bulk-append detail rows across one or many clients (intake W-2/1099/dependent seeding). Shares the 500 cap with `lacerte_field_write_bulk` (`LACERTE_BULK_WRITE_MAX`); per-row idempotency key is positional `{prefix}-{index}-{clientNumber}-{series}-{code}`. |
+| `lacerte_detail_write_bulk` | `entries[]`, `dryRun?`, `continueOnError?`, `idempotencyKey?`, `previewToken?` | Bulk-append detail rows across one or many clients (intake W-2/1099/dependent seeding). **A real call needs the `previewToken` from a passing `dryRun: true` call over the same entries and context** (30-minute window, reusable for a resubmission; in HTTP mode only on the issuing connection), else 9017 and nothing is written. Shares the 500 cap with `lacerte_field_write_bulk` (`LACERTE_BULK_WRITE_MAX`); per-row idempotency key is positional `{prefix}-{index}-{clientNumber}-{series}-{code}`. |
 
 ### E-file (1)
 
@@ -397,6 +397,7 @@ TL;DR:
 | `lacerte-mcp tools` | List every MCP tool the server registers (reflection — no stdio boot). Supports `--filter <regex>` / `--name <exact>` / `--names-only` / `--json`. |
 | `lacerte-mcp field-access {set,list,discover}` | Manage the per-field access map. `discover` exits 3 with a pointer to the standalone `LacertMCP.FieldAccessDumper.exe`. |
 | `lacerte-mcp doctor` | Pre-flight probes for the install; exit 0/1/2 contract (3 reserved for "not implemented here", see `field-access discover`). |
+| `lacerte-mcp detail-restore {list,plan,apply}` | Undo the MCP's own live detail-row writes for a client from its write journal (`<backup>.journal.jsonl` next to the pre-write backup): `plan` shows which journaled rows are still present; `apply --confirm` removes exactly one copy per journaled row and verifies. Rows entered in Lacerte are never touched. ODBC DELETE on the Lacerte driver is unverified: try it on a TEST client first (REGRESSION_CHECKLIST "FP-2 restore live items"). |
 | `lacerte-mcp map-diff {snapshot,compare,record}` | Build the field dictionary on the Lacerte PC: snapshot a test client, enter ONE known value in Lacerte, snapshot again, `compare` shows what changed, `record` saves the mapping (only when exactly one cell or detail row changed). See `src/LacertMCP.Server/Schema/FieldDictionary/README.md`. |
 | `lacerte-mcp update` | Update the install from the latest GitHub release (or fast-forward a git checkout); `--check` to only look, `--schedule daily` to automate. |
 

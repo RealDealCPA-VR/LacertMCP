@@ -14,7 +14,7 @@ Built and tested in simulation, not yet verified on the Lacerte PC:
 - **FP-4** — the `lacerte_entity_return_entry` prompt (dictionary-gated, dry run, approval, read-back), plus pre-filing rules for 1041 (now supported) and 1120-S shareholders.
 - **FP-5** — simulation sample clients for S-corps (SData: ORCH, HOLW) and trusts (FData: MAPL, BIRC).
 
-Decisions 1 and 2 below were taken as recommended: range rules apply only to dictionary-listed fields, and detail writes take a snapshot and read back. Mandatory dry run before bulk detail writes and a restore command for snapshots are not built yet.
+Decisions 1 and 2 below were taken as recommended: range rules apply only to dictionary-listed fields, and detail writes take a snapshot and read back. Since built: bulk detail writes require a passing dry run's `previewToken`, and every live detail row the MCP adds is journaled so `lacerte-mcp detail-restore` can remove exactly those rows (ODBC DELETE still to be verified on the Lacerte PC).
 
 Remaining, all on the Lacerte PC: record the mappings (FP-3), run the FP-2 live checks, optionally implement the dumper's live probe (FP-1b), and live acceptance per return type (FP-6). Rules that need verified codes (1120-S/1065 ownership totals, 1041 trust type, 1120 balance sheet) follow the mappings.
 
