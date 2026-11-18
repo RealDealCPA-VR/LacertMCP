@@ -25,3 +25,6 @@ jobs:
         with:
           files: ${{ steps.art.outputs.path }}
           generate_release_notes: true
+          # A tag like v0.3.0-rc.1 is a prerelease: /releases/latest (what every
+          # `lacerte-mcp update` installs) skips it; `update --tag 0.3.0-rc.1` still gets it.
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using LacertMCP.Cli.Commands;
 using LacertMCP.Cli.Update;
+using LacertMCP.Server.Schema;
 using Xunit;
 
 namespace LacertMCP.Tests.Cli
@@ -113,6 +114,8 @@ namespace LacertMCP.Tests.Cli
             File.WriteAllText(Path.Combine(install, "server", "Old.Dependency.dll"), "stale");
             Directory.CreateDirectory(Path.Combine(install, "server", "logs"));
             File.WriteAllText(Path.Combine(install, "server", "logs", "lacerte-1.log"), "keep me");
+            // H2: an earlier updater copied the installer into the install root.
+            File.WriteAllText(Path.Combine(install, "install-http.ps1"), "installer 0.1.0");
             var source = FakeSource.For("0.2.0", MakeReleaseZip("0.2.0"));
 
             var (code, output, err) = await Run(new UpdateCommand.Options(), source, Path.Combine(install, "cli"), "0.1.0");
@@ -134,32 +137,52 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal("stale", File.ReadAllText(Path.Combine(backup, "server", "Old.Dependency.dll")));
 
             Assert.Contains("Updated v0.1.0 -> v0.2.0", output);
-            Assert.DoesNotContain("Kept this PC's field-access map", output);
+            Assert.DoesNotContain("field-access entr", output);
             Assert.Contains("Restart Claude Desktop", output);
             Assert.Contains("updated v0.1.0 -> v0.2.0", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+
+            // H2: the installer never lands in (and a stale copy is removed from) the
+            // install root — run from there it would delete server\ before copying it.
+            Assert.False(File.Exists(Path.Combine(install, "install-http.ps1")));
+            // M1: the in-progress marker is gone after a successful update.
+            Assert.False(File.Exists(Path.Combine(install, ReleaseInstaller.PendingFileName)));
         }
 
-        // The writable-field map is built on the Lacerte PC by the dumper; an update
-        // must not swap it for the release's copy (same rule as install-http.ps1).
+        // H1: per-entry merge of this PC's writable-field map into the release's —
+        // a curated fix arrives, an entry built on this PC is kept, --reset-field-map
+        // takes the release's shard as-is.
         [Fact]
-        public async Task ReleaseUpdate_KeepsOperatorFieldMap_UnlessReset()
+        public async Task ReleaseUpdate_MergesFieldMap_CuratedFixArrives_DumperEntryKept_UnlessReset()
         {
             var install = MakeInstall("0.1.0");
             var shard = Path.Combine(install, "server", "Schema", "FieldAccessMap", "base", "individual.json");
-            const string built = "{\"fields\":\"built by the dumper\"}";
-            File.WriteAllText(shard, built);
-            var zip = MakeReleaseZip("0.2.0");
+            File.WriteAllText(shard, ShardJson.Shard(
+                ShardJson.Row("I|1|C1_G12", "ReadWrite", "sdk-pdf"),          // curated, corrected in the release
+                ShardJson.Row("I|1|C1_G13", "ReadWrite", "sdk-pdf"),          // curated, unchanged
+                ShardJson.Row("I|1|C1_77", "ReadWrite", "live-probe", null))); // built on this PC by the dumper
+            const string releaseShard = "{\n" +
+                "  \"I|1|C1_G12\": { \"access\": \"ReadOnly\", \"source\": \"sdk-pdf\", \"description\": \"Global field (documented access)\", \"addedAt\": \"2026-11-20\" },\n" +
+                "  \"I|1|C1_G13\": { \"access\": \"ReadWrite\", \"source\": \"sdk-pdf\", \"description\": \"Global field (documented access)\", \"addedAt\": \"2026-11-15\" }\n" +
+                "}\n";
+            var zip = MakeReleaseZip("0.2.0", tweak: stage =>
+                File.WriteAllText(Path.Combine(stage, "server", "Schema", "FieldAccessMap", "base", "individual.json"), releaseShard));
 
             var (code, output, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", zip), Path.Combine(install, "cli"), "0.1.0");
             Assert.True(code == 0, output + err);
-            Assert.Equal(built, File.ReadAllText(shard));
-            Assert.Contains("Kept this PC's field-access map (individual.json)", output);
+
+            var merged = ShardJson.Load(shard);
+            Assert.Equal(FieldAccess.ReadOnly, merged["I|1|C1_G12"].Access);     // the safety fix arrived
+            Assert.Equal(FieldAccess.ReadWrite, merged["I|1|C1_G13"].Access);
+            Assert.Equal("live-probe", merged["I|1|C1_77"].Source);               // the dumper's row survived
+            Assert.Equal(3, merged.Count);
+            Assert.Contains("Kept 1 field-access entry from this PC's map (individual.json: 1)", output);
+            Assert.Contains("Took 1 corrected curated entry from the release", output);
             Assert.Equal("server 0.2.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
 
             (code, output, err) = await Run(new UpdateCommand.Options { Force = true, ResetFieldMap = true },
                 FakeSource.For("0.2.0", zip), Path.Combine(install, "cli"), "0.2.0");
             Assert.True(code == 0, output + err);
-            Assert.Equal("{}", File.ReadAllText(shard));
+            Assert.Equal(releaseShard, File.ReadAllText(shard));
         }
 
         [Fact]
@@ -310,16 +333,165 @@ namespace LacertMCP.Tests.Cli
             Assert.Contains("FAILED", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
         }
 
+        // H3: a new version that doesn't come up is rolled back (so the next run
+        // doesn't call the broken install "up to date").
         [Fact]
-        public async Task AlwaysOnServer_UnhealthyAfterRestart_Exit1()
+        public async Task AlwaysOnServer_UnhealthyAfterRestart_RollsBack_Exit1()
         {
             var install = MakeInstall("0.1.0");
             var svc = new FakeService(install) { Healthy = false };
-            var (code, output, _) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", MakeReleaseZip("0.2.0")),
+            var (code, output, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", MakeReleaseZip("0.2.0")),
                 Path.Combine(install, "cli"), "0.1.0", service: svc);
             Assert.Equal(1, code);
             Assert.Contains("did not answer", output);
-            Assert.Equal("server 0.2.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
+            Assert.Equal("server 0.1.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
+            Assert.Equal("cli 0.1.0", File.ReadAllText(Path.Combine(install, "cli", "lacerte-mcp.exe")));
+            Assert.Equal(new[] { "stop:server 0.1.0", "start:server 0.2.0", "health", "stop:server 0.2.0", "start:server 0.1.0", "health" }, svc.Calls);
+            Assert.Contains("Rolled back to v0.1.0", err);
+            Assert.Contains("rolled back to v0.1.0", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+            Assert.False(File.Exists(Path.Combine(install, ReleaseInstaller.PendingFileName)));
+        }
+
+        // L5: the swapped-in server must report the release's version.
+        [Fact]
+        public async Task WrongVersionAfterSwap_RollsBack()
+        {
+            var install = MakeInstall("0.1.0");
+            var zip = MakeReleaseZip("0.2.0", tweak: stage =>
+                File.WriteAllText(Path.Combine(stage, "server", "LacertMCP.Server.exe"), "server 0.1.9"));
+            var svc = new FakeService(install);
+            var (code, _, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", zip),
+                Path.Combine(install, "cli"), "0.1.0", service: svc);
+            Assert.Equal(1, code);
+            Assert.Contains("reports version 0.1.9, not v0.2.0", err);
+            Assert.Equal("server 0.1.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
+            // Never started the wrong build: stop, restore, start the old one.
+            Assert.Equal(new[] { "stop:server 0.1.0", "start:server 0.1.0", "health" }, svc.Calls);
+            Assert.Contains("rolled back to v0.1.0", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+        }
+
+        [Fact]
+        public void SelectZipAsset_RequiresExactName()
+        {
+            Assert.True(ReleaseVersion.TryParse("0.2.0", out var v));
+            var other = new ReleaseAsset("LacertMCP-v0.2.0-debug.zip", "https://x/a", 1, null);
+            Assert.Null(ReleaseInstaller.SelectZipAsset(new ReleaseInfo("v0.2.0", new[] { other }), v));
+            var exact = new ReleaseAsset("LacertMCP-v0.2.0.zip", "https://x/b", 1, null);
+            Assert.Same(exact, ReleaseInstaller.SelectZipAsset(new ReleaseInfo("v0.2.0", new[] { other, exact }), v));
+        }
+
+        // M2: an elevated launcher can't be stopped by a non-elevated update — abort
+        // before the swap, change nothing, and do NOT start a second launcher.
+        [Fact]
+        public async Task AlwaysOnServer_StopDenied_AbortsBeforeSwap_NoRestart()
+        {
+            var install = MakeInstall("0.1.0");
+            var svc = new FakeService(install) { StopDenied = "The server (LacertMCP.Server PID 7) runs with higher rights." };
+            var (code, _, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", MakeReleaseZip("0.2.0")),
+                Path.Combine(install, "cli"), "0.1.0", service: svc);
+            Assert.Equal(1, code);
+            Assert.Equal(new[] { "stop-denied" }, svc.Calls);
+            Assert.Contains("Sign out of Windows and back in", err);
+            Assert.Equal("server 0.1.0", File.ReadAllText(Path.Combine(install, "server", "LacertMCP.Server.exe")));
+            Assert.False(Directory.Exists(Path.Combine(install, "backups")));
+            Assert.Contains("couldn't stop the always-on server", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+        }
+
+        // L2: with a launcher, a server it didn't start (Claude Desktop's stdio
+        // server) gets the same refusal as without one.
+        [Fact]
+        public async Task AlwaysOnServer_ForeignStdioServer_Refused_UnlessAllowRunning()
+        {
+            var install = MakeInstall("0.1.0");
+            var zip = MakeReleaseZip("0.2.0");
+            var svc = new FakeService(install) { Foreign = new[] { 5150 } };
+            var (code, _, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", zip),
+                Path.Combine(install, "cli"), "0.1.0", service: svc);
+            Assert.Equal(1, code);
+            Assert.Contains("5150", err);
+            Assert.Empty(svc.Calls);
+            Assert.Contains("refused", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+
+            (code, _, err) = await Run(new UpdateCommand.Options { AllowRunning = true }, FakeSource.For("0.2.0", zip),
+                Path.Combine(install, "cli"), "0.1.0", service: svc);
+            Assert.True(code == 0, err);
+        }
+
+        // M1: an interrupted swap (marker left behind) is restored from its backup
+        // at the start of the next run, which then updates normally.
+        [Fact]
+        public async Task InterruptedUpdate_RestoredFromBackup_ThenUpdates()
+        {
+            var install = MakeInstall("0.1.0");
+            var backup = Path.Combine(install, "backups", "v0.1.0-20261101-030000");
+            WriteTree(backup, "0.1.0");
+            // A half-done swap: the server is new, the CLI is still old.
+            File.WriteAllText(Path.Combine(install, "server", "LacertMCP.Server.exe"), "server 0.2.0");
+            ReleaseInstaller.WritePending(install, new ReleaseInstaller.PendingUpdate(backup, "0.1.0", "0.2.0"));
+            var svc = new FakeService(install);
+
+            var (code, output, err) = await Run(new UpdateCommand.Options(), FakeSource.For("0.2.0", MakeReleaseZip("0.2.0")),
+                Path.Combine(install, "cli"), installed: null!, service: svc);
+
+            Assert.True(code == 0, output + err);
+            Assert.Contains("was interrupted", output);
+            Assert.Equal(new[] { "stop:server 0.2.0", "start:server 0.1.0", "stop:server 0.1.0", "start:server 0.2.0", "health" }, svc.Calls);
+            Assert.Contains("Updated v0.1.0 -> v0.2.0", output);
+            Assert.Equal("cli 0.2.0", File.ReadAllText(Path.Combine(install, "cli", "lacerte-mcp.exe")));
+            Assert.False(File.Exists(Path.Combine(install, ReleaseInstaller.PendingFileName)));
+            var log = File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName));
+            Assert.Contains("found an interrupted update (v0.1.0 -> v0.2.0)", log);
+            Assert.Contains("restored v0.1.0 after the interrupted update", log);
+        }
+
+        [Fact]
+        public async Task InterruptedUpdate_BackupGone_Reinstalls()
+        {
+            var install = MakeInstall("0.2.0");
+            ReleaseInstaller.WritePending(install, new ReleaseInstaller.PendingUpdate(Path.Combine(install, "backups", "gone"), "0.1.0", "0.2.0"));
+            var source = FakeSource.For("0.2.0", MakeReleaseZip("0.2.0"));
+            var (code, output, err) = await Run(new UpdateCommand.Options(), source, Path.Combine(install, "cli"), installed: null!);
+            Assert.True(code == 0, output + err);
+            Assert.Equal(1, source.Downloads); // not "Already up to date"
+            Assert.False(File.Exists(Path.Combine(install, ReleaseInstaller.PendingFileName)));
+        }
+
+        // L1: unexpected exceptions (I/O, network) reach update.log too.
+        [Fact]
+        public async Task UnexpectedException_LoggedAndExit1()
+        {
+            var install = MakeInstall("0.1.0");
+            var source = FakeSource.For("0.2.0", MakeReleaseZip("0.2.0"));
+            source.DownloadThrows = new IOException("disk full");
+            var (code, _, err) = await Run(new UpdateCommand.Options(), source, Path.Combine(install, "cli"), "0.1.0");
+            Assert.Equal(1, code);
+            Assert.Contains("Update failed: IOException: disk full", err);
+            Assert.Contains("FAILED: IOException: disk full", File.ReadAllText(Path.Combine(install, UpdateCommand.LogFileName)));
+        }
+
+        // L7: pruning goes by the stamp in the folder name, and never removes the backup just made.
+        [Fact]
+        public void PruneBackups_OrdersByNameStamp_KeepsCurrent()
+        {
+            var root = Directory.CreateDirectory(Path.Combine(_root, "backups")).FullName;
+            string Make(string name, DateTime created)
+            {
+                var d = Directory.CreateDirectory(Path.Combine(root, name)).FullName;
+                Directory.SetCreationTime(d, created);
+                return d;
+            }
+            // Creation times deliberately disagree with the stamps (e.g. a restored copy).
+            var oldest = Make("v0.1.0-20260101-030000", DateTime.Now);
+            var older = Make("v0.1.1-20260201-030000", DateTime.Now.AddDays(-30));
+            var newer = Make("v0.1.2-20260301-030000", DateTime.Now.AddDays(-60));
+            var current = Make("v0.1.3-20250101-030000", DateTime.Now.AddDays(-90)); // clock was wrong; still the one just made
+
+            ReleaseInstaller.PruneBackups(root, 3, current);
+
+            Assert.True(Directory.Exists(current));
+            Assert.True(Directory.Exists(newer));
+            Assert.True(Directory.Exists(older));
+            Assert.False(Directory.Exists(oldest));
         }
 
         [Fact]
@@ -352,15 +524,35 @@ namespace LacertMCP.Tests.Cli
         {
             var install = MakeInstall("0.1.0");
             var calls = new List<string>();
-            Func<string, (int, string)> schtasks = a => { calls.Add(a); return (0, "SUCCESS"); };
+            string? xml = null, xmlPath = null;
+            Func<string, (int, string)> schtasks = a =>
+            {
+                calls.Add(a);
+                var m = System.Text.RegularExpressions.Regex.Match(a, "/XML \"([^\"]+)\"");
+                if (m.Success) { xmlPath = m.Groups[1].Value; xml = File.ReadAllText(xmlPath); } // exists during the call
+                return (0, "SUCCESS");
+            };
 
             var (code, output, err) = await Run(new UpdateCommand.Options { Schedule = "daily", At = "02:30" }, new FakeSource(),
                 Path.Combine(install, "cli"), "0.1.0", schtasks: schtasks);
             Assert.True(code == 0, output + err);
             var cli = Path.Combine(Path.GetFullPath(install), "cli", "lacerte-mcp.exe");
-            Assert.Equal(
-                "/Create /F /SC DAILY /ST 02:30 /TN \"" + UpdateCommand.ScheduledTaskName + "\" /TR \"\\\"" + cli + "\\\" update\"",
-                calls[0]);
+            Assert.StartsWith("/Create /F /TN \"" + UpdateCommand.ScheduledTaskName + "\" /XML \"", calls[0]);
+            Assert.NotNull(xml);
+            // M4: a missed 02:30 run (PC asleep/off) runs as soon as possible, as the
+            // signed-in user, only while signed in, without elevation.
+            var doc = System.Xml.Linq.XDocument.Parse(xml!);
+            System.Xml.Linq.XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+            Assert.Equal("true", doc.Descendants(ns + "StartWhenAvailable").Single().Value);
+            Assert.Equal("InteractiveToken", doc.Descendants(ns + "LogonType").Single().Value);
+            Assert.Equal("LeastPrivilege", doc.Descendants(ns + "RunLevel").Single().Value);
+            Assert.False(string.IsNullOrWhiteSpace(doc.Descendants(ns + "UserId").Single().Value));
+            Assert.EndsWith("T02:30:00", doc.Descendants(ns + "StartBoundary").Single().Value);
+            Assert.Equal("1", doc.Descendants(ns + "DaysInterval").Single().Value);
+            Assert.Equal("false", doc.Descendants(ns + "DisallowStartIfOnBatteries").Single().Value);
+            Assert.Equal(cli, doc.Descendants(ns + "Command").Single().Value);
+            Assert.Equal("update", doc.Descendants(ns + "Arguments").Single().Value);
+            Assert.False(File.Exists(xmlPath)); // temp XML cleaned up
 
             (code, _, _) = await Run(new UpdateCommand.Options { Schedule = "off" }, new FakeSource(),
                 Path.Combine(install, "cli"), "0.1.0", schtasks: schtasks);
@@ -459,7 +651,8 @@ namespace LacertMCP.Tests.Cli
             Assert.Equal(0, UpdateCommand.RunSourceCheckout(mine, check: false, outW, errW));
             Assert.Equal("from github", File.ReadAllText(Path.Combine(mine, "new.txt")));
             Assert.Contains("Pulled 1 commit", outW.ToString());
-            Assert.Equal(0, UpdateCommand.RunSourceCheckout(mine, check: true, outW, errW));
+            // L6: a trailing backslash must not escape the closing quote of git -C "...".
+            Assert.Equal(0, UpdateCommand.RunSourceCheckout(mine + Path.DirectorySeparatorChar, check: true, outW, errW));
         }
 
         // ------------------------------------------------------------ helpers
@@ -474,6 +667,8 @@ namespace LacertMCP.Tests.Cli
             var env = new UpdateCommand.Deps(source, exeDir)
             {
                 InstalledVersionOverride = installed,
+                // The fake server exe's content says its version ("server 0.2.0").
+                ReadServerVersion = FakeServerVersion,
                 RunningServers = running ?? (_ => Array.Empty<int>()),
                 HealthTimeout = TimeSpan.FromSeconds(1),
             };
@@ -481,6 +676,14 @@ namespace LacertMCP.Tests.Cli
             if (schtasks != null) env.Schtasks = schtasks;
             var code = await UpdateCommand.RunAsync(o, env, outW, errW, CancellationToken.None);
             return (code, outW.ToString(), errW.ToString());
+        }
+
+        private static string? FakeServerVersion(string serverDir)
+        {
+            var exe = Path.Combine(serverDir, "LacertMCP.Server.exe");
+            if (!File.Exists(exe)) return null;
+            var text = File.ReadAllText(exe);
+            return text.StartsWith("server ", StringComparison.Ordinal) ? text.Substring("server ".Length) : null;
         }
 
         /// <summary>A release-layout install whose files say which version they are.</summary>
@@ -491,12 +694,16 @@ namespace LacertMCP.Tests.Cli
             return root;
         }
 
-        private string MakeReleaseZip(string version, bool omitServerExe = false, Action<ZipArchive>? extra = null)
+        private string MakeReleaseZip(string version, bool omitServerExe = false, Action<ZipArchive>? extra = null,
+            Action<string>? tweak = null)
         {
             var stage = Path.Combine(_root, "stage-" + Guid.NewGuid().ToString("N").Substring(0, 6));
             WriteTree(stage, version);
             File.WriteAllText(Path.Combine(stage, "README.md"), "readme " + version);
+            // The real zip carries the installer at its root (scripts/release.ps1).
+            File.WriteAllText(Path.Combine(stage, "install-http.ps1"), "installer " + version);
             if (omitServerExe) File.Delete(Path.Combine(stage, "server", "LacertMCP.Server.exe"));
+            tweak?.Invoke(stage);
             var zip = stage + ".zip";
             ZipFile.CreateFromDirectory(stage, zip);
             if (extra != null)
@@ -561,6 +768,10 @@ namespace LacertMCP.Tests.Cli
             public List<string> Calls { get; } = new List<string>();
             public bool Healthy { get; set; } = true;
             public Action? OnStop { get; set; }
+            public IReadOnlyList<int> Foreign { get; set; } = Array.Empty<int>();
+
+            /// <summary>Non-null = Stop refuses like an elevated launcher would.</summary>
+            public string? StopDenied { get; set; }
 
             private string ServerExe
             {
@@ -573,8 +784,15 @@ namespace LacertMCP.Tests.Cli
 
             public ServiceInfo? Find(string serverDir) => new ServiceInfo(Path.Combine(_install, "LacertMCP.vbs"), 8767);
 
+            public IReadOnlyList<int> ForeignServers(ServiceInfo service, string serverDir) => Foreign;
+
             public void Stop(ServiceInfo service, string serverDir)
             {
+                if (StopDenied != null)
+                {
+                    Calls.Add("stop-denied");
+                    throw new ServiceStopException(StopDenied);
+                }
                 Calls.Add("stop:" + ServerExe);
                 OnStop?.Invoke();
             }
@@ -595,6 +813,7 @@ namespace LacertMCP.Tests.Cli
 
             public int Downloads { get; private set; }
             public string? RequestedTag { get; private set; }
+            public Exception? DownloadThrows { get; set; }
 
             public static FakeSource For(string version, string zip, string? sha256Override = null)
             {
@@ -612,6 +831,7 @@ namespace LacertMCP.Tests.Cli
             public Task DownloadAsync(ReleaseAsset asset, string destinationPath, CancellationToken ct)
             {
                 Downloads++;
+                if (DownloadThrows != null) throw DownloadThrows;
                 File.Copy(_zip!, destinationPath);
                 return Task.CompletedTask;
             }

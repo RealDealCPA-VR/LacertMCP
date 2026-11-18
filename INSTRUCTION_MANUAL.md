@@ -942,8 +942,8 @@ Keeps the install current with what is published on GitHub. A new version exists
 | `--check` | bool | `false` | Only report; exit `2` if an update is available. Changes nothing. |
 | `--tag` | string | latest | Install a specific release (`0.2.1` or `v0.2.1`); allows downgrades. |
 | `--force` | bool | `false` | Reinstall even when already current. |
-| `--reset-field-map` | bool | `false` | Take the release's field-access map instead of keeping the one built on this PC. |
-| `--allow-running` | bool | `false` | Stdio installs only: swap while `LacertMCP.Server.exe` runs (restart the host right after). |
+| `--reset-field-map` | bool | `false` | Take the release's field-access map as-is instead of merging in the entries built on this PC. |
+| `--allow-running` | bool | `false` | Swap while a `LacertMCP.Server.exe` the launcher didn't start (a stdio server) runs from this install; restart that host right after. |
 | `--install-dir` | path | the install this CLI runs from | Install root (the folder holding `server\` and `cli\`). |
 | `--repo` | owner/name | `RealDealCPA-VR/LacertMCP` | Where releases come from. |
 | `--schedule` | `daily` \| `off` | — | Add / remove the per-user scheduled task **LacertMCP auto-update**. |
@@ -951,10 +951,13 @@ Keeps the install current with what is published on GitHub. A new version exists
 
 How a release install is updated:
 
-1. The latest release is looked up and the zip is downloaded to `%TEMP%`. Its size and SHA-256 are checked against the values GitHub publishes, and the zip is checked for the `server\` + `cli\` shape. Nothing in the install changes until all of that passes.
-2. If `install-http.ps1`'s Startup launcher runs this install, the launcher and server are stopped. Without the launcher (a stdio server under Claude Desktop), a running server makes the update refuse, unless `--allow-running` is passed.
-3. `server\`, `cli\` and `dumper\` are copied to `backups\v<old>-<time>\` (the newest 3 are kept), then swapped. The writable-field map you built with the dumper is kept. Files Windows has locked are renamed to `*.old-update` and deleted next run. If anything fails, the backup is put back.
-4. The launcher is restarted (on a failure, with the old version) and `/healthz` is polled for up to 45 s. A line goes to `update.log` in the install folder.
+0. If `.update-pending` is in the install, an earlier update was interrupted mid-swap (console closed, reboot, power loss). Its backup is restored first (logged in `update.log`), then the update carries on normally.
+1. The latest release is looked up (prereleases such as `v0.3.0-rc.1` only with `--tag`) and exactly `LacertMCP-v<version>.zip` is downloaded to `%TEMP%`. Its size and SHA-256 are checked against the values GitHub publishes, and the zip is checked for the `server\` + `cli\` shape. Nothing in the install changes until all of that passes.
+2. If `install-http.ps1`'s Startup launcher runs this install, the launcher loop and the server it started are stopped; a server it didn't start (a stdio server under Claude Desktop), with or without the launcher, makes the update refuse unless `--allow-running` is passed. If the launcher or its server can't be stopped (it was started elevated), the update stops here, changes nothing and starts no second launcher: sign out of Windows and back in, then retry.
+3. `server\`, `cli\` and `dumper\` are copied to `backups\v<old>-<time>\` (the newest 3 are kept, by the time in the folder name), then swapped. This PC's writable-field map is merged into the release's per entry (the installer uses the same rule): entries built here by the dumper or `field-access set`, and entries the release doesn't have, are kept; curated entries (`source` `sdk-pdf` / `spec`) come from the release, so a corrected classification arrives. Files Windows has locked are renamed to `*.old-update` and deleted next run. If anything fails, the backup is put back.
+4. The new server must report the release's version, the launcher is restarted through Explorer (as at logon: the update console's environment, rights and priority don't carry over) and `/healthz` is polled for up to 45 s. If the version is wrong or the server doesn't answer, the backup is restored and restarted, and `update.log` records `rolled back to v<old>`; exit 1. Every run, including failures and refusals, adds a line to `update.log` in the install folder.
+
+The `--schedule daily` task runs as you, only while you're signed in, without elevation. If the PC was asleep or off at the set time, it runs as soon as you're signed in again.
 
 From a git working copy, the same command fast-forwards the current branch to its upstream and prints the rebuild command instead.
 

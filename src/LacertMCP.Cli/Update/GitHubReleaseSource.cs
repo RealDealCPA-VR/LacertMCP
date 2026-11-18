@@ -53,10 +53,21 @@ namespace LacertMCP.Cli.Update
     }
 
     /// <summary>Raised for an expected, operator-explainable update failure (exit 1, no stack).</summary>
-    public sealed class UpdateException : Exception
+    public class UpdateException : Exception
     {
         public UpdateException(string message) : base(message) { }
         public UpdateException(string message, Exception inner) : base(message, inner) { }
+    }
+
+    /// <summary>
+    /// The always-on launcher or its server can't be stopped by this user (it was
+    /// started elevated). Raised before the swap; the update then changes nothing
+    /// and starts no second launcher.
+    /// </summary>
+    public sealed class ServiceStopException : UpdateException
+    {
+        public ServiceStopException(string message) : base(message) { }
+        public ServiceStopException(string message, Exception inner) : base(message, inner) { }
     }
 
     /// <summary>

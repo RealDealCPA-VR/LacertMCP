@@ -44,8 +44,60 @@ namespace LacertMCP.Cli.Commands
             cmd.AddCommand(BuildListCommand());
             cmd.AddCommand(BuildSetCommand());
             cmd.AddCommand(BuildDiscoverCommand());
+            cmd.AddCommand(BuildMergeCommand());
 
             return cmd;
+        }
+
+        // ---- merge (installer plumbing) ---------------------------------------------
+
+        /// <summary>
+        /// <c>field-access merge --from &lt;old base dir&gt; --into &lt;new base dir&gt;</c> —
+        /// carries this PC's entries from a previous install's <c>base\</c> shards into a
+        /// freshly copied release's, by the same per-entry rule <c>lacerte-mcp update</c>
+        /// uses (<see cref="Update.FieldMapMerge"/>). Hidden: <c>install-http.ps1</c> calls it.
+        /// </summary>
+        private static Command BuildMergeCommand()
+        {
+            var merge = new Command("merge",
+                "Merge a previous install's base field-access shards into a new release's (used by install-http.ps1).")
+            {
+                IsHidden = true,
+            };
+            var fromOpt = new Option<string>("--from", "The previous install's FieldAccessMap\\base folder (this PC's map).") { IsRequired = true };
+            var intoOpt = new Option<string>("--into", "The new release's FieldAccessMap\\base folder; rewritten in place.") { IsRequired = true };
+            merge.AddOption(fromOpt);
+            merge.AddOption(intoOpt);
+            merge.SetHandler((context) =>
+            {
+                context.ExitCode = RunMerge(
+                    context.ParseResult.GetValueForOption(fromOpt)!,
+                    context.ParseResult.GetValueForOption(intoOpt)!,
+                    Console.Out, Console.Error);
+            });
+            return merge;
+        }
+
+        public static int RunMerge(string fromDir, string intoDir, TextWriter writer, TextWriter stderr)
+        {
+            if (!Directory.Exists(intoDir))
+            {
+                stderr.WriteLine($"--into folder not found: {intoDir}");
+                return 1;
+            }
+            try
+            {
+                var result = Update.FieldMapMerge.Merge(fromDir, intoDir);
+                var lines = result.Describe();
+                if (lines.Count == 0) writer.WriteLine("Field-access map: nothing on this PC to carry over; using the release's map.");
+                foreach (var line in lines) writer.WriteLine(line);
+                return 0;
+            }
+            catch (Exception ex) when (ex is Update.UpdateException || ex is IOException || ex is UnauthorizedAccessException)
+            {
+                stderr.WriteLine("Field-access merge failed: " + ex.Message);
+                return 1;
+            }
         }
 
         // ---- list -------------------------------------------------------------------
